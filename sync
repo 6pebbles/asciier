@@ -1,0 +1,10 @@
+#!/bin/sh
+# Copy this upstream into the dotfiles mirror; dotsync then deploys the mirror into $HOME.
+# Files removed here are not removed there: delete them from ~/dotfiles by hand.
+set -eu
+here=$(cd "$(dirname -- "$0")" && pwd)
+home="${DOTFILES_HOME:-$HOME/dotfiles/home/$(id -un)}"
+[ -d "$home" ] || { echo "sync: no dotfiles mirror at $home" >&2; exit 1; }
+
+rsync -a --exclude=__pycache__ "$here/bin/" "$home/.local/bin/"
+rsync -a --include='*.py' --exclude='*' "$here/lib/" "$home/.local/lib/"

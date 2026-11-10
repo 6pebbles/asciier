@@ -1,0 +1,565 @@
+#!/usr/bin/env python3
+"""ascii-convert [options] INPUT: an image or a video drawn as ascii-viewer draws
+it, in the kitty theme's colours and font; --help lists the options.
+
+Output, beside INPUT unless --output names it: INPUT-ascii.png for an image, INPUT-ascii.mp4
+(H.264, the source's audio) for a video or an animation, INPUT-ascii-<seconds>s.png for a
+video's frame (--at, also shown in kitty: ascii-viewer's s).
+
+Size: 20 px characters (12 x 27 px cells) and 160 columns; --columns sets the columns, --width
+or --height a size, covered by as many columns as it takes, and --columns with a size scales
+the font so the columns fit (--fit). A video or an --at frame without a size gets 1920 px on
+the long side in its own shape (web_size), so a 4K and a 720p source give the same characters.
+The size is exact (a centred crop, or background bands); a video's rounds up to even numbers.
+
+Video: ffmpeg decodes; worker processes find the cells, several frames in flight; one thread
+paints each frame from cached glyph tiles, another streams the frames in order into ffmpeg,
+which encodes H.264 on the iGPU (VAAPI) when it can, else with libx264. Ctrl-C stops early,
+keeping the part converted."""
+
+import argparse
+import concurrent.futures
+import copy
+import functools
+import io
+import json
+import math
+import os
+import queue
+import signal
+import subprocess
+import sys
+import threading
+from fractions import Fraction
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import ascii_density as density  # noqa: E402
+from ascii_chafa import CELL_PX  # noqa: E402
+from ascii_image import TooLarge, flatten, is_svg, open_picture, raster_width  # noqa: E402
+from ascii_term import Term, font_path, grid, kitty_terminal  # noqa: E402
+from ascii_theme import COLOURS, LIMITS, extremes, kitty_theme_index, rgb, theme, tone_table  # noqa: E402
+
+SIZE = 20  # px; a column is one cell of this font
+VAAPI = "/dev/dri/renderD128"  # the iGPU's render node, for the video encode
+# Light denoise of video frames, half of hqdn3d's defaults: camera grain otherwise makes chafa
+# pick other characters in still areas from frame to frame, a flicker the encoder pays for.
+# Spatial luma, chroma, then temporal luma, chroma; the spatial values, for source px, are
+# divided by the downscale the denoise runs after (grain averages down, detail per px grows).
+DENOISE = (2, 1.5, 3, 2.25)
+
+FULL = (0.0, 0.0, 100.0, 100.0)  # --crop's default: the whole picture
+COLUMNS, PX = (8, 2000), (16, 16384)  # --columns, and --width and --height
+
+
+def ranged(low, high, kind=int):
+    """An argparse type: a number from low to high."""
+    def parse(text):
+        try:
+            n = kind(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+        if not low <= n <= high:
+            raise argparse.ArgumentTypeError(f"{text} is outside {low}..{high}")
+        return n
+    return parse
+
+
+def crop_spec(text):
+    """--crop X,Y,W,H: four numbers, percent of the picture, W and H above 0."""
+    try:
+        x, y, w, h = (float(n) for n in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not X,Y,W,H: {text!r}") from None
+    if w <= 0 or h <= 0:
+        raise argparse.ArgumentTypeError(f"W and H must be above 0: {text!r}")
+    return x, y, w, h
+
+
+parser = argparse.ArgumentParser(prog="ascii-convert", description="Render an image or a video as ascii-viewer draws it.")
+look = parser.add_argument_group("look")
+look.add_argument("-l", "--level", type=ranged(*LIMITS["level"]), default=0, metavar="N",
+                  help="%d..%d: up raises the black point (dark areas go blank), down lowers the white point" % LIMITS["level"])
+look.add_argument("--contrast", type=ranged(*LIMITS["contrast"]), default=0, metavar="N",
+                  help="%d..%d, as mpv's contrast" % LIMITS["contrast"])
+look.add_argument("-s", "--saturation", type=ranged(*LIMITS["saturation"]), default=100, metavar="PERCENT",
+                  help="how much colour a cell needs to take a hue: lower, more grey (default 100)")
+look.add_argument("--skin", choices=("grey", "theme"), default="grey",
+                  help="skin tones grey (default) or in the theme's warm colours")
+look.add_argument("-g", "--glyphs", choices=density.MODES, default="mixed",
+                  help="mixed (shapes on edges, dithered density on flat areas; default), density, shape")
+look.add_argument("-m", "--mono", action="store_true", help="the theme's brightest colour on its darkest")
+look.add_argument("-b", "--bold", action="store_true", help="the font's heaviest weight")
+look.add_argument("-t", "--theme", metavar="NAME|FILE",
+                  help="a kitty theme by name or .conf file; colours it leaves out come from the current")
+look.add_argument("--crop", type=crop_spec, default=FULL, metavar="X,Y,W,H",
+                  help="corner and size in percent of the picture; past its borders is background "
+                       "(a negative X: --crop=-10,0,120,100)")
+output = parser.add_argument_group("output")
+output.add_argument("-o", "--output", metavar="PATH", help="the file to write (default: beside INPUT)")
+output.add_argument("-c", "--columns", type=ranged(*COLUMNS), metavar="N", help="text width in columns")
+# a size for a wallpaper at the screen's own resolution: a wallpaper program draws it 1:1,
+# while at any other size it is resampled and thin glyphs blur
+output.add_argument("-W", "--width", type=ranged(*PX), metavar="PX", help="output width")
+output.add_argument("-H", "--height", type=ranged(*PX), metavar="PX", help="output height")
+output.add_argument("--fit", choices=("contain", "cover"), default="contain",
+                    help="with --columns and a size: the whole grid inside (default) or the canvas filled")
+output.add_argument("-a", "--at", type=ranged(0, math.inf, float), metavar="SECONDS",
+                    help="a video's frame at that time, as a PNG")
+parser.add_argument("input")
+
+
+@functools.cache
+def theme_text(name):
+    """A kitty theme by name: its .conf from kitty's own cache of the collection (the file
+    kitten themes --dump-theme prints, without its 17 ms start), else from kitten."""
+    try:
+        with kitty_theme_index() as (entries, read):
+            return read(next(t for t in entries if t["name"] == name))
+    except (OSError, StopIteration, ValueError, KeyError):
+        pass
+    r = subprocess.run(["kitten", "themes", "--dump-theme", name], capture_output=True, text=True)
+    if r.returncode or not COLOURS.search(r.stdout):
+        sys.exit(f"ascii-convert: no kitty theme {name!r}: {r.stderr.strip() or 'no colours in it'}")
+    return r.stdout
+
+
+def theme_colours(args):
+    """The colours args draws in: the current kitty theme, --theme over it, then mono's two."""
+    colours = theme()
+    if args.theme:
+        text = Path(args.theme).read_text() if Path(args.theme).is_file() else theme_text(args.theme)
+        colours |= theme(text)
+    if args.mono:  # two colours, the theme's darkest and brightest, for its full range
+        colours["background"], colours["foreground"] = extremes(colours)
+    return colours
+
+
+class Style:
+    """Everything a frame needs to be drawn: theme, font, layout. Built once, then shared."""
+
+    def __init__(self, args, size):
+        self.args = args
+        self.theme = theme_colours(args)
+        self.term = Term(self.theme, args.saturation, args.skin == "grey")  # its palette, recolour and luma, as the viewer's
+        self.path = font_path(args.bold)
+        self.set_font(SIZE)
+        iw, ih = size
+        if args.columns:
+            self.cols = args.columns
+        elif args.width or args.height:  # enough columns to cover both sizes given; rows follow the picture's shape
+            self.cols = max(math.ceil(args.width / self.cell_w) if args.width else 0,
+                            math.ceil(args.height * iw / (ih * self.cell_w)) if args.height else 0)
+        else:
+            self.cols = 160
+        self.ratio = self.cell_w / self.cell_h  # chafa's font ratio, from the 20 px font
+        self.rows = None
+
+    def tile(self, char, colour):
+        """One cell with char drawn in colour on the background, drawn once and then reused: a
+        frame is pasted together from these instead of drawing text, many times faster."""
+        key = (char, colour)
+        if key not in self.tiles:
+            tile = Image.new("RGB", (math.ceil(self.cell_w), math.ceil(self.cell_h)), self.theme["background"])
+            ImageDraw.Draw(tile).text((0, 0), char, font=self.font, fill=colour)
+            self.tiles[key] = tile
+        return self.tiles[key]
+
+    def set_font(self, size):
+        self.tiles = {}
+        self.atlas = None  # tile_rows() builds it again for this size
+        self.font = ImageFont.truetype(self.path, size)
+        ascent, descent = self.font.getmetrics()
+        self.cell_w, self.cell_h = self.font.getlength("M"), ascent + descent
+
+    def layout(self, rows):
+        """Take the row count from the first frame's cells; with --columns and a size both
+        given, the font size that fits them."""
+        self.rows = rows
+        args = self.args
+        if args.columns and (args.width or args.height):  # the font scales so the columns fit, glyphs keep their shape
+            fit = [args.width / (self.cols * self.cell_w)] if args.width else []
+            fit += [args.height / (rows * self.cell_h)] if args.height else []
+            # contain: the tighter fit, the whole grid inside, background in the room left
+            # over; cover: the looser, the grid fills the canvas and the edge cells are cut
+            self.set_font(SIZE * (max(fit) if args.fit == "cover" else min(fit)))
+
+    def size(self, even=False):
+        w = self.args.width or round(self.cols * self.cell_w)
+        h = self.args.height or round(self.rows * self.cell_h)
+        return (w + w % 2, h + h % 2) if even else (w, h)
+
+    def art(self, picture):
+        """chafa's cells for a picture, as a Grid (ascii_chafa: libchafa in-process). The
+        picture shrinks to chafa's 8 px a cell first, so the tone map and chafa itself only see
+        what they use."""
+        width = self.cols * CELL_PX
+        if picture.width > width:
+            picture = picture.resize((width, max(1, round(picture.height * width / picture.width))), Image.BOX)
+        table = tone_table(self.args.level, self.args.contrast)
+        if table:
+            picture = picture.point(list(table) * 3)
+        return grid(picture.tobytes(), picture.width, picture.height, self.cols, None, self.ratio, self.term.recolour,
+                    self.term.luma, self.args.glyphs, self.path, self.args.mono, work=0.5)
+
+    def tile_rows(self, grid):
+        """Each cell's row in self.atlas: the tiles the cells use, drawn by tile() and kept as
+        RGBX pixels, one uint32 each, (n, tile height, tile width). Row 0 is the background,
+        for blank cells: spaces, and glyphs in palette[0]'s colour (ANSI black is chafa's ':'
+        for black cells, left blank)."""
+        colours = [*self.term.palette, self.theme["foreground"]]  # by slot; FG last
+        if self.atlas is None:
+            bg = np.frombuffer(bytes(rgb(self.theme["background"])) + b"\xff", np.uint32)[0]
+            self.atlas = np.full((1, math.ceil(self.cell_h), math.ceil(self.cell_w)), bg, np.uint32)
+            self.atlas_t = None
+            self.atlas_at = np.full(len(colours) * 128, -1, np.int32)  # slot * 128 + char: atlas row
+            for slot, colour in enumerate(colours):
+                if colour == colours[0]:
+                    self.atlas_at[slot * 128 : (slot + 1) * 128] = 0
+            self.atlas_at[np.arange(len(colours)) * 128 + ord(" ")] = 0
+        key = grid.slots.astype(np.int32) * 128 + grid.chars
+        at = self.atlas_at[key]
+        if (at < 0).any():
+            new = np.unique(key[at < 0])
+            tiles = [np.asarray(self.tile(chr(k % 128), colours[k // 128]).convert("RGBX")).view(np.uint32)[..., 0]
+                     for k in new.tolist()]
+            self.atlas_at[new] = np.arange(len(self.atlas), len(self.atlas) + len(new))
+            self.atlas, self.atlas_t = np.concatenate([self.atlas, tiles]), None
+            at = self.atlas_at[key]
+        return at
+
+    def paint_array(self, grid, even=False):
+        """paint()'s pixels as a (height, width) array of RGBX in uint32, put together with
+        numpy: a row of cells is one take of tiles from the atlas. The same pixels as pasting
+        each tile in turn, the overlap included where a cell is a fraction of a pixel narrower
+        than its tile."""
+        at = self.tile_rows(grid)
+        if self.atlas_t is None:  # (tile height, n, tile width): a row of tiles is one take
+            self.atlas_t = np.ascontiguousarray(self.atlas.transpose(1, 0, 2))
+        th, tw = self.atlas.shape[1:]
+        rows, cols = at.shape
+        full = np.empty((rows, th, cols, tw), np.uint32)
+        for r in range(rows):
+            np.take(self.atlas_t, at[r], axis=1, out=full[r])
+        full = full.reshape(rows * th, cols * tw)
+        width = round(cols * self.cell_w)
+        if width != cols * tw:  # a fractional cell width: tiles are ceil(cell_w) wide, cells narrower
+            start = np.array([round(x * self.cell_w) for x in range(cols + 1)])
+            x = np.arange(width)
+            cell = np.searchsorted(start, x, side="right") - 1
+            img = np.take(full, cell * tw + x - start[cell], axis=1)
+            # each tile reaches into the next cell's first column; the next tile covers that,
+            # unless its cell is blank and gets none
+            prev = np.maximum(cell - 1, 0)
+            over = np.flatnonzero((cell > 0) & (x - start[prev] < tw))
+            if len(over):
+                blank = np.repeat(at[:, cell[over]] == 0, th, axis=0)
+                under = np.take(full, prev[over] * tw + x[over] - start[prev[over]], axis=1)
+                img[:, over] = np.where(blank, under, img[:, over])
+            full = img
+        if th != self.cell_h:  # a fractional cell height: only scaled() previews have one
+            start = np.array([round(y * self.cell_h) for y in range(rows + 1)])
+            y = np.arange(start[-1])
+            cell = np.searchsorted(start, y, side="right") - 1
+            full = np.take(full, cell * th + y - start[cell], axis=0)
+        w, h = self.size(even)
+        if full.shape == (h, w):
+            return full
+        # centred crop to the exact size; a short image gets background bands
+        out = np.full((h, w), self.atlas[0, 0, 0], np.uint32)
+        x0, y0 = (w - full.shape[1]) // 2, (h - full.shape[0]) // 2
+        sx, sy, dx, dy = max(-x0, 0), max(-y0, 0), max(x0, 0), max(y0, 0)
+        cw, ch = min(full.shape[1] - sx, w - dx), min(full.shape[0] - sy, h - dy)
+        out[dy : dy + ch, dx : dx + cw] = full[sy : sy + ch, sx : sx + cw]
+        return out
+
+    def paint(self, grid, even=False):
+        """The cells drawn in the theme, cropped or padded to the output size."""
+        px = self.paint_array(grid, even)
+        return Image.frombuffer("RGBX", (px.shape[1], px.shape[0]), px, "raw", "RGBX", 0, 1).convert("RGB")
+
+    def scaled(self, scale):
+        """A copy that draws the same cells scale times the size, font and output alike: the
+        render page's preview at the size kitty shows it, not the full size shrunk."""
+        twin = copy.copy(self)
+        twin.args = copy.copy(self.args)
+        twin.args.width, twin.args.height = (max(1, round(n * scale)) for n in self.size())
+        twin.set_font(self.font.size * scale)
+        # the cells keep the full size's layout, scaled, fractions and all: the font's whole-px
+        # line height would make 72 rows 4% taller at 12 px, cropping rows the file keeps
+        twin.cell_w, twin.cell_h = self.cell_w * scale, self.cell_h * scale
+        return twin
+
+
+def out_name(src, at=None, video=False):
+    """The output file beside src: INPUT-ascii.png, INPUT-ascii.mp4 for a video,
+    INPUT-ascii-<at>s.png for --at."""
+    src = Path(src)
+    tail = f"-ascii-{at:g}s.png" if at is not None else "-ascii.mp4" if video else "-ascii.png"
+    return str(src.with_name(src.stem + tail))
+
+
+def ppm_frame(f):
+    """Next PPM frame of an ffmpeg stream as ((width, height), RGB bytes); None at the end."""
+    if not f.readline():
+        return None
+    w, h = map(int, f.readline().split())
+    f.readline()  # maxval
+    data = f.read(w * h * 3)
+    return ((w, h), data) if len(data) == w * h * 3 else None
+
+
+def read_ppm(f):
+    """Next frame of an ffmpeg PPM stream as a Pillow image; None at the end."""
+    frame = ppm_frame(f)
+    return Image.frombytes("RGB", *frame) if frame else None
+
+
+def crop_rect(size, spec):
+    """The --crop in px: (left, top, right, bottom) for (X, Y, W, H), percent of a picture of
+    size, any values: a window reaching past the picture's borders takes background there."""
+    w, h = size
+    x, y, cw, ch = spec
+    left, top = round(w * x / 100), round(h * y / 100)
+    return left, top, left + max(1, round(w * cw / 100)), top + max(1, round(h * ch / 100))
+
+
+def crop(picture, args):
+    """The picture through --crop. Outside the picture Pillow fills black, which the ascii
+    tools leave blank: chafa draws black cells as ANSI black, and those stay empty."""
+    if args.crop == FULL:
+        return picture
+    return picture.crop(crop_rect(picture.size, args.crop))
+
+
+def crop_filter(args, size):
+    """The --crop as ffmpeg filters (and a trailing comma) for frames of size, or nothing: pad
+    with black to take in the window, then crop it."""
+    if args.crop == FULL:
+        return ""
+    left, top, right, bottom = crop_rect(size, args.crop)
+    pad_l, pad_t = max(0, -left), max(0, -top)
+    pad_w, pad_h = max(size[0], right) + pad_l, max(size[1], bottom) + pad_t
+    return (f"pad={pad_w}:{pad_h}:{pad_l}:{pad_t}:black,"
+            f"crop={right - left}:{bottom - top}:{left + pad_l}:{top + pad_t},")
+
+
+def frame_at(path, seconds):
+    r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-ss", str(seconds), "-i", path, "-frames:v", "1",
+                        "-f", "image2pipe", "-c:v", "ppm", "-"], capture_output=True)
+    picture = read_ppm(io.BytesIO(r.stdout))
+    if picture is None:
+        sys.exit(r.stderr.decode().strip() or f"ascii-convert: no frame at {seconds} s in {path}")
+    return picture
+
+
+STYLE = None  # each worker process's copy
+
+
+def worker_init(style):
+    global STYLE
+    STYLE = style
+    signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C is the parent's to handle
+
+
+def worker_art(frame):
+    """A worker process's part of a video frame (ppm_frame's size and RGB): its cells. A Grid
+    is some 13 KB to send back, where the painted frame would be 8 MB."""
+    return STYLE.art(Image.frombytes("RGB", *frame))
+
+
+def convert_video(args, src, out, first):
+    """src to out; first is src's frame at 0 s, uncropped."""
+    info = json.loads(subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=avg_frame_rate,nb_frames,duration:format=duration", "-of", "json", src], capture_output=True, text=True).stdout or "{}")
+    stream = (info.get("streams") or [{}])[0]
+    try:
+        fps = Fraction(stream.get("avg_frame_rate", "0/0"))
+    except (ValueError, ZeroDivisionError):
+        fps = Fraction(0)
+    fps = fps or Fraction(25)
+    # the frames the decode below makes at fps (a variable-rate source's own count would be off):
+    # the video's length, else the file's, which is the longest stream's (audio may run on)
+    for length in (stream.get("duration"), info.get("format", {}).get("duration")):
+        try:
+            total = round(float(length) * fps)
+            break
+        except (TypeError, ValueError):
+            pass
+    else:
+        total = int(stream.get("nb_frames") or 0)
+
+    cropped = crop(first, args)
+    style = Style(args, cropped.size)
+    style.layout(len(style.art(cropped)))
+    w, h = style.size(even=True)
+
+    luma, chroma, tluma, tchroma = DENOISE
+    shrink = max(1, cropped.width / (style.cols * CELL_PX))
+    denoise = f"hqdn3d={luma / shrink:.3g}:{chroma / shrink:.3g}:{tluma}:{tchroma}"
+    # frames come out upright: ffmpeg applies a video's rotation itself
+    decode = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-nostdin", "-i", src, "-an", "-sn",
+         # fps: the rate the encoder is told, so a variable-rate source keeps its speed
+         "-vf", f"{crop_filter(args, first.size)}fps={fps.numerator}/{fps.denominator},"
+                f"scale='min(iw,{style.cols * CELL_PX})':-2,{denoise}", "-f", "image2pipe", "-c:v", "ppm", "-"],
+        stdout=subprocess.PIPE,
+        start_new_session=True,  # Ctrl-C reaches only this process, which then stops them in order
+    )
+    # VAAPI: the encode takes about a fifth of libx264's CPU; qp 24 matches libx264 -crf 20 on
+    # ASCII frames (measured SSIM), sharp glyphs cost bits either way
+    if vaapi(w, h):
+        device, codec = ["-vaapi_device", VAAPI], ["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-qp", "24"]
+    else:
+        device, codec = [], ["-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p"]
+    # rgb0: paint_array's RGBX as it is (the encoded video is the same as from RGB). Audio
+    # shorter than the video is padded with silence to a second past the video's expected end,
+    # and -shortest ends the file with the video; unbounded padding lets the sound run on past
+    # the video under -shortest (3.23 s of it on 3 s of video, encoded with VAAPI)
+    pad = f"apad=whole_dur={float(total / fps) + 1:.3f}" if total else "apad"
+    encode = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-y", *device, "-f", "rawvideo", "-pix_fmt", "rgb0", "-s", f"{w}x{h}",
+         "-r", f"{fps.numerator}/{fps.denominator}", "-i", "-", "-i", src, "-map", "0:v", "-map", "1:a?",
+         *codec, "-c:a", "aac", "-af", pad, "-shortest", out],
+        stdin=subprocess.PIPE,
+        start_new_session=True,
+    )
+    # a thread each to paint and to write: the encoder takes a frame while the next is painted
+    window = (os.cpu_count() or 4) * 2  # frames in flight: a bound on memory, enough to keep every core busy
+    drawn, painted = queue.Queue(window), queue.Queue(2)  # in frame order: the workers' futures, frames to write
+    stop = threading.Event()  # the encoder quit or a frame failed: read no more, and let the rest go
+    done, stopped, failure = 0, False, None
+
+    def paint():
+        nonlocal failure
+        while (future := drawn.get()) is not None:
+            try:
+                if not stop.is_set():
+                    painted.put(style.paint_array(future.result(), even=True))
+            except BaseException as e:  # raised in the main thread once the pipes are closed
+                failure = e
+                stop.set()
+        painted.put(None)
+
+    def write():
+        nonlocal done, failure
+        while (frame := painted.get()) is not None:
+            try:
+                if not stop.is_set():
+                    encode.stdin.write(frame)
+                    done += 1
+            except BrokenPipeError:  # the encoder quit: its exit code says why
+                stop.set()
+            except BaseException as e:
+                failure = e
+                stop.set()
+
+    # Ctrl-C stops reading new frames; those in flight are drawn and written, then ffmpeg
+    # finishes the file, so what was converted up to there plays, sound included, and nothing
+    # breaks a pipe. The workers get a copy of the style: one started later would otherwise
+    # copy it while paint() adds glyph tiles to it
+    with concurrent.futures.ProcessPoolExecutor(initializer=worker_init, initargs=(copy.deepcopy(style),)) as pool:
+        threads = [threading.Thread(target=paint, daemon=True), threading.Thread(target=write, daemon=True)]
+        for thread in threads:
+            thread.start()
+        shown = None  # the count last printed, here: a daemon thread on stderr as Python exits can abort it
+        try:
+            while not stop.is_set() and (frame := ppm_frame(decode.stdout)) is not None:
+                drawn.put(pool.submit(worker_art, frame))
+                if done != shown:
+                    shown = done
+                    print(f"\r{done}/{total or '?'} frames", end="", file=sys.stderr, flush=True)
+        except KeyboardInterrupt:
+            stopped = True
+            decode.kill()  # now: should a second Ctrl-C end this process, no decoder is left writing to it
+        finally:  # a second Ctrl-C in here leaves at once: the threads are daemons
+            drawn.put(None)
+            for thread in threads:
+                thread.join()
+    print(f"\r{done}/{total or '?'} frames", file=sys.stderr)
+    decode.kill()
+    decode.wait()
+    try:
+        encode.stdin.close()
+    except BrokenPipeError:
+        pass
+    code = encode.wait()
+    if failure:
+        raise failure
+    if code:
+        sys.exit("ascii-convert: ffmpeg could not encode the video")
+    if stopped:
+        print(f"stopped at frame {done}: {out} holds the part converted", file=sys.stderr)
+        print(out)
+        sys.exit(130)
+
+
+def vaapi(width, height):
+    """Whether the iGPU encodes H.264 at width x height here: a render node, and a one-frame
+    encode on it at that size that works; libx264 otherwise. A node of another vendor's GPU, a
+    missing VA driver, or a size the encoder does not take fails it (one iGPU's: 128 to
+    4096 px a side)."""
+    if not os.path.exists(VAAPI):
+        return False
+    r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-vaapi_device", VAAPI, "-f", "lavfi",
+                        "-i", f"color=s={width}x{height}:d=0.04", "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi",
+                        "-f", "null", "-"], capture_output=True)
+    return r.returncode == 0
+
+
+def web_size(size):
+    """The output size for a video frame: 1920 on the long side, the short side to the frame's
+    shape (16:9 1920x1080, 9:16 1080x1920, square 1920x1920). Even numbers, for H.264."""
+    w, h = size
+    if w >= h:
+        return 1920, round(1920 * h / w / 2) * 2
+    return round(1920 * w / h / 2) * 2, 1920
+
+
+def main():
+    args = parser.parse_args()
+    src = args.input
+    try:
+        still = open_picture(src)  # None: a video, an animation (which goes the video way), or not an image: ffmpeg tries
+    except TooLarge as e:
+        sys.exit(f"ascii-convert: {e}")
+    if args.at is not None:
+        if still is not None:
+            parser.error("--at takes a video's frame; this is an image")
+        picture = crop(frame_at(src, args.at), args)
+        out = args.output or out_name(src, args.at)
+        if not (args.width or args.height):
+            args.width, args.height = web_size(picture.size)
+        style = Style(args, picture.size)
+    elif still is None:
+        out = args.output or out_name(src, video=True)
+        first = frame_at(src, 0)
+        if not (args.width or args.height):
+            args.width, args.height = web_size(crop(first, args).size)
+        convert_video(args, src, out, first)
+        print(out)
+        return
+    else:
+        style = Style(args, crop(still, args).size)
+        need = math.ceil(style.cols * CELL_PX * 100 / args.crop[2])  # px across the whole picture that chafa samples
+        if is_svg(src) and need > still.width:  # an SVG drawn again at the detail the columns take
+            still = open_picture(src, raster_width(need, still.size)) or still
+        picture = crop(flatten(still, style.theme["background"]), args)
+        out = args.output or out_name(src)
+    art = style.art(picture)
+    style.layout(len(art))
+    style.paint(art).save(out)
+    print(out)
+    if args.at is not None and sys.stdout.isatty() and kitty_terminal():
+        subprocess.run(["kitten", "icat", out])
+
+
+if __name__ == "__main__":  # worker processes import this file: only the parent runs
+    try:
+        main()
+    except KeyboardInterrupt:  # an image or a preview, mid-way: nothing to keep
+        sys.exit(130)
