@@ -481,7 +481,7 @@ impl Viewer {
                 Job::Copied(toast) => self.ui.say(toast),
                 Job::Part(part) => {
                     if let Mode::Still(gallery) = &mut self.mode {
-                        gallery.part(part, &mut self.ui);
+                        gallery.part_done(part, &mut self.ui);
                     }
                 }
             }
