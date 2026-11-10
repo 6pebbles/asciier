@@ -44,8 +44,9 @@ pub struct Mpv {
 }
 
 impl Mpv {
-    /// libmpv with the viewer's options (design section 6), the audio options of `~/.config/mpv/mpv.conf`, a software render context, wake-ups through `term::wake(Wake::Mpv)`; `node`: the PipeWire node name (`PIPEWIRE_PROPS` in the own environment).
-    pub fn new(node: &str) -> Result<Mpv> {
+    /// libmpv with the viewer's options, the audio options of `~/.config/mpv/mpv.conf`, a software render context; `wake` is called (from mpv's threads) whenever `events` has something new; `node`: the PipeWire node name (`PIPEWIRE_PROPS` in the own environment).
+    pub fn new(node: &str, wake: fn()) -> Result<Mpv> {
+        let _ = wake;
         todo!("{node}")
     }
 
