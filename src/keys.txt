@@ -1,0 +1,53 @@
+Keys, mpv's where it has them and qView's for still images (a: with audio alone too):
+key                     a  video                              still image
+q Q                     a  quit                               same
+F1                      a  these keys (video pauses)          same
+space p                 a  pause, play; stopped: from 0 s     -
+h l Left Right          a  seek -5 s, +5 s                    previous, next image; zoomed: pan
+j k Down Up             a  seek -60 s, +60 s                  turn left, right; zoomed: pan
+Shift+Left Shift+Right  a  seek -1 s, +1 s                    zoomed: pan, a sixteenth
+Shift+Down Shift+Up     a  seek -5 s, +5 s                    zoomed: pan, a sixteenth
+[ ] { }                 a  speed /1.1, x1.1; /2, x2           -
+Backspace \             a  speed 100 %                        Backspace: zoom to the fit
+9 0 / *                 a  volume -2, +2                      -
+m                       a  mute                               -
+L                       a  loop (else the end quits)          zoomed: pan, a sixteenth
+H J K                      -                                  zoomed: pan, a sixteenth
+f                       a  fullscreen (Hyprland)              same
+. ,                        a frame forward, back, paused      -
+3 4                        level 5 % darker, brighter         same
+1 2                        contrast -5 %, +5 %                same
+`                          level and contrast back to 0       same
+7 8                        saturation -10 %, +10 %            same
+c                          mono: the theme's brightest only   same
+b                          bold glyphs                        same
+g                          glyphs: mixed, density, shape      same
+s                          screenshot of the frame shown      screenshot: all of it, as turned
+r                          render page; F1 there: its keys    same
++ = -                      -                                  zoom in (+ =), out
+v                          -                                  image (kitty) or ASCII
+y                          -                                  copy it (PNG); after D: delete
+d                          -                                  trash it, show the next
+u                          -                                  undo the last trash
+D                          -                                  delete for good, after y
+
+With the folder's last image gone only u, q, f and F1 act; after D, any key but y keeps the image.
+
+Render page (r): a value typed or a theme search (/) takes the printable keys; Enter keeps a value, Esc drops it, and Enter, Esc, Tab, Up or Down end a search (the last three move on):
+key               menu                    list (size, theme)      crop editor
+F1                these keys              these keys              these keys
+j k Down Up       move down, up           move down, up           window down, up 5 %
+h l Left Right    value down, up          back, pick              window left, right 5 %
+J K H L           -                       -                       the same by 1 %
+Tab               -                       move down               -
+Enter             open or set it          pick                    back to the menu
+q Esc             back to the player      back to the menu        back to the menu
+Q r               back to the player      -                       -
+`                 back to the default     -                       -
+s                 export the PNG          -                       -
+/                 search the themes       search (themes)         -
+- + =             -                       -                       window smaller, larger
+[ ]               -                       -                       ratio: previous, next
+< > { }           -                       -                       width, height (free ratio)
+c 0               -                       -                       centre it; the whole picture
+Backspace         typing: delete          search: delete          -
