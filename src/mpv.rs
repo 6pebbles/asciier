@@ -80,6 +80,11 @@ impl Mpv {
         todo!("{w} {h}")
     }
 
+    /// mpv's `volume-max`, read when the file was opened.
+    pub fn volume_max(&self) -> f64 {
+        todo!()
+    }
+
     /// Tell mpv the due frame was not drawn.
     pub fn skip(&mut self) {
         todo!()
