@@ -2,7 +2,8 @@
 
 use crate::Result;
 use crate::convert::Options;
-use crate::view::Ui;
+use crate::term::Geometry;
+use crate::term::kitty::Transfer;
 use image::RgbImage;
 use std::path::PathBuf;
 
@@ -28,8 +29,9 @@ impl Page {
         todo!("{key:?} {:?}", self.out)
     }
 
-    /// The whole screen: menu, list, prompt or crop editor on the left, the preview in its frame on the right.
-    pub fn draw(&mut self, ui: &mut Ui) -> Vec<u8> {
-        todo!("{}", ui.epoch)
+    /// The whole screen: menu, list, prompt or crop editor on the left, the preview in its frame on the right; `epoch` changes whenever what was on screen was covered or the window changed (the preview is then sent again).
+    pub fn draw(&mut self, geometry: Geometry, epoch: u64, transfer: &mut Transfer) -> Vec<u8> {
+        let _ = transfer;
+        todo!("{geometry:?} {epoch}")
     }
 }

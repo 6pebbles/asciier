@@ -267,7 +267,7 @@ fn run(file: &Path) -> Result<()> {
             let playback = Playback {
                 mpv,
                 audio,
-                paused: true,
+                paused: false,
                 time: 0.0,
                 length: None,
                 speed: 100,
@@ -319,6 +319,7 @@ impl Viewer {
     }
 
     fn run(&mut self) {
+        self.flush();
         while !self.quit {
             let mut fds = [
                 libc::pollfd {
@@ -359,7 +360,9 @@ impl Viewer {
                 }
             }
             self.tick();
-            self.flush();
+            if !self.quit {
+                self.flush();
+            }
         }
     }
 
@@ -1073,7 +1076,7 @@ impl Viewer {
         let out = if self.help.is_some() {
             self.help_screen()
         } else if let Some(page) = &mut self.page {
-            page.draw(&mut self.ui)
+            page.draw(self.ui.geometry, self.ui.epoch, &mut self.ui.transfer)
         } else {
             let status = self.status();
             match &mut self.mode {
