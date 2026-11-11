@@ -24,7 +24,8 @@ pub enum Refused {
     Exists,
     /// The trash no longer holds the file trashed (gone, another file under the name, or its .trashinfo missing).
     Gone,
-    Io(std::io::Error),
+    /// Any other failure of the file system.
+    Io,
 }
 
 /// Move the file at `path` to the trash without copying (rows T1-T4 of the inventory).
@@ -245,24 +246,24 @@ fn untrash_by(
     let found = match entry.stored.symlink_metadata() {
         Ok(meta) => (meta.dev(), meta.ino()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(Refused::Gone),
-        Err(error) => return Err(Refused::Io(error)),
+        Err(_) => return Err(Refused::Io),
     };
     // another file under the name, or one without its record: someone else's
     if found != entry.ident || entry.info.symlink_metadata().is_err() {
         return Err(Refused::Gone);
     }
     match link(&entry.stored, &entry.path) {
-        Ok(()) => fs::remove_file(&entry.stored).map_err(Refused::Io)?,
+        Ok(()) => fs::remove_file(&entry.stored).map_err(|_| Refused::Io)?,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Err(Refused::Exists),
         Err(_) => {
             if entry.path.symlink_metadata().is_ok() {
                 return Err(Refused::Exists);
             }
-            fs::rename(&entry.stored, &entry.path).map_err(Refused::Io)?;
+            fs::rename(&entry.stored, &entry.path).map_err(|_| Refused::Io)?;
         }
     }
     match fs::remove_file(&entry.info) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(Refused::Io(error)),
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(Refused::Io),
         _ => Ok(()),
     }
 }

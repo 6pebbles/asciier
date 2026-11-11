@@ -536,7 +536,7 @@ impl Gallery {
                 self.trashed.pop(); // nothing to put back, and it would block the earlier entries for good
                 ui.say(format!("{file} is no longer in the trash"));
             }
-            Err(Refused::Io(_)) => ui.say("restore failed"),
+            Err(Refused::Io) => ui.say("restore failed"),
             Ok(()) => {
                 self.trashed.pop();
                 if let Opened::Still(still) = picture::open(&last.path) {

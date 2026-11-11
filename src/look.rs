@@ -18,10 +18,6 @@ impl Glyphs {
         }
     }
 
-    pub fn parse(text: &str) -> Option<Glyphs> {
-        Self::ALL.into_iter().find(|g| g.name() == text)
-    }
-
     /// `by` places on, wrapping round (the `g` key, the page's `h` `l`).
     pub fn step(self, by: i32) -> Glyphs {
         let at = Self::ALL.iter().position(|g| *g == self).unwrap() as i32;
@@ -174,6 +170,5 @@ mod tests {
     fn glyphs_cycle() {
         assert_eq!(Glyphs::Mixed.step(1), Glyphs::Density);
         assert_eq!(Glyphs::Mixed.step(-1), Glyphs::Shape);
-        assert_eq!(Glyphs::parse("shape"), Some(Glyphs::Shape));
     }
 }

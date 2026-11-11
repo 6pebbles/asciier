@@ -105,7 +105,6 @@ pub struct Grid {
 /// A theme set up for drawing: the slot mapping, each slot's linear luminance (16 colours, then the foreground), mono's slot.
 #[derive(Clone)]
 pub struct Inks {
-    pub palette: [Rgb; 16],
     pub recolour: Recolour,
     pub luma: [f64; 17],
     pub mono: u8,
@@ -114,7 +113,6 @@ pub struct Inks {
 impl Inks {
     pub fn new(theme: &Theme, saturation: i32, skin: Skin) -> Inks {
         Inks {
-            palette: theme.colors,
             recolour: Recolour::new(&theme.colors, saturation, skin),
             luma: std::array::from_fn(|slot| luminance(theme.ink(slot as u8))),
             mono: theme.mono_slot(),
@@ -1058,7 +1056,7 @@ mod tests {
         for (got, want) in inks.luma.iter().zip(luma) {
             assert!((got - want).abs() < 0.00005, "{got} {want}");
         }
-        assert_eq!((inks.mono, inks.palette), (15, bl1nk().colors));
+        assert_eq!(inks.mono, 15);
     }
 
     #[test]

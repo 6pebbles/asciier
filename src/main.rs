@@ -1,5 +1,4 @@
 //! asciier: `asciier FILE` views a video, an audio file or a still image as text; `asciier convert` writes one as PNG or MP4.
-#![allow(dead_code)] // until every module is wired in
 
 mod cells;
 mod convert;

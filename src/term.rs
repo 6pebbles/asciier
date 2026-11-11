@@ -373,12 +373,7 @@ fn gather(mut data: Vec<u8>, mut more: impl FnMut() -> Option<Vec<u8>>) -> Vec<K
     }
 }
 
-/// Split input bytes into keys, dropping terminal replies (APC strings, `CSI ?` reports); the second value is the unfinished tail (an escape sequence cut short, or a lone Esc).
-pub fn tokens(data: &[u8]) -> (Vec<Key>, &[u8]) {
-    split(data, false)
-}
-
-/// `tokens`; with `last` no more input comes, so a sequence cut short is read as its single bytes and no tail is left.
+/// Split input bytes into keys, dropping terminal replies (APC strings, `CSI ?` reports); the second value is the unfinished tail (an escape sequence cut short, or a lone Esc). With `last` no more input comes: a sequence cut short is read as its single bytes, no tail is left.
 fn split(data: &[u8], last: bool) -> (Vec<Key>, &[u8]) {
     let mut keys = Vec::new();
     let mut at = 0;
@@ -442,7 +437,7 @@ pub mod kitty {
 
     /// Deletes every image this window shows.
     pub const CLEAR: &[u8] = b"\x1b_Ga=d,d=A,q=2\x1b\\";
-    /// How long `probe` waits for the terminal; a later answer is dropped as input (`tokens`).
+    /// How long `probe` waits for the terminal; a later answer is dropped as input (`split`).
     const PROBE_WAIT: Duration = Duration::from_secs(1);
 
     /// Whether the environment says kitty: `KITTY_WINDOW_ID` non-empty or `TERM=xterm-kitty`.
@@ -859,14 +854,14 @@ mod tests {
     #[test]
     fn whole_input_is_split_into_keys_and_replies_are_dropped() {
         for (input, want) in WHOLE {
-            assert_eq!(tokens(input), (keys(want), &b""[..]), "{input:?}");
+            assert_eq!(split(input, false), (keys(want), &b""[..]), "{input:?}");
         }
     }
 
     #[test]
     fn input_cut_inside_a_sequence_leaves_it_as_the_tail() {
         for (input, last) in CUT {
-            let (whole, tail) = tokens(input);
+            let (whole, tail) = split(input, false);
             // ESC O takes any byte for its third, an ESC too: the keys are whole where the Python pattern still waits
             let waits = ![&b"\x1bO\x1b["[..], b"\x1bO\x1b"].contains(input);
             assert_eq!(!tail.is_empty(), waits, "{input:?}");
@@ -930,7 +925,7 @@ mod tests {
             b"q".to_vec(),
         ]
         .concat();
-        assert_eq!((held.len(), tokens(&held).0.len()), (704, 404));
+        assert_eq!((held.len(), split(&held, false).0.len()), (704, 404));
     }
 
     #[test]
