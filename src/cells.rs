@@ -202,9 +202,16 @@ pub fn grid(
     if cols == 0 || rows == 0 {
         return grid;
     }
-    let canvas = Canvas::draw(rgb, w, h, cols, rows, mono, work);
-    let cells = (glyphs != Glyphs::Shape)
-        .then(|| light(rgb, w as usize, h as usize, cols as usize, rows as usize));
+    // the statistics beside libchafa's drawing: about half a frame's work each
+    let (canvas, cells) = std::thread::scope(|scope| {
+        let cells = (glyphs != Glyphs::Shape).then(|| {
+            scope.spawn(|| light(rgb, w as usize, h as usize, cols as usize, rows as usize))
+        });
+        (
+            Canvas::draw(rgb, w, h, cols, rows, mono, work),
+            cells.map(|thread| thread.join().expect("the statistics")),
+        )
+    });
     for at in 0..cols * rows {
         let (glyph, colour) = canvas.cell(at % cols, at / cols);
         let ink = [colour >> 16, colour >> 8, colour].map(|v| v as u8);
