@@ -16,7 +16,7 @@ pub enum Event {
     },
     /// The file could not be opened or played: mpv's reason.
     Failed(String),
-    /// A new frame is due (`Mpv::render`, or `Mpv::skip`); the first one comes before the first `Shape`.
+    /// A new frame is due (`Mpv::render`, or `Mpv::skip`); the first one can come before the first `Shape` or after it.
     Frame,
     Pause(bool),
     /// Position in seconds.
@@ -1210,22 +1210,15 @@ pub(crate) mod tests {
         for expected in state {
             assert!(events.contains(&expected), "{expected:?} in {events:?}");
         }
-        // mpv tells the shape once its first frame is taken: that frame comes before, and is drawn when the shape is known
-        let order = [
-            Event::Frame,
-            Event::Shape {
-                w: 160,
-                h: 120,
-                turn: 0,
-            },
-        ];
-        let first: Vec<Event> = events
-            .iter()
-            .filter(|e| order.contains(e))
-            .take(2)
-            .cloned()
-            .collect();
-        assert_eq!(first, order, "{events:?}");
+        // the first frame and the shape come in either order: seen in this test under a loaded machine; the stage draws on both
+        let shape = Event::Shape {
+            w: 160,
+            h: 120,
+            turn: 0,
+        };
+        for expected in [Event::Frame, shape] {
+            assert!(events.contains(&expected), "{expected:?} in {events:?}");
+        }
         assert_eq!(
             (stage.time, stage.shown.first()),
             (0.0, Some(&0)),

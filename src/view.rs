@@ -423,7 +423,9 @@ impl Viewer {
         let Mode::Video(p) = &mut self.mode else {
             return;
         };
-        let Some((dw, dh)) = p.shape else { return };
+        let Some((dw, dh)) = p.shape else {
+            return p.mpv.skip();
+        };
         let ui = &mut self.ui;
         let (cw, ch) =
             cells::geometry(dw, dh, ui.geometry.cols, Some(ui.geometry.rows), ui.ratio());
@@ -452,7 +454,8 @@ impl Viewer {
                 Event::Mute(muted) => p.muted = muted,
                 Event::Loop(looping) => p.looping = looping,
                 Event::Shape { w, h, turn } => {
-                    p.shape = Some(if turn % 180 == 90 { (h, w) } else { (w, h) })
+                    p.shape = Some(if turn % 180 == 90 { (h, w) } else { (w, h) });
+                    frame = true; // the frame mpv holds: the first one may have come before its shape
                 }
                 Event::Ended(true) if p.playing && !p.looping => ended = true,
                 Event::Grabbed(picture) => grabbed = Some(picture),
