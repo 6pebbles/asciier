@@ -6,8 +6,10 @@
 
 use crate::font::Ramp;
 use crate::look::{Glyphs, Skin};
+use crate::picture;
 use crate::theme::{Recolour, Rgb, Theme, luminance};
 use std::ffi::{c_int, c_void};
+use std::sync::OnceLock;
 
 /// A cell's colour slot for the theme's foreground: libchafa's default colour, and all of mono.
 pub const FG: u8 = 16;
@@ -201,6 +203,8 @@ pub fn grid(
         return grid;
     }
     let canvas = Canvas::draw(rgb, w, h, cols, rows, mono, work);
+    let cells = (glyphs != Glyphs::Shape)
+        .then(|| light(rgb, w as usize, h as usize, cols as usize, rows as usize));
     for at in 0..cols * rows {
         let (glyph, colour) = canvas.cell(at % cols, at / cols);
         let ink = [colour >> 16, colour >> 8, colour].map(|v| v as u8);
@@ -209,87 +213,60 @@ pub fn grid(
         grid.chars.push(glyph);
         grid.slots.push(slot);
     }
-    if glyphs == Glyphs::Shape {
-        return grid;
-    }
-    let fine = samples(rgb, w as usize, h as usize, grid.cols * 4, grid.rows * 4);
-    let cells = light(&fine, grid.cols, grid.rows);
+    let Some(cells) = cells else { return grid };
     for (at, &(colour, light, deviation)) in cells.iter().enumerate() {
-        if glyphs == Glyphs::Mixed && deviation >= FLAT {
+        if glyphs == Glyphs::Mixed && deviation >= FLAT as f32 {
             continue;
         }
         if !mono {
             grid.slots[at] = inks.recolour.slot(colour);
         }
         let slot = if mono { inks.mono } else { grid.slots[at] };
-        let want = (light / inks.luma[slot.min(FG) as usize].max(1e-3)).clamp(0.0, 1.0);
+        let want = (light as f64 / inks.luma[slot.min(FG) as usize].max(1e-3)).clamp(0.0, 1.0);
         grid.chars[at] = ramp_glyph(ramp, want, at / grid.cols, at % grid.cols);
     }
     grid
 }
 
-/// The picture box-filtered to `across` x `down` samples, packed RGB: each the average of the area it covers, a half rounded up.
-/// In whole numbers: a sample's shares sum to `w` along x and to `h` down.
-fn samples(rgb: &[u8], w: usize, h: usize, across: usize, down: usize) -> Vec<u8> {
-    let (columns, rows, area) = (shares(w, across), shares(h, down), (w * h) as u64);
-    let half_up = |sum: &u64| ((2 * sum + area) / (2 * area)) as u8;
-    let mut out = Vec::with_capacity(across * down * 3);
-    // `line`: one picture row summed along x into its samples, kept while the next sample row needs it too
-    let (mut line, mut held) = (vec![0; across * 3], usize::MAX);
-    let mut sums = vec![0; across * 3];
-    for (at, &(j, y, share)) in rows.iter().enumerate() {
-        if y != held {
-            held = y;
-            line.fill(0);
-            let row = &rgb[y * w * 3..][..w * 3];
-            for &(i, x, share) in &columns {
-                for c in 0..3 {
-                    line[i * 3 + c] += share * row[x * 3 + c] as u64;
-                }
-            }
-        }
-        for (sum, &part) in sums.iter_mut().zip(&line) {
-            *sum += share * part;
-        }
-        if rows.get(at + 1).is_none_or(|next| next.0 != j) {
-            out.extend(sums.iter().map(half_up));
-            sums.fill(0);
-        }
+/// Per cell of `cols` x `rows` over the picture: mean colour, mean linear luminance and its deviation over 4 x 4 box-filtered samples, in single precision as the Python tools computed them (so the same cells come out).
+fn light(rgb: &[u8], w: usize, h: usize, cols: usize, rows: usize) -> Vec<(Rgb, f32, f32)> {
+    static SHARES: OnceLock<[[f32; 256]; 3]> = OnceLock::new();
+    let shares = SHARES.get_or_init(|| {
+        [0.2126, 0.7152, 0.0722].map(|weight| {
+            std::array::from_fn(|byte| (weight * crate::theme::linear()[byte]) as f32)
+        })
+    });
+    let (fw, fh) = (cols * 4, rows * 4);
+    let fine = picture::box_filter(rgb, w, h, fw, fh);
+    let colours = picture::box_filter(&fine, fw, fh, cols, rows);
+    let light = fine.as_chunks::<3>().0.iter();
+    let light: Vec<f32> = light
+        .map(|p| shares[0][p[0] as usize] + shares[1][p[1] as usize] + shares[2][p[2] as usize])
+        .collect();
+    // a 4 x 4 block mean as Pillow's box filter makes it on floats: along x, then along y, each sum in double precision stored single
+    let quarter = |four: [f32; 4]| {
+        (four[0] as f64 * 0.25
+            + four[1] as f64 * 0.25
+            + four[2] as f64 * 0.25
+            + four[3] as f64 * 0.25) as f32
+    };
+    let mut across = vec![[0f32; 2]; fh * cols];
+    for (i, out) in across.iter_mut().enumerate() {
+        let four: [f32; 4] = light[i * 4..i * 4 + 4].try_into().expect("four samples");
+        *out = [quarter(four), quarter(four.map(|v| v * v))];
     }
-    out
-}
-
-/// What each of `samples` over `px` px takes of the px it covers: (sample, px, share), a share in units of 1 / `samples` px.
-fn shares(px: usize, samples: usize) -> Vec<(usize, usize, u64)> {
-    let mut shares = Vec::with_capacity(px + samples);
-    for sample in 0..samples {
-        let (from, to) = (sample * px, (sample + 1) * px);
-        for at in from / samples..to.div_ceil(samples) {
-            let share = ((at + 1) * samples).min(to) - (at * samples).max(from);
-            shares.push((sample, at, share as u64));
-        }
-    }
-    shares
-}
-
-/// Per cell of `cols` x `rows` over `fine` (4 x 4 samples a cell, packed RGB): mean colour, mean linear luminance of the samples and its deviation.
-fn light(fine: &[u8], cols: usize, rows: usize) -> Vec<(Rgb, f64, f64)> {
     let mut cells = Vec::with_capacity(cols * rows);
-    for cell in 0..cols * rows {
-        let (mut totals, mut sum, mut squares) = ([0u32; 3], 0.0, 0.0);
-        for k in 0..16 {
-            let at = ((cell / cols * 4 + k / 4) * cols * 4 + cell % cols * 4 + k % 4) * 3;
-            let sample = [fine[at], fine[at + 1], fine[at + 2]];
-            let light = luminance(sample);
-            sum += light;
-            squares += light * light;
-            for (total, v) in totals.iter_mut().zip(sample) {
-                *total += v as u32;
-            }
-        }
-        let colour = totals.map(|total| ((total + 8) / 16) as u8);
-        let mean = sum / 16.0;
-        cells.push((colour, mean, (squares / 16.0 - mean * mean).max(0.0).sqrt()));
+    for i in 0..cols * rows {
+        let column = |k: usize| across[(i / cols * 4 + k) * cols + i % cols];
+        let (mean, squares) = (
+            quarter([0, 1, 2, 3].map(|k| column(k)[0])),
+            quarter([0, 1, 2, 3].map(|k| column(k)[1])),
+        );
+        cells.push((
+            [colours[i * 3], colours[i * 3 + 1], colours[i * 3 + 2]],
+            mean,
+            (squares - mean * mean).max(0.0).sqrt(),
+        ));
     }
     cells
 }
@@ -670,55 +647,13 @@ mod tests {
         }
     }
 
-    /// The area average by counting: every px cut into across x down parts, each sample taking its w x h of them.
-    fn counted(rgb: &[u8], w: usize, h: usize, across: usize, down: usize) -> Vec<u8> {
-        let mut out = Vec::new();
-        for at in 0..across * down * 3 {
-            let (i, j, c) = (at / 3 % across, at / 3 / across, at % 3);
-            let part = |u: usize, v: usize| rgb[((v / down) * w + u / across) * 3 + c] as usize;
-            let sum: usize = (j * h..(j + 1) * h)
-                .flat_map(|v| (i * w..(i + 1) * w).map(move |u| (u, v)))
-                .map(|(u, v)| part(u, v))
-                .sum();
-            out.push(((2 * sum + w * h) / (2 * w * h)) as u8);
-        }
-        out
-    }
-
-    #[test]
-    fn samples_are_area_averages() {
-        // down and up, whole factors and fractions, each way
-        for (w, h, across, down) in [
-            (37, 23, 20, 12),
-            (7, 5, 12, 8),
-            (16, 8, 8, 4),
-            (30, 20, 12, 8),
-            (1, 1, 4, 4),
-            (5, 7, 4, 4),
-            (9, 4, 4, 8),
-        ] {
-            let picture = noise(w, h);
-            assert_eq!(
-                samples(&picture, w, h, across, down),
-                counted(&picture, w, h, across, down),
-                "{w} x {h} to {across} x {down}"
-            );
-        }
-        // a half rounds up
-        assert_eq!(samples(&[0, 1, 2, 1, 2, 3], 2, 1, 1, 1), [1, 2, 3]);
-        assert_eq!(
-            samples(&[7, 8, 9], 1, 1, 2, 2),
-            [7, 8, 9, 7, 8, 9, 7, 8, 9, 7, 8, 9]
-        );
-    }
-
     #[test]
     fn cell_statistics_match_the_reference() {
         // tests/test_density.py CellLightTest: its pictures and grids; the reference works each cell out from its 16 samples in turn.
         for picture in [noise(480, 270), gradient(480, 270)] {
             for (cols, rows) in [(120, 34), (37, 11)] {
-                let fine = samples(&picture, 480, 270, cols * 4, rows * 4);
-                let got = light(&fine, cols, rows);
+                let fine = picture::box_filter(&picture, 480, 270, cols * 4, rows * 4);
+                let got = light(&picture, 480, 270, cols, rows);
                 assert_eq!(got.len(), cols * rows);
                 for (cell, &(colour, mean, deviation)) in got.iter().enumerate() {
                     let block: Vec<&[u8]> = (0..16)
@@ -737,16 +672,17 @@ mod tests {
                     for c in 0..3 {
                         let channel = block.iter().map(|s| s[c] as f64).sum::<f64>() / 16.0;
                         assert!(
-                            (colour[c] as f64 - channel).abs() <= 0.5,
+                            (colour[c] as f64 - channel).abs() <= 1.0,
                             "colour of cell {cell}"
                         );
                     }
+                    // single precision: the deviation is a root of a difference of near numbers
                     assert!(
-                        (mean - want).abs() < 1e-12,
+                        (mean as f64 - want).abs() < 1e-6,
                         "mean of cell {cell}: {mean} {want}"
                     );
                     assert!(
-                        (deviation - spread).abs() < 1e-6,
+                        (deviation as f64 - spread).abs() < 2e-3,
                         "deviation of cell {cell}: {deviation} {spread}"
                     );
                 }
@@ -785,8 +721,7 @@ mod tests {
         let art = grid(
             &picture, size.0, size.1, 80, None, 0.5, mode.0, mode.1, &mut inks, ramp, 0.2,
         );
-        let fine = samples(&picture, 640, 160, art.cols * 4, art.rows * 4);
-        let stats = light(&fine, art.cols, art.rows);
+        let stats = light(&picture, 640, 160, art.cols, art.rows);
         // a cell lights about coverage x its colour's luminance: brighter greys take sparser glyphs
         let lit = |at: usize| {
             let place = ramp
@@ -812,7 +747,7 @@ mod tests {
                 .map(|col| sum(col) / art.rows as f64)
                 .collect()
         };
-        let (want, got) = (column(&|at| stats[at].1), column(&lit));
+        let (want, got) = (column(&|at| stats[at].1 as f64), column(&lit));
         let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
         let (mw, mg) = (mean(&want), mean(&got));
         let cross: f64 = want

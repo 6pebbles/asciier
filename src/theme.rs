@@ -179,7 +179,7 @@ fn milli(chroma: f64) -> f64 {
 }
 
 /// sRGB byte to linear light.
-fn linear() -> &'static [f64; 256] {
+pub fn linear() -> &'static [f64; 256] {
     static TABLE: OnceLock<[f64; 256]> = OnceLock::new();
     TABLE.get_or_init(|| {
         std::array::from_fn(|byte| {
