@@ -207,6 +207,12 @@ pub fn main(file: &Path) -> u8 {
     }
 }
 
+/// libchafa's threads for a window: its default, one a core, spends more than it saves on a window's cells (6 s of a 1080p clip at 80 x 24: 2.2 CPU s with one thread, 3.0 with sixteen; at 400 x 100 one thread drops frames).
+fn chafa_threads(geometry: Geometry) {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as u32;
+    cells::threads((geometry.cols * geometry.rows / 10_000 + 1).min(cores) as i32);
+}
+
 fn wake_mpv() {
     term::wake(Wake::Mpv);
 }
@@ -240,6 +246,7 @@ fn run(file: &Path) -> Result<()> {
     desktop::ligatures(true);
     let graphics = still.is_some() && kitty::named() && kitty::probe();
     let geometry = term.geometry();
+    chafa_threads(geometry);
     let (jobs, results) = channel();
     let ui = Ui {
         term,
@@ -405,6 +412,7 @@ impl Viewer {
     fn resized(&mut self) {
         self.ui.term.resized();
         self.ui.geometry = self.ui.term.geometry();
+        chafa_threads(self.ui.geometry);
         self.ui.epoch += 1;
         self.ui.clear();
         self.refresh();
