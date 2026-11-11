@@ -3,7 +3,6 @@
 //! Settings down the left, then Export and Back; on the right the picture as the file will hold it: the converter's own drawing, made at the size it is shown.
 //! Density is a character's size in the output, in px of the font: the columns follow from it and the output's width, and a typed column count sets the density that gives it.
 
-use crate::cells;
 use crate::convert::{self, COLUMNS, FULL, Fit, Options, PX, SIZE};
 use crate::font::{self, Font};
 use crate::look::{self, Glyphs, Skin};
@@ -37,8 +36,6 @@ const SIZES: [(&str, u32); 4] = [
 ];
 /// Font px: the range of the Density row.
 const DENSITY: (f64, f64) = (4.0, 120.0);
-/// Px a picture and its canvas of 8 px a cell may be tall: over 65535 libchafa ends the process; a little less, as `Style::art` does the rounding.
-const TALLEST: f64 = 65000.0;
 /// The crop editor's ratios, width to height: the first leaves the shape free, the second is the picture's own.
 const RATIOS: [(&str, f64); 12] = [
     ("free", 0.0),
@@ -404,14 +401,7 @@ impl Page {
         }
         let options = self.settings(theme);
         let source = convert::crop(&self.picture, options.crop);
-        let (w, h) = source.dimensions();
-        let mut style = Style::new(&options, convert::colours(&options)?, (w, h))?;
-        // as `Style::art` hands it to libchafa: reduced to the columns' width, for a canvas of that many rows
-        let reduced = h as f64 * (style.cols * cells::CELL_PX).min(w) as f64 / w as f64;
-        let rows = cells::geometry(w, h, style.cols, None, style.ratio()).1;
-        if reduced.max((rows * cells::CELL_PX) as f64) > TALLEST {
-            err!("over {TALLEST} px tall for chafa");
-        }
+        let mut style = Style::new(&options, convert::colours(&options)?, source.dimensions())?;
         let grid = style.art(&source)?;
         style.layout(grid.rows as u32);
         if scale != 1.0 {
@@ -2407,35 +2397,36 @@ echo '[{"width": 2560, "height": 1440, "focused": true}]'
 
     #[test]
     fn a_drawing_taller_than_libchafa_takes_is_refused() {
-        // row R17: libchafa 1.18.3 ends the process on a picture or a canvas over 65535 px tall (seen: 64 x 65536 px, and 1 x 2304 px at 8 columns, 8193 rows of 8 px; the second in the Python tools too); the heights here lie under that, over the page's 65000
+        // row R17: libchafa 1.18.3 ends the process on a picture or a canvas over 65535 px a side (seen: 64 x 65536 px, and 8193 rows of 8 px at 8 columns; the second in the Python tools too)
         let mut stage = Stage::small();
-        // 408 columns for a crop 45 times taller than wide: 8161 rows of cells, a canvas of 65288 px
+        // a crop 45 times taller than wide: 20 rows of cells a column
         for (row, typed) in [
             (Row::CropW, "5"),
             (Row::CropH, "400"),
-            (Row::Columns, "408"),
+            (Row::Columns, "410"),
         ] {
             stage.on(row).keys(&[ENTER]);
             stage.typed(typed);
         }
         assert_eq!(
             (stage.page.target(), stage.page.columns()),
-            ((42, 1920), 408)
+            ((42, 1920), 410)
         );
         let out = stage.draw(100, 30);
-        let refusal = "over 65000 px tall for chafa";
+        let refusal = "410 x 8201 cells: libchafa takes 8191 a side at most";
         assert_eq!(stage.page.message, format!("render failed: {refusal}"));
         assert!(stage.page.preview.is_none() && placed(&out).is_none());
         stage.keys(&[b"s"]);
         assert_eq!(stage.page.message, format!("not exported: {refusal}"));
         assert!(!stage.page.out.exists());
-        // fewer columns: drawn
+        // the crop itself over 65535 px tall, 10 % of 320 px by 36500 % of 180: 32 x 65700 px, reduced to fit, at 8 columns
         stage.on(Row::Columns).keys(&[b"`"]);
-        assert!(placed(&stage.draw(100, 30)).is_some() && stage.page.message.is_empty());
-        // the crop itself that tall, 10 % of 320 px by 36300 % of 180: 32 x 65340 px
-        stage.page.options.crop = [0.0, 0.0, 10.0, 36300.0];
-        stage.draw(100, 30);
-        assert_eq!(stage.page.message, format!("render failed: {refusal}"));
+        stage.page.options.crop = [0.0, 0.0, 10.0, 36500.0];
+        assert!(
+            placed(&stage.draw(100, 30)).is_some(),
+            "{}",
+            stage.page.message
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ use crate::font::Ramp;
 use crate::look::{Glyphs, Skin};
 use crate::picture;
 use crate::theme::{Recolour, Rgb, Theme, luminance};
+use crate::{Result, err};
 use std::ffi::{c_int, c_void};
 use std::sync::OnceLock;
 
@@ -15,6 +16,8 @@ use std::sync::OnceLock;
 pub const FG: u8 = 16;
 /// Px a cell side that libchafa samples: its symbols are 8 x 8.
 pub const CELL_PX: u32 = 8;
+/// Px a side libchafa 1.18 takes, of a picture and of its canvas: over it the process ends (SIGSEGV).
+const CHAFA_PX: u32 = 65535;
 /// Linear-light deviation within a cell under which `mixed` counts it as flat.
 const FLAT: f64 = 0.045;
 /// Ordered dither's thresholds in sixteenths, by (row % 4, column % 4).
@@ -178,6 +181,7 @@ impl Drop for Canvas {
 
 /// The picture (`rgb`: packed RGB of `w` x `h`, tone table already applied) as a `Grid`: libchafa's glyphs, slots through `inks`, then the ramp on picked cells by `glyphs`; mono: two-colour shapes, every slot `FG`.
 /// `mixed` picks the flat cells, `density` all, `shape` none; a picked cell takes its mean colour's slot and the ramp glyph for its luminance against that slot's (mono: against `inks.luma[inks.mono]`).
+/// A picture over 65535 px a side is reduced to fit first; a grid over 8191 cells a side is an error: libchafa takes neither.
 #[allow(clippy::too_many_arguments)]
 pub fn grid(
     rgb: &[u8],
@@ -191,8 +195,29 @@ pub fn grid(
     inks: &mut Inks,
     ramp: &Ramp,
     work: f32,
-) -> Grid {
+) -> Result<Grid> {
+    let reduced;
+    let (rgb, w, h) = if w.max(h) > CHAFA_PX {
+        let scale = CHAFA_PX as f64 / w.max(h) as f64;
+        let side = |px: u32| ((px as f64 * scale) as u32).max(1);
+        reduced = picture::box_filter(
+            rgb,
+            w as usize,
+            h as usize,
+            side(w) as usize,
+            side(h) as usize,
+        );
+        (&reduced[..], side(w), side(h))
+    } else {
+        (rgb, w, h)
+    };
     let (cols, rows) = geometry(w, h, cols, rows, ratio);
+    if cols.max(rows) > CHAFA_PX / CELL_PX {
+        err!(
+            "{cols} x {rows} cells: libchafa takes {} a side at most",
+            CHAFA_PX / CELL_PX
+        );
+    }
     let mut grid = Grid {
         cols: cols as usize,
         rows: rows as usize,
@@ -200,7 +225,7 @@ pub fn grid(
         slots: Vec::new(),
     };
     if cols == 0 || rows == 0 {
-        return grid;
+        return Ok(grid);
     }
     // the statistics beside libchafa's drawing: about half a frame's work each
     let (canvas, cells) = std::thread::scope(|scope| {
@@ -220,7 +245,7 @@ pub fn grid(
         grid.chars.push(glyph);
         grid.slots.push(slot);
     }
-    let Some(cells) = cells else { return grid };
+    let Some(cells) = cells else { return Ok(grid) };
     for (at, &(colour, light, deviation)) in cells.iter().enumerate() {
         if glyphs == Glyphs::Mixed && deviation >= FLAT as f32 {
             continue;
@@ -232,7 +257,7 @@ pub fn grid(
         let want = (light as f64 / inks.luma[slot.min(FG) as usize].max(1e-3)).clamp(0.0, 1.0);
         grid.chars[at] = ramp_glyph(ramp, want, at / grid.cols, at % grid.cols);
     }
-    grid
+    Ok(grid)
 }
 
 /// Per cell of `cols` x `rows` over the picture: mean colour, mean linear luminance and its deviation over 4 x 4 box-filtered samples, in single precision as the Python tools computed them (so the same cells come out).
@@ -410,6 +435,7 @@ mod tests {
         grid(
             rgb, w, h, cols, rows, ratio, glyphs, mono, &mut inks, &ramp, 0.2,
         )
+        .unwrap()
     }
 
     fn lines(text: &[u8]) -> Vec<Vec<u8>> {
@@ -427,6 +453,44 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn libchafas_limits_are_kept() {
+        // measured with libchafa 1.18.3: a picture 64 x 65536 px, or a canvas of 8 x 8193 cells, ends the process
+        let tall = vec![200; 60 * 70_000 * 3];
+        let art = cells(&tall, 60, 70_000, 8, None, 0.5, Glyphs::Mixed, false);
+        // reduced to 56 x 65535 px first
+        assert_eq!((art.cols, art.rows), (8, 4682));
+        let mut inks = inks();
+        let grid = |cols, ratio, inks: &mut Inks| {
+            let narrow = vec![200; 64 * 600 * 3];
+            let ramp = ramp();
+            grid(
+                &narrow,
+                64,
+                600,
+                cols,
+                None,
+                ratio,
+                Glyphs::Mixed,
+                false,
+                inks,
+                &ramp,
+                0.2,
+            )
+        };
+        assert_eq!(grid(8, 0.5, &mut inks).map(|art| art.rows).ok(), Some(38));
+        // the tallest canvas: 8 x 8191 cells, 65528 px
+        let tallest = vec![200; 64 * 65528 * 3];
+        let art = cells(&tallest, 64, 65528, 8, None, 1.0, Glyphs::Mixed, false);
+        assert_eq!((art.cols, art.rows), (8, 8191));
+        let refused = grid(2000, 0.5, &mut inks).err().map(|e| e.0);
+        assert_eq!(
+            refused.as_deref(),
+            Some("2000 x 9375 cells: libchafa takes 8191 a side at most")
+        );
+        assert!(grid(1000, 2.0, &mut inks).is_err());
     }
 
     #[test]
@@ -727,7 +791,8 @@ mod tests {
         let (size, mode) = ((640, 160), (Glyphs::Density, false));
         let art = grid(
             &picture, size.0, size.1, 80, None, 0.5, mode.0, mode.1, &mut inks, ramp, 0.2,
-        );
+        )
+        .unwrap();
         let stats = light(&picture, 640, 160, art.cols, art.rows);
         // a cell lights about coverage x its colour's luminance: brighter greys take sparser glyphs
         let lit = |at: usize| {
@@ -862,6 +927,7 @@ mod tests {
                 &ramp(),
                 0.2,
             )
+            .unwrap()
         };
         let (bright, dim) = (draw(15), draw(8));
         assert!(bright.chars.iter().zip(&dim.chars).all(|(b, d)| b <= d));

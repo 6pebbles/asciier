@@ -99,7 +99,7 @@ impl Ui {
             &mut self.inks,
             ramp,
             0.2,
-        );
+        )?;
         let (top, left) = (
             (rows as usize - grid.rows.min(rows as usize)) / 2,
             (cols as usize - grid.cols.min(cols as usize)) / 2,

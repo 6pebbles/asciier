@@ -88,7 +88,7 @@ impl Style {
         }
         let look = self.options.look;
         let ramp = font::ramp(look.bold)?;
-        Ok(cells::grid(
+        cells::grid(
             &pixels,
             picture.width(),
             picture.height(),
@@ -100,7 +100,7 @@ impl Style {
             &mut self.inks,
             ramp,
             0.5,
-        ))
+        )
     }
 
     /// Take the row count; with columns and a size both given, the font size that fits them (row L3).
