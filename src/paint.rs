@@ -3,25 +3,65 @@
 use crate::Result;
 use crate::cells::{self, CELL_PX, Grid, Inks};
 use crate::convert::{Fit, Options, SIZE};
-use crate::font::{self, Font};
-use crate::look;
+use crate::font::{self, Font, Ramp};
+use crate::look::{self, Look};
 use crate::picture;
 use crate::theme::{Rgb, Theme};
 use image::RgbImage;
+use std::borrow::Cow;
 
-/// Everything a picture needs to be drawn: theme, font, layout. Built once for a look, theme and size.
-pub struct Style {
+/// What finds a picture's cells: columns, look, the theme's inks, the font's ramp and cell ratio. A copy works on another thread.
+#[derive(Clone)]
+pub struct Art {
     pub cols: u32,
+    look: Look,
+    inks: Inks,
+    ramp: &'static Ramp,
+    /// The font's cell ratio (width / height) at 20 px, for libchafa's geometry.
+    ratio: f32,
+}
+
+impl Art {
+    /// The picture's cells: reduced to 8 px a column by a box filter, tone table, cells at work factor 0.5 (row L6).
+    pub fn cells(&mut self, picture: &RgbImage) -> Result<Grid> {
+        let width = self.cols * CELL_PX;
+        let mut picture = Cow::Borrowed(picture);
+        if picture.width() > width {
+            let height = picture.height() as f64 * width as f64 / picture.width() as f64;
+            let height = (height.round_ties_even() as u32).max(1);
+            picture = Cow::Owned(picture::resize_box(&picture, width, height));
+        }
+        if let Some(table) = self.look.tone() {
+            look::apply(&table, picture.to_mut());
+        }
+        let (w, h, look) = (picture.width(), picture.height(), self.look);
+        cells::grid(
+            &picture,
+            w,
+            h,
+            self.cols,
+            None,
+            self.ratio,
+            look.glyphs,
+            look.mono,
+            &mut self.inks,
+            self.ramp,
+            0.5,
+        )
+    }
+}
+
+/// Everything a picture needs to be drawn: its cells' finder, theme, font, layout. Built once for a look, theme and size.
+pub struct Style {
+    pub art: Art,
     pub rows: Option<u32>,
     options: Options,
     theme: Theme,
-    inks: Inks,
     font: Font,
     /// The font size in px the tiles are drawn at.
     size: f64,
     cell_w: f64,
     cell_h: f64,
-    ratio: f32,
     /// Glyph tiles by glyph and slot: ceil(cell) px of RGB, drawn on first use.
     tiles: Vec<Option<Vec<u8>>>,
 }
@@ -29,7 +69,8 @@ pub struct Style {
 impl Style {
     /// For `options` and the colours to draw in, a source picture of `source` px (rows L1, L2): the columns, the font at 20 px.
     pub fn new(options: &Options, theme: Theme, source: (u32, u32)) -> Result<Style> {
-        let font = Font::open(font::path(options.look.bold)?)?;
+        let look = options.look;
+        let font = Font::open(font::path(look.bold)?)?;
         let cell = font.cell(SIZE);
         let (iw, ih) = (source.0 as f64, source.1 as f64);
         let cols = match (options.columns, options.width, options.height) {
@@ -41,26 +82,24 @@ impl Style {
                 across.max(down) as u32
             }
         };
-        let inks = Inks::new(&theme, options.look.saturation, options.look.skin);
-        let ratio = (cell.w / cell.h as f64) as f32;
-        Ok(Style {
+        let art = Art {
             cols,
+            look,
+            inks: Inks::new(&theme, look.saturation, look.skin),
+            ramp: font::ramp(look.bold)?,
+            ratio: (cell.w / cell.h as f64) as f32,
+        };
+        Ok(Style {
+            art,
             rows: None,
             options: options.clone(),
             theme,
-            inks,
             font,
             size: SIZE,
             cell_w: cell.w,
             cell_h: cell.h as f64,
-            ratio,
             tiles: vec![None; 256 * 17],
         })
-    }
-
-    /// The font's cell ratio (width / height) at 20 px, for libchafa's geometry.
-    pub fn ratio(&self) -> f32 {
-        self.ratio
     }
 
     fn set_font(&mut self, size: f64) {
@@ -69,46 +108,12 @@ impl Style {
         self.tiles.fill(None);
     }
 
-    /// The picture's cells: reduced to 8 px a column by a box filter, tone table, cells at work factor 0.5 (row L6).
-    pub fn art(&mut self, picture: &RgbImage) -> Result<Grid> {
-        let width = self.cols * CELL_PX;
-        let reduced;
-        let picture = if picture.width() > width {
-            let height = ((picture.height() as f64 * width as f64 / picture.width() as f64)
-                .round_ties_even() as u32)
-                .max(1);
-            reduced = picture::resize_box(picture, width, height);
-            &reduced
-        } else {
-            picture
-        };
-        let mut pixels = picture.as_raw().clone();
-        if let Some(table) = self.options.look.tone() {
-            look::apply(&table, &mut pixels);
-        }
-        let look = self.options.look;
-        let ramp = font::ramp(look.bold)?;
-        cells::grid(
-            &pixels,
-            picture.width(),
-            picture.height(),
-            self.cols,
-            None,
-            self.ratio,
-            look.glyphs,
-            look.mono,
-            &mut self.inks,
-            ramp,
-            0.5,
-        )
-    }
-
     /// Take the row count; with columns and a size both given, the font size that fits them (row L3).
     pub fn layout(&mut self, rows: u32) {
         self.rows = Some(rows);
         let (width, height) = (self.options.width, self.options.height);
         if self.options.columns.is_some() && (width.is_some() || height.is_some()) {
-            let across = width.map(|w| w as f64 / (self.cols as f64 * self.cell_w));
+            let across = width.map(|w| w as f64 / (self.art.cols as f64 * self.cell_w));
             let down = height.map(|h| h as f64 / (rows as f64 * self.cell_h));
             let fits = across.into_iter().chain(down);
             let fit = match self.options.fit {
@@ -125,7 +130,7 @@ impl Style {
         let w = self
             .options
             .width
-            .unwrap_or((self.cols as f64 * self.cell_w).round_ties_even() as u32);
+            .unwrap_or((self.art.cols as f64 * self.cell_w).round_ties_even() as u32);
         let h = self
             .options
             .height
@@ -216,20 +221,16 @@ impl Style {
         let scaled = |n: u32| ((n as f64 * scale).round_ties_even() as u32).max(1);
         let mut options = self.options.clone();
         (options.width, options.height) = (Some(scaled(w)), Some(scaled(h)));
-        let font = Font::open(font::path(options.look.bold)?)?;
-        let inks = Inks::new(&self.theme, options.look.saturation, options.look.skin);
         // the cells keep the full size's layout, scaled, fractions and all: the font's whole-px line height would crop rows the file keeps
         Ok(Style {
-            cols: self.cols,
+            art: self.art.clone(),
             rows: self.rows,
+            font: Font::open(font::path(options.look.bold)?)?,
             options,
             theme: self.theme.clone(),
-            inks,
-            font,
             size: self.size * scale,
             cell_w: self.cell_w * scale,
             cell_h: self.cell_h * scale,
-            ratio: self.ratio,
             tiles: vec![None; 256 * 17],
         })
     }

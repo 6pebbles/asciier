@@ -397,7 +397,7 @@ impl Page {
         let options = self.settings(theme);
         let source = convert::crop(&self.picture, options.crop)?;
         let mut style = Style::new(&options, convert::colours(&options)?, source.dimensions())?;
-        let grid = style.art(&source)?;
+        let grid = style.art.cells(&source)?;
         style.layout(grid.rows as u32);
         if scale != 1.0 {
             style = style.scaled(scale)?;

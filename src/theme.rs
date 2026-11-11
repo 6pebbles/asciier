@@ -221,6 +221,7 @@ pub fn oklab(colour: Rgb) -> [f64; 3] {
 
 /// Each colour to the palette slot (0-15) of the theme colour it maps to: hue first, greys by lightness; by 6 bits a channel, each bucket mapped once from its centre.
 /// So a slot depends on the colour alone, not on what came before it.
+#[derive(Clone)]
 pub struct Recolour {
     table: Vec<i8>,
     lab: [[f64; 3]; 16],

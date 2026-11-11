@@ -420,7 +420,7 @@ pub fn draw(picture: &RgbImage, options: &Options, frame: bool) -> Result<RgbIma
         (options.width, options.height) = (Some(w), Some(h));
     }
     let mut style = Style::new(&options, colours(&options)?, picture.dimensions())?;
-    let art = style.art(&picture)?;
+    let art = style.art.cells(&picture)?;
     style.layout(art.rows as u32);
     Ok(style.paint(&art, false))
 }
@@ -596,10 +596,10 @@ fn video(
     let ((num, den), total) = rate_and_total(source)?;
     let cropped = crop(first, options.crop)?;
     let mut style = Style::new(options, colours(options)?, cropped.dimensions())?;
-    let rows = style.art(&cropped)?.rows;
+    let rows = style.art.cells(&cropped)?.rows;
     style.layout(rows as u32);
     let (w, h) = style.size(true);
-    let detail = style.cols * CELL_PX;
+    let detail = style.art.cols * CELL_PX;
     let shrink = (cropped.width() as f64 / detail as f64).max(1.0);
     let filters = format!(
         "{}fps={num}/{den},scale='min(iw,{detail})':-2,hqdn3d={}:{}:{}:{}",
@@ -694,7 +694,7 @@ fn video(
         let Some(frame) = ppm_frame(&mut frames) else {
             break;
         };
-        let painted = match style.art(&frame) {
+        let painted = match style.art.cells(&frame) {
             Ok(art) => style.paint(&art, true),
             Err(e) => {
                 failure = Some(e.0);
@@ -812,7 +812,7 @@ fn run(options: &Options) -> std::result::Result<PathBuf, Stop> {
     };
     let mut style = Style::new(options, colours.clone(), cropped)?;
     // an SVG is drawn again at the detail the columns take
-    let need = (style.cols as f64 * CELL_PX as f64 * 100.0 / options.crop[2]).ceil() as u32;
+    let need = (style.art.cols as f64 * CELL_PX as f64 * 100.0 / options.crop[2]).ceil() as u32;
     let pic = match &still.svg {
         Some(svg) if need > w => svg
             .raster(Some(picture::raster_width(need, (w, h))))
@@ -821,7 +821,7 @@ fn run(options: &Options) -> std::result::Result<PathBuf, Stop> {
         _ => still.pic,
     };
     let picture = crop(&picture::flatten(&pic, colours.background), options.crop)?;
-    let art = style.art(&picture)?;
+    let art = style.art.cells(&picture)?;
     style.layout(art.rows as u32);
     save(&style.paint(&art, false), &out)?;
     Ok(out)

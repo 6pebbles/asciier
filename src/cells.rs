@@ -103,6 +103,7 @@ pub struct Grid {
 }
 
 /// A theme set up for drawing: the slot mapping, each slot's linear luminance (16 colours, then the foreground), mono's slot.
+#[derive(Clone)]
 pub struct Inks {
     pub palette: [Rgb; 16],
     pub recolour: Recolour,
