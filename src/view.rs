@@ -93,7 +93,7 @@ impl Ui {
             h,
             cols,
             Some(rows),
-            self.ratio(),
+            1.0, // the picture holds 8 px a cell side already
             self.look.glyphs,
             self.look.mono,
             &mut self.inks,
