@@ -281,9 +281,63 @@ pub fn checkerboard(w: u32, h: u32) -> RgbImage {
 
 /// The picture reduced by a box filter to `w` x `h`.
 pub fn resize_box(picture: &RgbImage, w: u32, h: u32) -> RgbImage {
-    let whole = [0.0, 0.0, picture.width() as f64, picture.height() as f64];
-    let filter = fir::ResizeAlg::Convolution(fir::FilterType::Box);
-    scaled(picture, whole, (w, h), filter)
+    let (pw, ph) = (picture.width() as usize, picture.height() as usize);
+    let pixels = box_filter(picture.as_raw(), pw, ph, w as usize, h as usize);
+    RgbImage::from_raw(w, h, pixels).expect("sized buffer")
+}
+
+/// Packed RGB of `w` x `h` reduced or enlarged to `ow` x `oh` by a box filter, bit for bit as Pillow's BOX: along x, then along y, each pass in 22-bit fixed point rounded to 8 bits; a pass whose size does not change is skipped.
+pub fn box_filter(rgb: &[u8], w: usize, h: usize, ow: usize, oh: usize) -> Vec<u8> {
+    const BITS: u32 = 22;
+    // per output sample: the first source sample it covers, how many, and the weight of each
+    fn spans(size: usize, out: usize) -> Vec<(usize, usize, i32)> {
+        let scale = size as f64 / out as f64;
+        let span = scale.max(1.0);
+        let covered = |at: usize| {
+            let centre = (at as f64 + 0.5) * scale;
+            let from = ((centre - span / 2.0 + 0.5) as i64).max(0) as usize;
+            let to = ((centre + span / 2.0 + 0.5) as i64).min(size as i64) as usize;
+            let inside = |x: &usize| {
+                let x = (*x as f64 - centre + 0.5) / span;
+                x > -0.5 && x <= 0.5
+            };
+            let first = (from..to).find(inside).unwrap_or(from);
+            let count = (first..to).take_while(inside).count();
+            let weight = (1 << BITS) as f64 / count as f64 + 0.5;
+            (first, count, weight as i32)
+        };
+        (0..out).map(covered).collect()
+    }
+    let mean = |sum: i32, weight: i32| ((sum * weight + (1 << (BITS - 1))) >> BITS).min(255) as u8;
+    let (mut pixels, mut width) = (std::borrow::Cow::Borrowed(rgb), w);
+    if ow != w {
+        let (across, mut out) = (spans(w, ow), Vec::with_capacity(ow * h * 3));
+        for row in pixels.chunks_exact(w * 3) {
+            for &(first, count, weight) in &across {
+                let covered = row[first * 3..(first + count) * 3].as_chunks::<3>().0;
+                let sums = covered
+                    .iter()
+                    .fold([0; 3], |sums, p| [0, 1, 2].map(|c| sums[c] + p[c] as i32));
+                out.extend(sums.map(|sum| mean(sum, weight)));
+            }
+        }
+        (pixels, width) = (out.into(), ow);
+    }
+    if oh != h {
+        let (line, mut out) = (width * 3, Vec::with_capacity(width * oh * 3));
+        let mut sums = vec![0; line];
+        for (first, count, weight) in spans(h, oh) {
+            sums.fill(0);
+            for row in pixels[first * line..(first + count) * line].chunks_exact(line) {
+                sums.iter_mut()
+                    .zip(row)
+                    .for_each(|(sum, &value)| *sum += value as i32);
+            }
+            out.extend(sums.iter().map(|&sum| mean(sum, weight)));
+        }
+        pixels = out.into();
+    }
+    pixels.into_owned()
 }
 
 /// The width to rasterize an SVG of `size` at for `want` px across: `want`, as long as its long side stays within `SVG_MAX`.
@@ -1384,27 +1438,56 @@ mod tests {
         assert_eq!(odd.dimensions(), (4, 4));
     }
 
-    // Pillow's resize(Image.BOX) of the same picture: [(73, 100, 14), (181, 128, 50), (81, 156, 86), (141, 128, 50), (121, 108, 14), (133, 136, 122)]
     #[test]
-    fn resize_box_takes_the_mean() {
+    fn box_filter_is_pillows() {
         // flat 4 x 4 blocks: the mean is the block's colour
         let block = |x, y| [(x * 40) as u8, (y * 90) as u8, 7];
         let blocks = RgbImage::from_fn(12, 8, |x, y| block(x / 4, y / 4).into());
         let means = RgbImage::from_fn(3, 2, |x, y| block(x, y).into());
         assert_eq!(resize_box(&blocks, 3, 2), means);
-        let small = resize_box(&opaque(&formula(12, 8)), 3, 2);
-        let pillow = [
-            73, 100, 14, 181, 128, 50, 81, 156, 86, 141, 128, 50, 121, 108, 14, 133, 136, 122,
-        ];
-        assert_eq!(small.dimensions(), (3, 2));
-        // one apart at most: the two passes round in the other order
-        let near = small.as_raw().iter().zip(pillow);
-        assert!(near.clone().all(|(a, b)| a.abs_diff(b) <= 1), "{near:?}");
         let flat = RgbImage::from_pixel(640, 400, [10, 200, 77].into());
         assert_eq!(
             colours(&resize_box(&flat, 160, 100)),
             [[10, 200, 77]].into()
         );
+        // Pillow's resize(Image.BOX) of the same pictures: the bytes, or their FNV-1a hash
+        let small = resize_box(&opaque(&formula(12, 8)), 3, 2);
+        let pillow = [
+            73, 100, 14, 181, 128, 50, 81, 156, 86, 141, 128, 50, 121, 108, 14, 133, 136, 122,
+        ];
+        assert_eq!(small.as_raw(), &pillow);
+        assert_eq!(box_filter(&[0, 1, 2, 1, 2, 3], 2, 1, 1, 1), [1, 2, 3]);
+        assert_eq!(
+            box_filter(&[0, 0, 0, 1, 1, 1, 2, 2, 2], 3, 1, 2, 1),
+            [1, 1, 1, 2, 2, 2]
+        );
+        assert_eq!(box_filter(&[7, 8, 9], 1, 1, 2, 2), [7, 8, 9].repeat(4));
+        let pattern = |w: usize, h: usize| -> Vec<u8> {
+            (0..w * h * 3).map(|i| (i * 7919 % 251) as u8).collect()
+        };
+        let fnv = |bytes: &[u8]| {
+            bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, &byte| {
+                (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3)
+            })
+        };
+        for ((w, h), (ow, oh), hash) in [
+            ((37, 23), (20, 12), 0x3121_9cfe_4171_c83a),
+            ((7, 5), (12, 8), 0x66c0_4872_64a1_0d43),
+            ((16, 8), (8, 4), 0x9094_5ccd_ac0f_9f0e),
+            ((30, 20), (12, 8), 0xc879_3067_1827_de96),
+            ((1, 1), (4, 4), 0x3b76_a1a9_a213_d495),
+            ((5, 7), (4, 4), 0xfe6e_9de2_0fa9_6627),
+            ((9, 4), (4, 8), 0x8485_f521_c283_7bb5),
+            ((1920, 1080), (1280, 720), 0x043a_2ef8_b3e4_638e),
+            ((640, 360), (640, 90), 0x0cde_5960_9eaf_63c4),
+            ((333, 211), (100, 211), 0xba04_cc7a_e414_f4ad),
+        ] {
+            assert_eq!(
+                fnv(&box_filter(&pattern(w, h), w, h, ow, oh)),
+                hash,
+                "{w} x {h} to {ow} x {oh}"
+            );
+        }
     }
 
     #[test]
