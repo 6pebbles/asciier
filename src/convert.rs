@@ -1,6 +1,6 @@
 //! `asciier convert`: an image or a video drawn as the viewer draws it, written as PNG or MP4.
 
-use crate::cells::CELL_PX;
+use crate::cells::{CELL_PX, Grid};
 use crate::look::{self, Glyphs, Look, Skin};
 use crate::paint::Style;
 use crate::picture::{self, Opened, Still};
@@ -688,33 +688,40 @@ fn video(
     };
     let mut frames = BufReader::with_capacity(1 << 20, decode.stdout.take().expect("piped"));
     let mut sink = encode.stdin.take().expect("piped");
-    let (mut done, mut failure, mut broken) = (0u64, None, false);
+    let (mut done, mut broken, mut art) = (0u64, false, style.art.clone());
     eprint!("\r0/{shown} frames");
-    while !INTERRUPTED.load(Ordering::Relaxed) {
-        let Some(frame) = ppm_frame(&mut frames) else {
-            break;
-        };
-        let painted = match style.art.cells(&frame) {
-            Ok(art) => style.paint(&art, true),
-            Err(e) => {
-                failure = Some(e.0);
+    // two stages side by side, frames in order: reading and cells on a thread, painting and writing here
+    let (grids, painted) = std::sync::mpsc::sync_channel::<Grid>(8);
+    let failure = std::thread::scope(|scope| {
+        let reader = scope.spawn(move || -> Result<()> {
+            while !INTERRUPTED.load(Ordering::Relaxed)
+                && let Some(frame) = ppm_frame(&mut frames)
+            {
+                if grids.send(art.cells(&frame)?).is_err() {
+                    break; // the writer stopped
+                }
+            }
+            Ok(())
+        });
+        for grid in painted {
+            if sink.write_all(style.paint(&grid, true).as_raw()).is_err() {
+                broken = true; // the encoder quit: its exit code says why
                 break;
             }
-        };
-        if sink.write_all(painted.as_raw()).is_err() {
-            broken = true; // the encoder quit: its exit code says why
-            break;
+            done += 1;
+            eprint!("\r{done}/{shown} frames");
         }
-        done += 1;
-        eprint!("\r{done}/{shown} frames");
-    }
+        if broken {
+            let _ = decode.kill(); // the reader then meets the stream's end
+        }
+        reader.join().expect("the reader").err().map(|e| e.0)
+    });
     eprintln!("\r{done}/{shown} frames");
     let stopped = INTERRUPTED.load(Ordering::Relaxed);
     let finish = |child: &mut Child| child.wait().map(|status| status.success()).unwrap_or(false);
-    if stopped || broken || failure.is_some() {
+    if stopped || failure.is_some() {
         let _ = decode.kill();
     }
-    drop(frames);
     let decoded = finish(&mut decode);
     drop(sink);
     let encoded = finish(&mut encode);
