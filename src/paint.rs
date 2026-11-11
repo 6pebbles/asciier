@@ -8,7 +8,6 @@ use crate::look;
 use crate::picture;
 use crate::theme::{Rgb, Theme};
 use image::RgbImage;
-use std::collections::HashMap;
 
 /// Everything a picture needs to be drawn: theme, font, layout. Built once for a look, theme and size.
 pub struct Style {
@@ -23,8 +22,8 @@ pub struct Style {
     cell_w: f64,
     cell_h: f64,
     ratio: f32,
-    /// Glyph tiles by (glyph, slot): ceil(cell) px of RGB.
-    tiles: HashMap<(u8, u8), Vec<u8>>,
+    /// Glyph tiles by glyph and slot: ceil(cell) px of RGB, drawn on first use.
+    tiles: Vec<Option<Vec<u8>>>,
 }
 
 impl Style {
@@ -55,7 +54,7 @@ impl Style {
             cell_w: cell.w,
             cell_h: cell.h as f64,
             ratio,
-            tiles: HashMap::new(),
+            tiles: vec![None; 256 * 17],
         })
     }
 
@@ -67,7 +66,7 @@ impl Style {
     fn set_font(&mut self, size: f64) {
         let cell = self.font.cell(size);
         (self.size, self.cell_w, self.cell_h) = (size, cell.w, cell.h as f64);
-        self.tiles.clear();
+        self.tiles.fill(None);
     }
 
     /// The picture's cells: reduced to 8 px a column by a box filter, tone table, cells at work factor 0.5 (row L6).
@@ -144,20 +143,19 @@ impl Style {
     }
 
     fn tile(&mut self, glyph: u8, slot: u8, tw: usize, th: usize) -> &[u8] {
-        if !self.tiles.contains_key(&(glyph, slot)) {
-            let mask = self.font.mask(glyph, self.size, tw, th);
-            let (ink, ground) = (self.ink(slot), self.theme.background);
-            let mut tile = Vec::with_capacity(tw * th * 3);
-            for m in mask {
-                for c in 0..3 {
-                    // Pillow's blend of a fill through an 8-bit mask
-                    let t = ground[c] as u32 * (255 - m as u32) + ink[c] as u32 * m as u32 + 128;
-                    tile.push((((t >> 8) + t) >> 8) as u8);
-                }
-            }
-            self.tiles.insert((glyph, slot), tile);
-        }
-        &self.tiles[&(glyph, slot)]
+        let (ink, ground) = (self.ink(slot), self.theme.background);
+        let (font, size) = (&self.font, self.size);
+        self.tiles[glyph as usize * 17 + slot.min(16) as usize].get_or_insert_with(|| {
+            // Pillow's blend of a fill through an 8-bit mask
+            let blend = |m: u32, c: usize| {
+                let t = ground[c] as u32 * (255 - m) + ink[c] as u32 * m + 128;
+                (((t >> 8) + t) >> 8) as u8
+            };
+            let mask = font.mask(glyph, size, tw, th);
+            mask.into_iter()
+                .flat_map(|m| [0, 1, 2].map(|c| blend(m as u32, c)))
+                .collect()
+        })
     }
 
     /// The cells drawn in the theme, cropped or banded to the output size (row L7): each tile pasted at its rounded position in cell order, blank cells left alone.
@@ -170,7 +168,7 @@ impl Style {
         // the grid's own picture: a tile may reach one px into the next cell, which that cell's tile then covers
         let (fw, fh) = (left(cols).max(1), top(rows).max(1));
         let ground = self.theme.background;
-        let mut full: Vec<u8> = ground.iter().copied().cycle().take(fw * fh * 3).collect();
+        let mut full = ground.repeat(fw * fh);
         for r in 0..rows {
             let (y0, y1) = (top(r), top(r + 1).min(fh));
             for c in 0..cols {
@@ -193,7 +191,7 @@ impl Style {
         if (w, h) == (fw, fh) {
             return RgbImage::from_raw(fw as u32, fh as u32, full).expect("sized buffer");
         }
-        let mut out: Vec<u8> = ground.iter().copied().cycle().take(w * h * 3).collect();
+        let mut out = ground.repeat(w * h);
         let (x0, y0) = (
             (w as i64 - fw as i64).div_euclid(2),
             (h as i64 - fh as i64).div_euclid(2),
@@ -232,7 +230,7 @@ impl Style {
             cell_w: self.cell_w * scale,
             cell_h: self.cell_h * scale,
             ratio: self.ratio,
-            tiles: HashMap::new(),
+            tiles: vec![None; 256 * 17],
         })
     }
 }
