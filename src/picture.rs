@@ -65,9 +65,9 @@ fn too_large((w, h): (u32, u32)) -> bool {
     w as u64 * h as u64 > MAX_PIXELS
 }
 
-/// `work`'s result; `None` when it panicked: a decoder's panic is a file that does not open.
+/// `work`'s result; `None` when it panicked: a decoder's or resvg's panic is a file that does not open, with no message and the terminal left as it is.
 fn caught<T>(work: impl FnOnce() -> T) -> Option<T> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).ok()
+    crate::term::guard(std::panic::AssertUnwindSafe(work)).ok()
 }
 
 /// Whether the file holds several frames to play: a GIF by its first two frames, APNG and WebP by their headers.
@@ -415,7 +415,9 @@ impl Svg {
         let Some(mut pixmap) = tiny_skia::Pixmap::new(w, h) else {
             crate::err!("no room to draw {w} x {h} px")
         };
-        resvg::render(&self.tree, transform, &mut pixmap.as_mut());
+        if caught(|| resvg::render(&self.tree, transform, &mut pixmap.as_mut())).is_none() {
+            crate::err!("resvg failed")
+        }
         let mut out = RgbaImage::new(w, h);
         for (to, from) in out.pixels_mut().zip(pixmap.pixels()) {
             let colour = from.demultiply();
