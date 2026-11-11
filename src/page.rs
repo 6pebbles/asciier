@@ -10,7 +10,7 @@ use crate::paint::Style;
 use crate::term::Geometry;
 use crate::term::kitty::{self, Transfer};
 use crate::theme::{self, Theme};
-use crate::{Result, desktop, err, picture};
+use crate::{Result, desktop, picture};
 use image::{Rgb, RgbImage};
 use std::cell::OnceCell;
 use std::path::PathBuf;
@@ -394,13 +394,8 @@ impl Page {
 
     /// The picture as the converter draws it for the settings, in the theme at `theme` of the list, `scale` times the size: the full size's cells and layout, so a preview is the file's own drawing.
     fn drawing(&self, theme: usize, scale: f64) -> Result<RgbImage> {
-        // the crop editor sets no upper bound: without one here a window of any size would be cut out
-        let ([.., wide, high], most) = (self.crop_px(), picture::MAX_PIXELS as f64);
-        if wide * high > most {
-            err!("crop over {:.0} megapixels", most / 1e6);
-        }
         let options = self.settings(theme);
-        let source = convert::crop(&self.picture, options.crop);
+        let source = convert::crop(&self.picture, options.crop)?;
         let mut style = Style::new(&options, convert::colours(&options)?, source.dimensions())?;
         let grid = style.art(&source)?;
         style.layout(grid.rows as u32);

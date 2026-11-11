@@ -354,12 +354,16 @@ pub fn crop_rect((w, h): (u32, u32), [x, y, cw, ch]: [f64; 4]) -> [i64; 4] {
     [left, top, left + px(w, cw).max(1), top + px(h, ch).max(1)]
 }
 
-/// The picture through `--crop`; outside it is black.
-pub fn crop(picture: &RgbImage, spec: [f64; 4]) -> RgbImage {
+/// The picture through `--crop`; outside it is black. A window over `picture::MAX_PIXELS` is an error: it is allocated whole.
+pub fn crop(picture: &RgbImage, spec: [f64; 4]) -> Result<RgbImage> {
     if spec == FULL {
-        return picture.clone();
+        return Ok(picture.clone());
     }
     let [left, top, right, bottom] = crop_rect(picture.dimensions(), spec);
+    let most = picture::MAX_PIXELS;
+    if (right - left) as u64 * (bottom - top) as u64 > most {
+        err!("crop over {:.0} megapixels", most as f64 / 1e6);
+    }
     let mut out = RgbImage::new((right - left) as u32, (bottom - top) as u32);
     for (x, y, pixel) in out.enumerate_pixels_mut() {
         let (sx, sy) = (x as i64 + left, y as i64 + top);
@@ -367,7 +371,7 @@ pub fn crop(picture: &RgbImage, spec: [f64; 4]) -> RgbImage {
             *pixel = *picture.get_pixel(sx as u32, sy as u32);
         }
     }
-    out
+    Ok(out)
 }
 
 /// `--crop` as ffmpeg filters (with a trailing comma) for frames of `size`, or nothing: pad with black to take in the window, then crop it.
@@ -409,7 +413,7 @@ pub fn colours(options: &Options) -> Result<Theme> {
 
 /// A picture (already turned and flattened by the caller) drawn at full size: what a screenshot, the page's export and the converter's still share; `frame`: a video's frame, 1920 px on the long side unless a size is given.
 pub fn draw(picture: &RgbImage, options: &Options, frame: bool) -> Result<RgbImage> {
-    let picture = crop(picture, options.crop);
+    let picture = crop(picture, options.crop)?;
     let mut options = options.clone();
     if frame && options.width.is_none() && options.height.is_none() {
         let (w, h) = web_size(picture.dimensions());
@@ -590,7 +594,7 @@ fn video(
     first: &RgbImage,
 ) -> std::result::Result<(), Stop> {
     let ((num, den), total) = rate_and_total(source)?;
-    let cropped = crop(first, options.crop);
+    let cropped = crop(first, options.crop)?;
     let mut style = Style::new(options, colours(options)?, cropped.dimensions())?;
     let rows = style.art(&cropped)?.rows;
     style.layout(rows as u32);
@@ -787,7 +791,7 @@ fn run(options: &Options) -> std::result::Result<PathBuf, Stop> {
         let first = frame_at(source, 0.0)?;
         let mut options = options.clone();
         if options.width.is_none() && options.height.is_none() {
-            let (w, h) = web_size(crop(&first, options.crop).dimensions());
+            let (w, h) = web_size(crop(&first, options.crop)?.dimensions());
             (options.width, options.height) = (Some(w), Some(h));
         }
         video(&options, source, &out, &first)?;
@@ -816,7 +820,7 @@ fn run(options: &Options) -> std::result::Result<PathBuf, Stop> {
             .unwrap_or(still.pic),
         _ => still.pic,
     };
-    let picture = crop(&picture::flatten(&pic, colours.background), options.crop);
+    let picture = crop(&picture::flatten(&pic, colours.background), options.crop)?;
     let art = style.art(&picture)?;
     style.layout(art.rows as u32);
     save(&style.paint(&art, false), &out)?;
@@ -984,7 +988,7 @@ mod tests {
             "pad=240:100:20:0:black,crop=240:100:0:0,"
         );
         let white = RgbImage::from_pixel(100, 100, image::Rgb([255, 255, 255]));
-        let cut = crop(&white, [50.0, 0.0, 100.0, 100.0]);
+        let cut = crop(&white, [50.0, 0.0, 100.0, 100.0]).unwrap();
         assert_eq!(
             (
                 cut.dimensions(),
@@ -993,6 +997,12 @@ mod tests {
             ),
             ((100, 100), [0, 0, 0], [255, 255, 255])
         );
+        // 178956970 px at most: a window of 1 x 178956971 px of 100 x 100 is refused, nothing allocated
+        let refused = crop(&white, [0.0, 0.0, 1.0, 178956971.0])
+            .err()
+            .map(|e| e.0);
+        assert_eq!(refused.as_deref(), Some("crop over 179 megapixels"));
+        assert!(crop(&white, [0.0, 0.0, 1e300, 1.0]).is_err());
     }
 
     #[test]
