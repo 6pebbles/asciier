@@ -424,7 +424,7 @@ fn seek_keys_in_one_batch_add_up_to_one_seek() {
 
 #[test]
 fn a_toast_shows_on_the_bottom_row_for_a_while() {
-    // row V16: reverse video on the bottom row, 1.2 s (TOAST, bin/ascii-viewer:118 at tag python-final), cut to cols - 2
+    // row V16: reverse video on the bottom row, cut to cols - 2, then the row drawn without it (bin/ascii-viewer:2128-2133 at tag python-final); its 1.2 s (TOAST, bin/ascii-viewer:118) is pinned by src/view.rs a_toast_lasts_1_2_s_from_say, as on screen the bounds stay loose: under load the toast shows late, and as briefly
     let sandbox = Sandbox::new();
     let mut tty = shown_still(&sandbox);
     let at = tty.send(b"3");
@@ -434,7 +434,7 @@ fn a_toast_shows_on_the_bottom_row_for_a_while() {
     tty.until("the bottom row without the toast", |screen| {
         screen.row(60).is_empty()
     });
-    // its time runs from the key: at least 1.2 s after it; seen, it lasts at most 1.2 s and what the end's draw is late by
+    // its time runs from the key: the row blank at least 1.1 s after it; seen, gone within 2.5 s: 1.2 s and what the end's draw is late by
     let (lasted, visible) = (sent.elapsed(), seen.elapsed());
     assert!(lasted >= Duration::from_millis(1100), "{lasted:?}");
     assert!(visible < Duration::from_millis(2500), "{visible:?}");

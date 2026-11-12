@@ -1268,6 +1268,43 @@ mod tests {
         assert!(gallery.draw(&mut ui, false) == again);
     }
 
+    /// 80 x 24 cells of 9 x 20 px.
+    const SMALL: Geometry = Geometry {
+        cols: 80,
+        rows: 24,
+        cell_w: 9.0,
+        cell_h: 20.0,
+    };
+
+    #[test]
+    fn a_toast_lasts_1_2_s_from_say() {
+        // row V16: a toast's time is 1.2 s from the call that shows it (TOAST, bin/ascii-viewer:118 and :2129 at tag python-final); its row, reverse video cut to cols - 2, shows while that time runs and not after it
+        let mut ui = ui(SMALL);
+        let before = Instant::now();
+        ui.say("level 5% darker");
+        let after = Instant::now();
+        let (text, until) = ui.toast.clone().expect("a toast");
+        assert_eq!(text, "level 5% darker");
+        let toast = Duration::from_millis(1200);
+        assert!(
+            before + toast <= until && until <= after + toast,
+            "it ends {:?} after the call began",
+            until - before
+        );
+        ui.toast = Some((text.clone(), Instant::now() + Duration::from_secs(60)));
+        assert_eq!(
+            ui.toast_row().as_deref(),
+            Some(&b"\x1b[24;1H\x1b[7m level 5% darker \x1b[0m"[..])
+        );
+        ui.geometry.cols = 12;
+        assert_eq!(
+            ui.toast_row().as_deref(),
+            Some(&b"\x1b[24;1H\x1b[7m level 5% d \x1b[0m"[..])
+        );
+        ui.toast = Some((text, Instant::now()));
+        assert_eq!(ui.toast_row(), None);
+    }
+
     #[test]
     fn the_loop_sleeps_to_the_end_of_its_wait() {
         // no inventory row: an owed frame is due 1/30 s after the last drawn, and a 30 fps source's frames come at or just under that gap, so many waits end within a millisecond; each was cut to a wait of 0, and the loop spun on poll until the frame was due
