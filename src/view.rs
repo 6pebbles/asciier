@@ -1136,6 +1136,8 @@ impl Viewer {
                 ]
                 .concat(),
                 Mode::Video(p) => {
+                    // the frame rendered last goes on screen: a step forward on the playing clip goes from it
+                    p.mpv.shown();
                     let clear: &[u8] = if stale == 2 { b"\x1b[2J" } else { b"" };
                     [
                         b"\x1b[?2026h\x1b[0m",

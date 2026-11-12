@@ -49,6 +49,15 @@ fn pause(tty: &mut Tty) {
     tty.settle(Duration::from_millis(300));
 }
 
+/// `s`: the frame its picture holds, once saved. mpv takes it once it has done the seeks and steps asked before (N5: the frame mpv holds).
+fn taken(tty: &mut Tty, sandbox: &Sandbox) -> u32 {
+    let at = tty.send(b"s");
+    let start = tty.expect(at, b"\x1b[7m saved ");
+    let end = tty.expect(start, b" \x1b[0m") - 5;
+    let name = String::from_utf8(tty.out()[start..end].to_vec()).unwrap();
+    saved(&sandbox.path(name)).0
+}
+
 /// Send `keys`, then wait for the toast `text`.
 fn says(tty: &mut Tty, keys: &[u8], text: &str) {
     let at = tty.send(keys);
@@ -320,15 +329,32 @@ fn seeks_move_by_their_steps_and_stop_at_both_ends() {
 
 #[test]
 fn frame_steps_move_one_frame_and_pause() {
-    // rows P15, N2: frame_step of bin/ascii-viewer:1441 at tag python-final: `.` a frame on, `,` a frame back, then paused, a playing clip paused first; `,` on the first frame and `.` on the last only pause; the clock follows the frame; `,` right after a seek is mpv's back step (N2)
+    // rows P15, N2: frame_step of bin/ascii-viewer:1441 at tag python-final: `.` a frame on, `,` a frame back, then paused, a playing clip paused first, one or two frames after the one on screen at the key; `,` on the first frame and `.` on the last only pause; the clock follows the frame; `,` right after a seek is mpv's back step (N2); seen before `.` on a playing clip went from the frame drawn: 1 of 8 runs at load 20 one or two frames on, the others 5 to 21, mpv stepping from the frame it held, past the one drawn under load
     let sandbox = Sandbox::new();
     // frames 0 to 54
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 2.2, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    tty.await_playing();
+    // `.` as soon as it plays on: under load a clip this short ends before a key sent later
+    tty.until("playing", |screen| {
+        screen.row(24).starts_with("> ") && frame(screen) >= 3
+    });
     tty.send(b".");
     tty.await_status("| ");
-    tty.settle(Duration::from_millis(300));
+    // the frame on screen at the key: the last drawn playing (the test reads the screen late under load)
+    let draws = replay(&tty.out(), SMALL, |screen| (frame(screen), screen.row(24)));
+    let paused = draws.iter().position(|(_, row)| row.starts_with("| "));
+    let on = draws[..paused.unwrap()]
+        .iter()
+        .rfind(|(_, row)| row.starts_with("> "))
+        .unwrap()
+        .0;
+    // the frame mpv holds then, which the screen comes to
+    let held = taken(&mut tty, &sandbox);
+    assert!(
+        held == on + 1 || held == on + 2,
+        "frame {on} on screen, {held} after `.`"
+    );
+    tty.until("the frame after it", |screen| frame(screen) == held);
     lands(&mut tty, LEFT, 0, "| 00:00");
     // on the first frame `,` only pauses; a window for what must not happen: the clip moving on
     tty.send(b",");

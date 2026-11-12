@@ -68,6 +68,9 @@ pub struct Mpv {
     counted: i64,
     /// Where the last step forward started, paused, when it moved: a step back right after it seeks there.
     back: Option<f64>,
+    /// The time of the frame the caller last rendered, as far as known (`held` then), and of the one on screen (`shown`).
+    rendered: Option<f64>,
+    on_screen: Option<f64>,
     /// The frame shown is the picture's last and the position can be past it: the sound's, playing on or paused there, or a seek's target past the last frame. `end`: that frame's own time, once a seek past the end has given it.
     tail: bool,
     end: Option<f64>,
@@ -112,13 +115,14 @@ enum Op {
 /// A request mpv runs over passes, until it is done; then mpv's position is read, and the next request goes.
 #[derive(Debug)]
 enum Busy {
-    /// A seek, or mpv's step back: done once playback restarts after mpv ran it (`ran`, `MPV_EVENT_SEEK`), or at its mark when mpv ran none (it drops a seek it cannot do). `target`: where it aims, when known (absolute, or relative to a paused position); `anchor`: an `Op::Anchor`.
+    /// A seek, or mpv's step back: done once playback restarts after mpv ran it (`ran`, `MPV_EVENT_SEEK`), or at its mark when mpv ran none (it drops a seek it cannot do). `target`: where it aims, when known (absolute, or relative to a paused position); `anchor`: an `Op::Anchor`; `from`: the frame a step forward on a playing clip left, which a step back then seeks to.
     Seek {
         mark: i64,
         ran: bool,
         settling: bool,
         target: Option<f64>,
         anchor: bool,
+        from: Option<f64>,
     },
     /// A step forward: done once mpv has reported its mark and is paused again. `from`: the position it left, paused there when `rested`; `drops`: mpv's count of frames let go then.
     Step {
@@ -458,6 +462,8 @@ impl Mpv {
             fresh: false,
             counted: 0,
             back: None,
+            rendered: None,
+            on_screen: None,
             tail: false,
             end: None,
             pausing: 0,
@@ -694,6 +700,21 @@ impl Mpv {
             }
             Op::BackStep => self.start_seek(&["frame-back-step".into()], false),
             Op::Back => self.back_step(),
+            // playing, mpv steps from the frame it holds, which a caller drawing late is frames past: the clip pauses and the frame after the one drawn shows
+            Op::Step if !self.paused && self.pausing == 0 && self.on_screen.is_some() => {
+                let on = self.on_screen.unwrap_or(self.time);
+                self.pausing += 1;
+                self.put_pause(true);
+                // an exact seek shows the first frame at most 5 ms before its target
+                let to = on + self.frame - 0.004;
+                self.start_seek(
+                    &["seek".into(), format!("{to}"), "absolute+exact".into()],
+                    false,
+                );
+                if let Some(Busy::Seek { from, .. }) = &mut self.busy {
+                    *from = Some(on);
+                }
+            }
             Op::Step => {
                 let rested = self.paused && self.pausing == 0;
                 let mark = self.marks + 1;
@@ -737,8 +758,8 @@ impl Mpv {
 
     /// A seek or mpv's step back (`command`'s arguments), under way until mpv has done it.
     fn start_seek(&mut self, args: &[String], anchor: bool) {
-        self.back = None;
-        self.tail = false;
+        // no step goes from a frame drawn before
+        (self.back, self.tail, self.rendered, self.on_screen) = (None, false, None, None);
         let target = match amount(args) {
             Some((to, true)) => Some(to),
             Some((by, false)) if self.paused && self.pausing == 0 => Some(self.time + by),
@@ -752,6 +773,7 @@ impl Mpv {
             settling: false,
             target,
             anchor,
+            from: None,
         });
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         if !self.order(OP, &args) {
@@ -818,7 +840,12 @@ impl Mpv {
         self.time = landed;
         self.count(Some(landed));
         match self.busy.take() {
-            Some(Busy::Seek { target, anchor, .. }) => {
+            Some(Busy::Seek {
+                target,
+                anchor,
+                from,
+                ..
+            }) => {
                 if anchor {
                     self.end = Some(landed);
                 }
@@ -832,6 +859,7 @@ impl Mpv {
                 };
                 (self.seen, self.prev) = (Some((seen, self.drops)), None);
                 self.base = Some((landed, self.drops));
+                self.back = from.filter(|_| !self.tail);
             }
             Some(Busy::Step {
                 from,
@@ -1191,7 +1219,15 @@ impl Mpv {
         .map(|(kind, data)| Param { kind, data });
         // SAFETY: the surface holds `h` rows of `stride` bytes from `start` on; the parameters live through the call.
         let drawn = unsafe { mpv_render_context_render(self.render, params.as_mut_ptr()) };
+        if drawn >= 0 {
+            self.rendered = self.held();
+        }
         (drawn >= 0).then(|| upright(&self.surface[start..], stride, w, h, 0, turn))
+    }
+
+    /// The frame last rendered is on screen now: a step forward on a playing clip goes from it.
+    pub fn shown(&mut self) {
+        self.on_screen = self.rendered;
     }
 
     /// Tell mpv the due frame was not drawn.
