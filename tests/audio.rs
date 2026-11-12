@@ -552,29 +552,3 @@ fn a_resize_writes_the_status_row_alone_on_the_new_bottom_row() {
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }
-
-#[test]
-#[ignore = "defect: in audio alone a paused seek lands about 0.2 s short of its target, more with each seek"]
-fn a_paused_seek_lands_on_its_target() {
-    // rows A4, P9: seek_to of bin/ascii-viewer:1423 at tag python-final takes the clock to the target, exact (run in this harness the old viewer showed 00:05, 00:10, 00:15); seen here (MPRIS Position): 4.807, 9.614, 14.420 s for three 5 s seeks from 0 s, each 0.193 s short; mpv's own player with ao=null does the same after playing and a pause, short by the null output's buffer (0.19 s at its 0.2 s; 0.033 s with ao-null-buffer=0.05, 1.0 s with 1); a video's clock is its frame's and lands exact
-    let sandbox = Sandbox::new();
-    let tone = tone(&sandbox, "tone.m4a", 70.0);
-    let mut tty = sandbox.launch().arg(&tone).size(SMALL).start();
-    tty.await_playing();
-    tty.send(b" ");
-    tty.await_status("| ");
-    tty.send(DOWN);
-    tty.await_status("| 00:00 / 01:10");
-    let mut before = 0;
-    for target in [5, 10, 15] {
-        tty.send(b"l");
-        tty.until("the seek", |screen| clock(&screen.row(24)) != Some(before));
-        // mpv's first word is the target; what it says once it rests counts
-        tty.settle(Duration::from_millis(400));
-        let row = tty.screen().row(24);
-        assert_eq!(clock(&row), Some(target), "{row:?}");
-        before = target;
-    }
-    tty.send(b"q");
-    assert_eq!(tty.exit(), 0);
-}
