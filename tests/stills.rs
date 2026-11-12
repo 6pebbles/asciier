@@ -82,7 +82,7 @@ fn jpeg(picture: &RgbImage, orientation: Option<u8>) -> Vec<u8> {
     out
 }
 
-/// An MPO as a camera writes it: the JPEG of `first` with an APP2 `MPF` segment after its SOI, whose index (CIPA DC-007) lists it and the JPEG of `second` appended behind it; Pillow opens such a file as an MPO of two frames (JpegImagePlugin's jpeg_factory).
+/// An MPO that Pillow opens as two frames (JpegImagePlugin's jpeg_factory): the JPEG of `first` with an APP2 `MPF` segment right after its SOI, whose index (CIPA DC-007) lists it and the JPEG of `second` appended behind it.
 fn mpo(first: &RgbImage, second: &RgbImage) -> Vec<u8> {
     let (head, tail) = (jpeg(first, None), jpeg(second, None));
     // the index is little-endian TIFF: its offsets count from its own start, 4 bytes into the segment's data
@@ -1163,7 +1163,7 @@ fn the_next_image_after_a_deletion_starts_at_its_fit() {
 
 #[test]
 fn the_image_goes_at_the_zooms_scale_as_far_as_the_window_holds_it() {
-    // row K1: kitty_image and cut of bin/ascii-viewer:1989 and :209 at tag python-final (tests/test_viewer.py:1083 and :1092): 400 x 300 in 1800 x 1000 px is sent at 400x300, 566x424, 800x600, 1131x849, then 1600x1000 (as high as the window); enlarged by nearest neighbour (1 px stripes at 400 % as blocks of 4 px, 0 and 255 alone), reduced bicubic (flat blocks halved at the fit take values between); a side never under 1 px: 1 x 3000 in 1800 x 1200 px fits at 0.4 and goes as 1 x 1200 (cut of bin/ascii-viewer:217), one cell across at column 100
+    // row K1: kitty_image and cut of bin/ascii-viewer:1989 and :209 at tag python-final (tests/test_viewer.py:1083 and :1092): 400 x 300 in 1800 x 1000 px is sent at 400x300, 566x424, 800x600, 1131x849, then 1600x1000 (as high as the window); enlarged by nearest neighbour (1 px stripes at 400 % as blocks of 4 px, 0 and 255 alone), reduced bicubic (flat blocks halved at the fit take values between); a side never under 1 px: 1 x 3000 in 1800 x 1200 px fits at 0.4 and goes as 1 x 1200 (cut of bin/ascii-viewer:218), one cell across at column 100
     let sandbox = kitty_sandbox();
     let window = Size {
         rows: 50,

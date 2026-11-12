@@ -1595,7 +1595,7 @@ mod tests {
 
     #[test]
     fn the_size_list() {
-        // rows R9, R4; SIZES_LIST
+        // rows R9, R5; SIZES_LIST
         let mut stage = Stage::new();
         stage.on(Row::Size).keys(&[ENTER, b"j"]);
         let rows = stage.column(30);
