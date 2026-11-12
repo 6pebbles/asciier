@@ -467,7 +467,7 @@ fn playerctl_drives_it_as_the_media_keys_do() {
 
 #[test]
 fn stop_holds_the_frame_until_a_seek_or_space_plays() {
-    // rows P8a, P8, M2: halt, seek_to and frame_step of bin/ascii-viewer:1304, :1423 and :1441 at tag python-final (tests/test_viewer.py:187): MPRIS Stop is the stopped state, mark `.`, the last frame held; `.` and `,` do nothing there; a seek key or an MPRIS Seek plays from its target; `space` plays from 0
+    // rows P8a, P8, M2, H3: halt, seek_to and frame_step of bin/ascii-viewer:1304, :1423 and :1441 at tag python-final (tests/test_viewer.py:187): MPRIS Stop is the stopped state, mark `.`, the last frame held; `.` and `,` do nothing there, nor F1 and a key closing the keys (open_help and close_help of bin/ascii-viewer:2061 and :2096: help_resume is false when not playing; run in this harness the old viewer stayed stopped on its frame); a seek key or an MPRIS Seek plays from its target; `space` plays from 0; under load the screen read after a quiet window was 7 to 14 frames behind the frame mpv held (3 of 3 runs with four test binaries at once), so the held frame is the one `s` takes, and the screen must come to it (N5: mpv's; the old viewer's `s` took another, P21a)
     let mut sandbox = Sandbox::new();
     let bus = Bus::new(&mut sandbox);
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
@@ -477,9 +477,11 @@ fn stop_holds_the_frame_until_a_seek_or_space_plays() {
     let stop = |tty: &mut Tty| {
         remote.send("Stop", &[]);
         tty.await_status(". ");
-        // frames decoded before the stop still land
-        tty.settle(Duration::from_millis(300));
-        frame(tty.screen())
+        let held = taken(tty, &sandbox);
+        tty.until("the frame taken", |screen| frame(screen) == held);
+        // the toast gone
+        tty.await_status(". ");
+        held
     };
     let held = stop(&mut tty);
     // `m` after the steps shows when they are done: its toast is the first
@@ -489,6 +491,19 @@ fn stop_holds_the_frame_until_a_seek_or_space_plays() {
     assert_eq!(find(&tty.out(), b"\x1b[7m", at), Some(end - sentinel.len()));
     tty.await_status(". ");
     assert_eq!(frame(tty.screen()), held, "a step moved it");
+    // the keys over the stopped clip, closed: still stopped; a window for what must not happen: playing on
+    let at = tty.send(F1);
+    tty.expect(at, b"any other key closes");
+    tty.send(b"x");
+    tty.await_status(". ");
+    std::thread::sleep(Duration::from_millis(800));
+    let screen = tty.screen();
+    assert!(
+        screen.row(24).starts_with(". ") && frame(screen) == held,
+        "{:?} on frame {}",
+        screen.row(24),
+        frame(screen)
+    );
     // a second on from the held frame, playing
     let jumps = |out: &[u8], held: u32, step: u32| {
         let after = frames(out);
