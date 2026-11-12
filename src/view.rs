@@ -586,7 +586,7 @@ impl Viewer {
         if p.stopped {
             p.play_from(&seek);
         } else {
-            p.mpv.command(&seek);
+            p.mpv.seek(&seek);
         }
     }
 

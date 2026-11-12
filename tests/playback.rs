@@ -363,31 +363,67 @@ fn frame_steps_move_one_frame_and_pause() {
 
 #[test]
 fn a_step_on_the_last_frame_keeps_its_place() {
-    // row P15: `.` on the last frame only pauses (frame_step of bin/ascii-viewer:1441 at tag python-final returns there, its clock on that frame): the status row on frame 54 of this 2.2 s clip with 2.2 s of sound shows 2.16 s (63 of the bar's 64 cells) and stays so, and `,` after it shows frame 53; seen before the fix: 54 again, the clock at the length with the whole bar
+    // rows P15, N21: `.` on the last frame only pauses (frame_step of bin/ascii-viewer:1441 at tag python-final returns there, its clock on that frame): the status row on frame 54 of this 2.2 s clip with 2.2 s of sound shows 2.16 s (63 of the bar's 64 cells) and stays so, and `,` after it shows frame 53; seen before the fix: 54 again, the clock at the length with the whole bar; with 6 s of sound (N21) the same, 23 cells, seen before a step back went to where the step forward started: 54 again, the bar falling to 21 cells
+    for (audio, cells) in [(2.2, 63), (6.0, 23)] {
+        let sandbox = Sandbox::new();
+        let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, audio, &[]);
+        let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+        tty.await_playing();
+        pause(&mut tty);
+        lands(&mut tty, LEFT, 0, "| 00:00");
+        lands(&mut tty, b"\x1b[1;2C\x1b[1;2C", 50, "| 00:02");
+        for number in 51..=54 {
+            lands(&mut tty, b".", number, "| 00:02");
+        }
+        // mpv plays the sound out, silent, then seeks past the end
+        tty.until("the clock on the last frame", |screen| {
+            screen.row(24).matches('━').count() == cells
+        });
+        let on_it = tty.screen().row(24);
+        tty.send(b".");
+        // a window for what must not happen: the clock moving on
+        std::thread::sleep(Duration::from_millis(1000));
+        assert_eq!(tty.screen().row(24), on_it, "{audio}");
+        tty.send(b",");
+        let end = Instant::now() + Duration::from_secs(5);
+        while frame(tty.screen()) != 53 && Instant::now() < end {
+            let at = tty.len();
+            tty.wait(at, Duration::from_millis(100), |out| !out.is_empty());
+        }
+        let status = tty.screen().row(24);
+        assert_eq!(frame(tty.screen()), 53, "{audio}: `,` after it, {status:?}");
+        tty.send(b"q");
+        assert_eq!(tty.exit(), 0);
+    }
+}
+
+#[test]
+fn a_step_back_soon_after_a_step_onto_the_last_frame_shows_the_frame_before() {
+    // rows P15, N2: `,` 50 to 250 ms after `.` onto the last frame, frame 54 of this 2.2 s clip with 2.5 s of sound, which the step plays out, shows frame 53; seen before a step back went to where the step forward started: 54 each time, and 53 at 400 ms
     let sandbox = Sandbox::new();
-    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 2.2, &[]);
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 2.5, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
     pause(&mut tty);
     lands(&mut tty, LEFT, 0, "| 00:00");
     lands(&mut tty, b"\x1b[1;2C\x1b[1;2C", 50, "| 00:02");
-    for number in 51..=54 {
+    for number in 51..=53 {
         lands(&mut tty, b".", number, "| 00:02");
     }
-    tty.settle(Duration::from_millis(300));
-    let on_it = tty.screen().row(24);
-    assert_eq!(on_it.matches('━').count(), 63, "{on_it:?}");
-    tty.send(b".");
-    // a window for what must not happen: the clock moving on
-    std::thread::sleep(Duration::from_millis(1000));
-    assert_eq!(tty.screen().row(24), on_it);
-    tty.send(b",");
-    let end = Instant::now() + Duration::from_secs(5);
-    while frame(tty.screen()) != 53 && Instant::now() < end {
-        let at = tty.len();
-        tty.wait(at, Duration::from_millis(100), |out| !out.is_empty());
+    for wait in [50, 150, 250] {
+        tty.send(b".");
+        std::thread::sleep(Duration::from_millis(wait));
+        tty.send(b",");
+        let end = Instant::now() + Duration::from_secs(5);
+        while frame(tty.screen()) != 53 && Instant::now() < end {
+            let at = tty.len();
+            tty.wait(at, Duration::from_millis(100), |out| !out.is_empty());
+        }
+        // what mpv ends on after the sound has played out
+        tty.settle(Duration::from_millis(600));
+        let status = tty.screen().row(24);
+        assert_eq!(frame(tty.screen()), 53, "{wait} ms: {status:?}");
     }
-    assert_eq!(frame(tty.screen()), 53, "`,` after it");
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }

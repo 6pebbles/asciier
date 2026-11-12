@@ -49,11 +49,18 @@ pub struct Mpv {
     /// `dwidth`, `dheight` and `video-dec-params/rotate` as last observed (0: unknown); `reshaped`: one changed since the last `Shape`.
     shape: [i64; 3],
     reshaped: bool,
-    /// `pause` and `eof-reached` as last observed; `ended`: the last `Ended` reported; `stepped`: the last step asked for went forward.
+    /// `pause`, `eof-reached` and `time-pos` as last observed; `ended`: the last `Ended` reported.
     paused: bool,
     at_end: bool,
+    time: f64,
     ended: bool,
+    /// Steps since the position last moved by other means: `stepped`, the last went forward; `back`, where the last step forward started, if paused, the target of a step back; `before`, `back` before that step, again `back` when the step did not move (on the last frame). `landing`: where a step forward started, until mpv reports the mark of the last one (`steps` sent): by then one that moves has reported a play or a position 1 ms or more away (`moved`).
     stepped: bool,
+    back: Option<f64>,
+    before: Option<f64>,
+    landing: Option<f64>,
+    moved: bool,
+    steps: u64,
     /// Requests to pause or play that mpv has not confirmed yet: its reports of `pause` until then can be older than them.
     pausing: u32,
     /// Seeks of `seek_and_play` mpv has not answered; `seek_due`: all answered, the last not run yet; `seek_plays`: the play still wanted, which a pause or a step cancels.
@@ -241,7 +248,10 @@ const OPTIONS: [(&str, &str); 29] = [
     ("input-default-bindings", "no"),
 ];
 
-const OBSERVED: [(&CStr, c_int); 11] = [
+/// Set behind each step forward: mpv reports properties at the start of each pass, so the report of this value comes once mpv has run a pass past the step, after the others of that pass (observed last).
+const STEP_MARK: &CStr = c"user-data/asciier/step";
+
+const OBSERVED: [(&CStr, c_int); 12] = [
     (c"pause", FLAG),
     (c"time-pos", DOUBLE),
     (c"duration", DOUBLE),
@@ -253,6 +263,7 @@ const OBSERVED: [(&CStr, c_int); 11] = [
     (c"dwidth", INT64),
     (c"dheight", INT64),
     (c"video-dec-params/rotate", INT64),
+    (STEP_MARK, INT64),
 ];
 
 /// mpv's words for one of its error codes.
@@ -342,6 +353,12 @@ impl Mpv {
             at_end: false,
             ended: false,
             stepped: false,
+            time: 0.0,
+            back: None,
+            before: None,
+            landing: None,
+            moved: false,
+            steps: 0,
             pausing: 0,
             play_seeks: 0,
             seek_due: false,
@@ -479,8 +496,20 @@ impl Mpv {
         unsafe { mpv_command_async(self.handle, userdata, pointers.as_ptr()) >= 0 }
     }
 
+    /// A seek, `command`'s arguments (`["seek", "5", "relative+exact"]`).
+    pub fn seek(&mut self, args: &[&str]) {
+        self.forget_steps();
+        self.command(args);
+    }
+
+    /// The position moves by other means than steps: no step back seeks to where a step started, and no end is a step's.
+    fn forget_steps(&mut self) {
+        (self.stepped, self.back, self.before, self.landing) = (false, None, None, None);
+    }
+
     /// A seek (`command`'s arguments), then play once mpv has run it (`MPV_EVENT_SEEK`). Played sooner, at once or on mpv's answer (given when it queues the seek, before the requests that reach it meanwhile, a play among them), mpv shows the frame due since it paused and counts a relative seek from that frame.
     pub fn seek_and_play(&mut self, args: &[&str]) {
+        self.forget_steps();
         self.reported
             .retain(|event| !matches!(event, Event::Pause(_)));
         if !self.order(PLAY, args) {
@@ -501,15 +530,33 @@ impl Mpv {
         }
     }
 
-    /// One frame forward or back, then paused; a play that waits for a seek is dropped. A step forward that ends the file has played the sound out, the position is the sound's end, and a step back from there finds the last frame again: `events` then seeks past the end, which holds the last frame at its own time.
+    /// One frame forward or back, then paused; a play that waits for a seek is dropped. A step forward onto the last frame leaves the position at the sound's, past that frame (at the sound's end when the step played it out, as it does when little is left), and mpv's step back counts from there: it finds the last frame again. So a step back right after steps forward that started paused seeks to where the last of them that moved started, and a step forward that ends the file is followed by a seek past the end (in `events`), which holds the last frame at its own time.
     pub fn step(&mut self, forward: bool) {
         self.seek_plays = false;
-        self.command(&[if forward {
-            "frame-step"
-        } else {
-            "frame-back-step"
-        }]);
-        self.stepped = forward;
+        if forward {
+            let settled = self.paused && self.pausing == 0 && self.landing.is_none();
+            self.before = self.back.take();
+            (self.back, self.landing) = (settled.then_some(self.time), Some(self.time));
+            (self.stepped, self.moved, self.steps) = (true, false, self.steps + 1);
+            self.command(&["frame-step"]);
+            let mut mark = self.steps as i64;
+            // SAFETY: mpv copies the value before the call returns.
+            unsafe {
+                let mark = &mut mark as *mut i64 as *mut c_void;
+                mpv_set_property_async(self.handle, 0, STEP_MARK.as_ptr(), INT64, mark);
+            }
+            return;
+        }
+        let back = self.back.take();
+        self.forget_steps();
+        match back {
+            // an exact seek shows the first frame at most 5 ms before its target
+            Some(from) => {
+                self.command(&["seek", &format!("{}", from + 0.004), "absolute+exact"]);
+                self.pause(true);
+            }
+            None => self.command(&["frame-back-step"]),
+        }
     }
 
     /// Set a property, not waited for.
@@ -520,6 +567,9 @@ impl Mpv {
     /// Pause or play, not waited for. Reports of `pause` that `open` heard, and those mpv makes before it confirms this request, are not handed on: they can be older than it, and mpv reports only a value that differs from the last it reported.
     pub fn pause(&mut self, paused: bool) {
         self.seek_plays = false;
+        if !paused {
+            self.forget_steps();
+        }
         self.reported
             .retain(|event| !matches!(event, Event::Pause(_)));
         if self.put(PAUSE, "pause", if paused { "yes" } else { "no" }) {
@@ -648,6 +698,7 @@ impl Mpv {
         match name {
             b"pause" => {
                 self.paused = flag.unwrap_or(self.paused);
+                self.moved |= flag == Some(false);
                 flag.filter(|_| self.pausing == 0).map(Event::Pause)
             }
             b"eof-reached" => {
@@ -655,7 +706,21 @@ impl Mpv {
                 None
             }
             b"mute" => flag.map(Event::Mute),
-            b"time-pos" => number.map(Event::Time),
+            b"time-pos" => {
+                let time = number?;
+                self.moved |= self
+                    .landing
+                    .is_some_and(|from| (time - from).abs() >= 0.001);
+                self.time = time;
+                Some(Event::Time(time))
+            }
+            _ if name == STEP_MARK.to_bytes() => {
+                let marked = whole == Some(self.steps as i64);
+                if marked && self.landing.take().is_some() && !self.moved {
+                    self.back = self.before.take();
+                }
+                None
+            }
             b"duration" => Some(Event::Length(number.filter(|length| *length > 0.0))),
             b"speed" => number.map(Event::Speed),
             b"volume" => number.map(Event::Volume),
@@ -1719,26 +1784,57 @@ pub(crate) mod tests {
 
     #[test]
     fn a_step_onto_the_last_frame_holds_its_time() {
-        // rows P15, N2: mpv's step onto the last frame, or on it, plays the rest of the sound and leaves the position at the sound's end (2.0 and 2.3 here, seen in this test without the seek past the end), where its step back finds the last frame again
-        for audio in [2.0, 2.3] {
+        // rows P15, N2, N21: mpv's step onto the last frame, or on it, plays the rest of the sound and leaves the position at the sound's end (2.0 and 2.3 here, seen in this test without the seek past the end), where its step back finds the last frame again; with sound seconds past the picture (6.0) the step pauses at once at the sound's position, just past the frame, with the same effect, also for a step back sent while mpv plays the sound out; one sent with the step forward came first and counted from the frame before (seen before a step back went to where the step forward started: 49 at 1.77 s for 6.0; 47 at 1.88 sent at once; 49 at 2.30 sent 50 or 150 ms on for 2.3; 49 at 1.80 sent 50 ms on for 6.0)
+        let soon = [
+            (2.0, 0.0),
+            (2.3, 0.0),
+            (2.3, 0.05),
+            (2.3, 0.15),
+            (6.0, 0.05),
+        ];
+        let cases = [(2.0, None), (2.3, None), (6.0, None)]
+            .into_iter()
+            .chain(soon.map(|(audio, wait)| (audio, Some(wait))));
+        let mut wrong = Vec::new();
+        for (audio, back_after) in cases {
             let mut stage = Stage::new();
             stage.clip(2.0, audio);
             stage.after(&["seek", "1.92", "absolute+exact"]);
-            for _ in 0..2 {
-                stage.mpv.step(true);
-                let events = stage.settle();
-                assert_eq!(stage.shown.last(), Some(&49), "{audio}: {events:?}");
-                assert!(
-                    near(stage.time, 1.96, 0.001),
-                    "{audio}: at {} on the last frame: {events:?}",
-                    stage.time
-                );
+            match back_after {
+                None => {
+                    for _ in 0..2 {
+                        stage.mpv.step(true);
+                        let events = stage.settle();
+                        assert_eq!(stage.shown.last(), Some(&49), "{audio}: {events:?}");
+                        assert!(
+                            near(stage.time, 1.96, 0.001),
+                            "{audio}: at {} on the last frame: {events:?}",
+                            stage.time
+                        );
+                    }
+                }
+                Some(wait) => {
+                    stage.mpv.step(true);
+                    stage.pump(wait, |_| false);
+                }
             }
             stage.mpv.step(false);
+            // mpv playing the sound out is silent for its rest
+            let (start, there) = (Instant::now(), |stage: &Stage| {
+                stage.shown.last() == Some(&48) && near(stage.time, 1.92, 0.001)
+            });
+            while !there(&stage) && start.elapsed() < Duration::from_secs(3) {
+                stage.pump(0.05, |_| false);
+            }
             stage.settle();
-            assert_eq!(stage.shown.last(), Some(&48), "{audio}: a step back");
-            assert!(near(stage.time, 1.92, 0.001), "{audio}: at {}", stage.time);
+            if !there(&stage) {
+                let on = (stage.shown.last(), stage.time);
+                wrong.push(format!(
+                    "{audio} s of sound, back after {back_after:?}: {on:?}"
+                ));
+            }
         }
+        assert!(wrong.is_empty(), "a step back: {wrong:#?}");
     }
 
     #[test]
