@@ -1704,6 +1704,27 @@ fn a_one_frame_video_draws_and_ends() {
 }
 
 #[test]
+fn the_end_quits_on_the_last_frame_drawn() {
+    // rows P14, P16: ended() of bin/ascii-viewer:2135 at tag python-final quits at the end, nothing drawn after the last frame; mpv's stop on the last frame (keep-open) is no pause to show: the last status row of a clip with sound and of one without is `>`
+    let sandbox = Sandbox::new();
+    let sound = counter(&sandbox, "sound.mp4", "160x90", 25, 1.5, 1.5, &[]);
+    let silent = counter(&sandbox, "silent.mp4", "160x90", 25, 1.5, 0.0, &[]);
+    let mut ttys = [&sound, &silent].map(|clip| sandbox.launch().arg(clip).size(SMALL).start());
+    for tty in &mut ttys {
+        assert_eq!(tty.exit(), 0);
+        let marks: Vec<String> = replay(&tty.out(), SMALL, |screen| screen.row(24))
+            .into_iter()
+            .filter(|row| row.starts_with("> ") || row.starts_with("| "))
+            .collect();
+        let last = &marks[marks.len().saturating_sub(3)..];
+        assert!(
+            last.last().is_some_and(|row| row.starts_with("> ")),
+            "{last:?}"
+        );
+    }
+}
+
+#[test]
 fn sound_that_outlasts_the_video_plays_on_over_its_last_frame() {
     // rows N21, P14: a 1 s picture with 3 s of sound plays to the sound's end on its last frame (the old viewer ended with the last frame, after 1.3 s here)
     let sandbox = Sandbox::new();

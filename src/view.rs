@@ -491,8 +491,8 @@ impl Viewer {
         }
         let p = self.playback().expect("media mode");
         if ended {
-            // a frame not drawn yet shows before the quit: the only frame of a one-frame video, taken undrawn before its shape, was seen with the shape and the end in one batch
-            if (frame || p.owed) && live {
+            // a picture never drawn shows before the quit: the only frame of a one-frame video, taken undrawn before its shape, was seen with the shape and the end in one batch; any other end quits on the last frame drawn
+            if (frame || p.owed) && p.rows.is_empty() && live {
                 self.frame();
                 self.flush();
             }
