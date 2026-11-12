@@ -807,7 +807,38 @@ impl Drop for Tty {
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
+        // a program killed while it showed a kitty image (a failed test) leaves the file the image travelled in
+        for file in transfer_files(&self.out()) {
+            let _ = std::fs::remove_file(file);
+        }
     }
+}
+
+/// The /dev/shm files that the kitty commands in `out` name for the terminal to read (`t=t`: placements and the probe).
+pub fn transfer_files(out: &[u8]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some(start) = find(out, b"\x1b_G", at) {
+        let Some(end) = find(out, b"\x1b\\", start) else {
+            break;
+        };
+        let body = &out[start + 3..end];
+        let base64 = |b: &u8| b.is_ascii_alphanumeric() || b"+/=".contains(b);
+        if let Some(split) = body.iter().position(|&b| b == b';')
+            && body[..split].split(|&b| b == b',').any(|key| key == b"t=t")
+            && body[split + 1..].iter().all(base64)
+        {
+            let file = placed_file(&body[split + 1..]);
+            let named = file
+                .file_name()
+                .is_some_and(|name| name.as_bytes().starts_with(b"tty-graphics-protocol-"));
+            if file.parent() == Some(Path::new("/dev/shm")) && named {
+                found.push(file);
+            }
+        }
+        at = end;
+    }
+    found
 }
 
 /// ffmpeg with the run environment of `sandbox`: `-v error -nostdin -y ARGS`, which must work.
@@ -897,6 +928,58 @@ pub fn tone(sandbox: &Sandbox, name: &str, seconds: f64) -> PathBuf {
         ],
     );
     out
+}
+
+/// A filter that makes a picture a frame counter (src/mpv.rs tests): frame N shows N's low 8 bits as 8 bars across it, bit 0 on the left, a set bit white (235), a clear one dark (16).
+pub const COUNTER: &str = "format=gray,geq=lum='if(bitand(N,pow(2,floor(X*8/W))),235,16)'";
+
+/// A counter clip: `seconds` of `size` at `rate` frames a second, keyframes every 5, with `audio` seconds of a sine tone (0: no sound track) and `extra` output options.
+pub fn counter(
+    sandbox: &Sandbox,
+    name: &str,
+    size: &str,
+    rate: u32,
+    seconds: f64,
+    audio: f64,
+    extra: &[&str],
+) -> PathBuf {
+    let out = sandbox.path(name);
+    let (picture, tone) = (
+        format!("nullsrc=s={size}:r={rate}:d={seconds},{COUNTER}"),
+        format!("sine=d={audio}"),
+    );
+    let mut args = vec!["-f", "lavfi", "-i", &picture];
+    if audio > 0.0 {
+        args.extend(["-f", "lavfi", "-i", &tone, "-c:a", "aac"]);
+    }
+    args.extend(["-c:v", "libx264", "-g", "5", "-pix_fmt", "yuv420p"]);
+    args.extend(extra);
+    args.push(out.to_str().unwrap());
+    ffmpeg(sandbox, &args);
+    out
+}
+
+/// The number a counter picture shows on `screen`, its 8 bars across columns `left` to `left + width - 1`, read on `row`: a bar inked in its middle is a set bit. A blank screen reads 0.
+pub fn counted(screen: &Screen, row: usize, left: usize, width: usize) -> u32 {
+    (0..8)
+        .filter(|bar| screen.cell(row, left + width * bar / 8 + width / 16).ch != ' ')
+        .map(|bar| 1 << bar)
+        .sum()
+}
+
+/// What `read` finds on the screen after each synchronized update in `out`, the updates replayed in order in a window of `size`: every video draw is one, so this follows the frames and the status row draw by draw.
+pub fn replay<T>(out: &[u8], size: Size, mut read: impl FnMut(&Screen) -> T) -> Vec<T> {
+    let mut screen = Screen::new(size.rows as usize, size.cols as usize);
+    let (mut fed, mut seen) = (0, Vec::new());
+    while let Some(start) = find(out, b"\x1b[?2026h", fed) {
+        let Some(end) = find(out, b"\x1b[?2026l", start) else {
+            break;
+        };
+        screen.feed(&out[fed..end + 8]);
+        fed = end + 8;
+        seen.push(read(&screen));
+    }
+    seen
 }
 
 /// A left-to-right grey ramp (tests/support.py:38).
