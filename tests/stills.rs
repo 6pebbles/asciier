@@ -787,7 +787,7 @@ fn steps_at_the_edges_of_the_listing() {
 
 #[test]
 fn a_batch_of_steps_opens_the_image_presses_one_by_one_reach() {
-    // row S8: settle_step of bin/ascii-viewer:1900 at tag python-final (tests/test_viewer.py:491): 0.png to 4.png, 1.png no picture, from 0.png: `ll` 3, `lll` 4, `llll` 0, `llh` 2, `h` 4, `hhh` 2, `lh` 0; a key of another kind first settles the steps: `llk` turns 3.png (tests/test_viewer.py:460), 43 x 30 here
+    // row S8: settle_step of bin/ascii-viewer:1900 at tag python-final (tests/test_viewer.py:491): 0.png to 4.png, 1.png no picture, from 0.png: `ll` 3, `lll` 4, `llll` 0, `llh` 2, `h` 4, `hhh` 2, `lh` 0; the batch opens one image: in image mode `lll` sends 4.png, 44 x 30 here, and nothing else, with one toast; a key of another kind first settles the steps: `llk` turns 3.png (tests/test_viewer.py:460), 43 x 30 here
     let mut sandbox = Sandbox::new();
     let pics = sandbox.folder("pics");
     for i in [0, 2, 3, 4] {
@@ -810,10 +810,25 @@ fn a_batch_of_steps_opens_the_image_presses_one_by_one_reach() {
         .collect();
     sandbox.set("KITTY_WINDOW_ID", "1");
     let mut turned = kitty_view(&sandbox, &first, SMALL);
+    let mut stepped = kitty_view(&sandbox, &first, SMALL);
     for (tty, (keys, reached)) in ttys.iter_mut().zip(batches) {
         says(tty, keys, &format!("{reached}.png  {}/5", reached + 1));
         quit(tty);
     }
+    assert_eq!(placed(&stepped, 0).size(), (40, 30));
+    let at = stepped.send(b"lll");
+    let toasted = stepped.expect(at, toast("4.png  5/5"));
+    let end = stepped.expect(toasted, b"\x1b[?2026l");
+    let out = stepped.out();
+    let batch = &out[at..end];
+    assert_eq!(
+        (count(batch, b"\x1b_Ga=T,"), count(batch, b"\x1b[7m")),
+        (1, 1),
+        "{}",
+        shown(batch)
+    );
+    assert_eq!(placed(&stepped, at).size(), (44, 30));
+    quit(&mut stepped);
     assert_eq!(placed(&turned, 0).size(), (40, 30));
     let at = says(&mut turned, b"llk", "3.png  4/5");
     assert_eq!(placed(&turned, at).size(), (30, 43));
