@@ -81,6 +81,15 @@ case " $* " in
 esac
 "#;
 
+/// ffprobe first on PATH: the converter's probe of a video answered with $PROBED (JSON) when it is set, as ffprobe answers for what it does not know (keys left out); all else asked of REAL, the real one.
+const FFPROBE: &str = r#"#!/bin/sh
+case " $* " in
+*" stream=avg_frame_rate,nb_frames,duration:format=duration "*)
+    if [ -n "$PROBED" ]; then printf '%s\n' "$PROBED"; exit 0; fi ;;
+esac
+exec REAL "$@"
+"#;
+
 /// A program the converter starts, first on PATH: notes its arguments and the signals it started with blocked and ignored, a line in $DUMP/masks (`NAME <args>: SigBlk:<hex> SigIgn:<hex>`), then runs REAL, the real one.
 const MASKS: &str = r#"#!/bin/sh
 masks=$(grep -E '^Sig(Blk|Ign)' /proc/self/status | tr -d '\t' | paste -sd ' ')
@@ -321,6 +330,12 @@ fn wrap_ffmpeg(sandbox: &mut Sandbox) {
     sandbox.set("REAL", ffmpeg);
     let dump = sandbox.dir.clone();
     sandbox.set("DUMP", dump);
+}
+
+/// The ffprobe wrapper first on PATH.
+fn wrap_ffprobe(sandbox: &Sandbox) {
+    let ffprobe = real(sandbox, "ffprobe");
+    sandbox.program("ffprobe", &FFPROBE.replace("REAL", &ffprobe));
 }
 
 /// The encoder's arguments in the ffmpeg wrapper's notes, a line each.
@@ -2222,8 +2237,8 @@ fn h264_with_every_sound_stream_as_aac_and_nothing_else() {
 
 #[test]
 fn short_sound_is_padded_to_the_video() {
-    // row X7: convert_video of bin/ascii-convert:419 at tag python-final (tests/test_convert.py:197): 3 s of video with 1 s of sound: the sound padded with silence, the file ending with the video: both 3 s
-    let sandbox = Sandbox::new();
+    // row X7: convert_video of bin/ascii-convert:419 and :423 at tag python-final (tests/test_convert.py:197): 3 s of video with 1 s of sound: the sound padded with silence to a second past the video's 75 frames at 25/1, `-af apad=whole_dur=4.000 -shortest` in the encoder's arguments, the file ending with the video: both 3 s; with the total unknown (an ffprobe that knows neither duration nor nb_frames) plain `-af apad`
+    let mut sandbox = Sandbox::new();
     let short = sandbox.path("short.mp4");
     ffmpeg(
         &sandbox,
@@ -2243,11 +2258,30 @@ fn short_sound_is_padded_to_the_video() {
             short.to_str().unwrap(),
         ],
     );
+    wrap_ffmpeg(&mut sandbox);
     let out = converted(&sandbox, &["-W", "320", "short.mp4"]);
     let (video, sound) = (length(&sandbox, &out, "v:0"), length(&sandbox, &out, "a:0"));
     assert!(
         (video - 3.0).abs() < 0.1 && (sound - 3.0).abs() < 0.15,
         "{video} s, {sound} s"
+    );
+    let args = encoder_args(&sandbox);
+    assert!(
+        args.contains("\n-c:a\naac\n-af\napad=whole_dur=4.000\n-shortest\n"),
+        "{args}"
+    );
+    wrap_ffprobe(&sandbox);
+    sandbox.set(
+        "PROBED",
+        r#"{"streams": [{"avg_frame_rate": "25/1"}], "format": {}}"#,
+    );
+    let ran = convert(&sandbox, &["-W", "320", "-o", "unknown.mp4", "short.mp4"]);
+    assert_eq!(ran.code, Some(0), "{ran:?}");
+    assert_eq!(progress(&ran.stderr).1, "?");
+    let args = encoder_args(&sandbox);
+    assert!(
+        args.contains("\n-c:a\naac\n-af\napad\n-shortest\n"),
+        "{args}"
     );
 }
 
@@ -2275,8 +2309,8 @@ fn progress(err: &str) -> (Vec<u64>, String) {
 
 #[test]
 fn progress_counts_the_frames_on_stderr() {
-    // row X8: convert_video of bin/ascii-convert:387 and :469 at tag python-final (tests/test_convert.py:205): `\r<done>/<total> frames` on stderr, terminal or not, from 0 up, a last one ended by a newline; the total the video stream's length times the rate (3 s of video with 4 s of sound: 75/75), else the container's (FLV: 10), else `?` (a raw AV1 stream)
-    let sandbox = Sandbox::new();
+    // row X8: convert_video of bin/ascii-convert:387 and :469 at tag python-final (tests/test_convert.py:205): `\r<done>/<total> frames` on stderr, terminal or not, from 0 up, a last one ended by a newline; the total the video stream's length times the rate (3 s of video with 4 s of sound: 75/75), else the container's (FLV: 10), else the stream's nb_frames (an ffprobe that knows neither duration: 10 of a 0.4 s MP4 at 25), else `?` (a raw AV1 stream)
+    let mut sandbox = Sandbox::new();
     let long = sandbox.path("long.mp4");
     ffmpeg(
         &sandbox,
@@ -2342,6 +2376,21 @@ fn progress_counts_the_frames_on_stderr() {
         "{}",
         shown(&out)
     );
+    silent_clip(&sandbox, "ten.mp4", 0.4, "160x90", 25);
+    wrap_ffprobe(&sandbox);
+    sandbox.set(
+        "PROBED",
+        r#"{"streams": [{"avg_frame_rate": "25/1", "nb_frames": "10"}], "format": {}}"#,
+    );
+    let ran = convert(&sandbox, &["-W", "320", "ten.mp4"]);
+    assert_eq!(ran.code, Some(0), "{ran:?}");
+    let (counts, total) = progress(&ran.stderr);
+    assert_eq!(
+        (counts.last(), total.as_str()),
+        (Some(&10), "10"),
+        "{ran:?}"
+    );
+    assert!(ran.stderr.ends_with("\r10/10 frames\n"), "{ran:?}");
 }
 
 #[test]
