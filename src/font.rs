@@ -138,6 +138,12 @@ impl Font {
 mod tests {
     use super::*;
 
+    fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
+        bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
     #[test]
     fn cell_is_pillows() {
         let font = Font::open(path(false).unwrap()).unwrap();
@@ -165,6 +171,39 @@ mod tests {
                 ascent: 33
             }
         );
+    }
+
+    #[test]
+    fn the_faces_are_fc_matchs_answers() {
+        // rows G8, G10: the files lib/ascii_term.py:21-26 font_path() takes from fc-match, for the family and for the family at weight 210: the regular face, and the heaviest at or under 210, ExtraBold here
+        for (bold, weight, style) in [(false, "", "Regular"), (true, ":weight=210", "ExtraBold")] {
+            let query = format!("JetBrainsMono Nerd Font Mono{weight}");
+            let asked = std::process::Command::new("fc-match")
+                .args(["-f", "%{file}", &query])
+                .output()
+                .unwrap();
+            let file = String::from_utf8(asked.stdout).unwrap();
+            assert_eq!(path(bold).unwrap(), Path::new(&file), "{query}");
+            let font = Font::open(path(bold).unwrap()).unwrap();
+            assert_eq!(font.face.style_name().as_deref(), Some(style), "{file}");
+        }
+    }
+
+    #[test]
+    fn ramps_are_the_python_tools_ramps() {
+        // rows G6, G8: lib/ascii_density.py:31-46 ramp() of the two faces lib/ascii_term.py:21-26 names, run 2026-11-12: the glyph order (the regular one is row G6's, after the space) and FNV-1a 64 of the coverages as little-endian f64 bytes; the bold face's ramp is its own
+        let regular = b" `.-',:_;~\"^!=+><r|?/\\LJlv*T()cxYzuit[]yf{7n}41IjsoFCZVehk23X6a9P5SwEUmAqpbd#KOHGgD0%R8&QBMN$W@";
+        let extra_bold = b" `.'-,:_;~\"!^<>+=*r?|\\/LJlv()TcxzYiuftyeno4s7][1I}{jCaZFVw#63hk29%XPm5ASEqpdbUGOKgH&08DRNM$QWB@";
+        for (bold, glyphs, covers) in [
+            (false, regular, 0xfe95_a742_87cf_2e0b),
+            (true, extra_bold, 0xcedd_bda7_369e_87f5),
+        ] {
+            let ramp = ramp(bold).unwrap();
+            assert_eq!(&ramp.glyphs, glyphs, "bold {bold}");
+            let bytes = ramp.cover.iter().flat_map(|cover| cover.to_le_bytes());
+            assert_eq!(fnv(bytes), covers, "bold {bold}");
+        }
+        assert_ne!(ramp(true).unwrap().glyphs, ramp(false).unwrap().glyphs);
     }
 
     #[test]
