@@ -27,6 +27,42 @@ fn drawn_out(tty: &Tty) {
     }
 }
 
+/// The synchronized update that holds the byte at `at`, from its `?2026h` to the end of its `?2026l`, waited for.
+fn update_at(tty: &Tty, at: usize) -> Vec<u8> {
+    let end = tty.expect(at, b"\x1b[?2026l");
+    let out = tty.out();
+    let start = out[..at]
+        .windows(8)
+        .rposition(|w| w == b"\x1b[?2026h")
+        .expect("an update begun");
+    out[start..end].to_vec()
+}
+
+/// The places (row, column) where an update writes picture rows, in order: a place, then bold or a colour code; the status row, its erasing, a toast and the keys start otherwise.
+fn picture_rows(update: &[u8]) -> Vec<(usize, usize)> {
+    let (mut rows, mut from) = (Vec::new(), 0);
+    while let Some(csi) = find(update, b"\x1b[", from) {
+        from = csi + 2;
+        let tail = &update[from..];
+        let digits = tail
+            .iter()
+            .take_while(|b| b.is_ascii_digit() || **b == b';')
+            .count();
+        let place = String::from_utf8_lossy(&tail[..digits]).into_owned();
+        let (Some(&b'H'), Some((row, col))) = (tail.get(digits), place.split_once(';')) else {
+            continue;
+        };
+        let body = &tail[digits + 1..];
+        if [&b"\x1b[1m"[..], b"\x1b[3", b"\x1b[9"]
+            .iter()
+            .any(|start| body.starts_with(start))
+        {
+            rows.push((row.parse().unwrap(), col.parse().unwrap()));
+        }
+    }
+    rows
+}
+
 #[test]
 fn usage_errors_exit_1_on_stderr() {
     // rows V1, N1: bin/ascii-viewer:2441 at tag python-final asks for one argument and both stdin and stdout terminals, else prints `usage: ascii-viewer FILE (needs a terminal)` (N1: `asciier`)
@@ -466,6 +502,99 @@ fn a_resize_redraws_at_the_new_size() {
     assert!(find(&tty.out(), b"\x1b[2J", before).is_some_and(|clear| clear < placed));
     let at = tty.send(b"3");
     tty.expect(at, b"\x1b[20;1H\x1b[7m level 5% darker");
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
+fn a_resize_draws_the_paused_frame_and_the_keys_again_from_a_cleared_screen() {
+    // row V10: SIGWINCH draws at once from a cleared screen (bin/ascii-viewer:2343-2346 at tag python-final, draw(clear=True)): a video's frame at the new size with its status on the new bottom row; the keys with their hint
+    let sandbox = Sandbox::new();
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_playing();
+    tty.send(b" ");
+    tty.await_status("| ");
+    // a frame no later one replaces: a seek's while paused, to 0, then 5 s on (frames decoded before the pause can land after a quiet while under load); the 16:9 counter covers all 80 columns of rows 2 to 22
+    for (keys, frame, status) in [(&b"j"[..], 0, "| 00:00"), (b"l", 125, "| 00:05")] {
+        tty.send(keys);
+        tty.until(&format!("frame {frame} and {status:?}"), |screen| {
+            counted(screen, 12, 1, 80) == frame && screen.row(24).starts_with(status)
+        });
+    }
+    let before = tty.len();
+    let taller = Size {
+        rows: 30,
+        cols: 100,
+        xpx: 900,
+        ypx: 600,
+    };
+    tty.resize(taller);
+    let cleared = tty.expect(before, b"\x1b[2J");
+    let update = update_at(&tty, cleared);
+    assert!(
+        update.starts_with(b"\x1b[?2026h\x1b[0m\x1b[2J\x1b[30;1H\x1b[2K"),
+        "{}",
+        shown(&update[..update.len().min(60)])
+    );
+    let rows = picture_rows(&update);
+    assert!(
+        !rows.is_empty() && rows.iter().all(|&(row, _)| (1..=29).contains(&row)),
+        "{rows:?}"
+    );
+    assert!(find(&update, b"\x1b[30;1H\x1b[0m| 00:05", 0).is_some());
+    // the same frame, across all 100 columns
+    assert_eq!(counted(tty.screen(), 15, 1, 100), 125);
+    assert!(tty.screen().row(30).starts_with("| 00:05"));
+    // the keys, then a lower window: drawn again from a cleared screen, the hint on its bottom row
+    let at = tty.send(F1);
+    tty.expect(
+        at,
+        b"\x1b[30;1H\x1b[2m j k scroll   any other key closes\x1b[0m\x1b[?2026l",
+    );
+    let before = tty.len();
+    tty.resize(Size {
+        rows: 20,
+        cols: 100,
+        xpx: 900,
+        ypx: 400,
+    });
+    let hint: &[u8] = b"\x1b[20;1H\x1b[2m j k scroll   any other key closes\x1b[0m\x1b[?2026l";
+    let end = tty.expect(before, hint);
+    let update = update_at(&tty, end - hint.len());
+    assert!(
+        update.starts_with(b"\x1b[?2026h\x1b[0m\x1b_Ga=d,d=A,q=2\x1b\\\x1b[2J\x1b[1;1H Keys"),
+        "{}",
+        shown(&update[..update.len().min(60)])
+    );
+    assert_eq!(tty.screen().row(20), " j k scroll   any other key closes");
+    tty.send(b"q");
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
+fn a_resize_draws_an_ascii_still_again_at_the_new_size() {
+    // row V10: tests/test_viewer_tty.py:143 at tag python-final in ASCII: CSI 2J, then the picture's rows at the new size (draw(clear=True), bin/ascii-viewer:2346)
+    let sandbox = Sandbox::new();
+    let mut tty = shown_still(&sandbox);
+    let before = tty.len();
+    tty.resize(Size {
+        rows: 30,
+        cols: 100,
+        xpx: 900,
+        ypx: 600,
+    });
+    let cleared = tty.expect(before, b"\x1b[2J");
+    let update = update_at(&tty, cleared);
+    assert!(
+        update.starts_with(b"\x1b[?2026h\x1b[0m\x1b_Ga=d,d=A,q=2\x1b\\\x1b[2J"),
+        "{}",
+        shown(&update[..update.len().min(60)])
+    );
+    // 800 x 400 px in 100 x 30 cells of 9 x 20 px: all 100 columns of rows 4 to 26
+    let rows: Vec<(usize, usize)> = (4..=26).map(|row| (row, 1)).collect();
+    assert_eq!(picture_rows(&update), rows);
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }
