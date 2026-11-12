@@ -1457,15 +1457,15 @@ fn the_font_is_looked_up_once_a_weight() {
     });
     quit(&mut tty);
     let noted = sandbox.noted("fc-match.calls");
-    let asked: Vec<&str> = noted
+    let asked: Vec<Vec<&str>> = noted
         .split_terminator("--\n")
-        .map(|call| call.lines().last().unwrap_or_default())
+        .map(|call| call.lines().collect())
         .collect();
     assert_eq!(
         asked,
         [
-            "JetBrainsMono Nerd Font Mono",
-            "JetBrainsMono Nerd Font Mono:weight=210"
+            ["-f", "%{file}", "JetBrainsMono Nerd Font Mono"],
+            ["-f", "%{file}", "JetBrainsMono Nerd Font Mono:weight=210"]
         ],
         "{noted:?}"
     );
