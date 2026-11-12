@@ -242,7 +242,7 @@ const OPTIONS: [(&str, &str); 29] = [
     ("video-timing-offset", "0"),
     ("audio-display", "no"),
     ("audio-pitch-correction", "no"),
-    ("image-display-duration", "inf"),
+    ("image-display-duration", "0"),
     ("sid", "no"),
     ("sub-auto", "no"),
     ("osd-level", "0"),
@@ -285,6 +285,15 @@ fn explain(error: c_int) -> String {
     // SAFETY: mpv returns a static string for every code.
     let words = unsafe { CStr::from_ptr(mpv_error_string(error)) };
     words.to_string_lossy().into_owned()
+}
+
+/// Whether mpv's demuxer (`file-format`) is one of FFmpeg's picture demuxers (`pcx_pipe`, `j2k_pipe`, `image2`, ...): a picture file. A track's `image` flag is no test: it also marks a one-frame Matroska video.
+fn picture(format: &str) -> bool {
+    format.ends_with("_pipe")
+        || matches!(
+            format,
+            "image2" | "image2pipe" | "alias_pix" | "brender_pix" | "fits" | "gif" | "ico"
+        )
 }
 
 /// Both of mpv's callbacks: `wake` is the function given to `Mpv::new`.
@@ -682,9 +691,14 @@ impl Mpv {
         match event.id {
             // reached from `open` alone, which may wait for mpv: nothing else loads a file
             FILE_LOADED => {
+                let format = self.get(c"file-format").unwrap_or_default();
                 // an exact seek in MPEG-TS and MPEG-PS lands past its target unless the demuxer starts earlier
-                if matches!(self.get(c"file-format").as_deref(), Some("mpegts" | "mpeg")) {
+                if matches!(format.as_str(), "mpegts" | "mpeg") {
                     self.set("hr-seek-demuxer-offset", "1.5");
+                }
+                // mpv holds any lone frame for image-display-duration: a picture stays until `q`, a one-frame video ends after its frame; set and waited for, as mpv may reorder an asynchronous request after the play
+                if picture(&format) {
+                    self.option("image-display-duration", "inf");
                 }
                 let plays = |track| self.get(track).is_some_and(|id| id != "no");
                 Some(Event::Loaded {
@@ -2191,6 +2205,29 @@ pub(crate) mod tests {
         );
         stage.mpv.set("pause", "no");
         assert_eq!(stage.pump(0.5, |_| false), [Event::Pause(false)]);
+    }
+
+    #[test]
+    fn a_one_frame_video_ends_after_its_frame() {
+        // rows P14, N7: a one-frame video file ends after its frame, also in Matroska, whose track mpv calls an image; mpv holds any lone frame for image-display-duration (seen before the fix: no end within 2 s)
+        for name in ["one.mp4", "one.mkv"] {
+            let mut stage = Stage::new();
+            let file = stage.file(name);
+            let mut args = vec!["-f", "lavfi", "-i", QUADRANTS, "-frames:v", "1"];
+            args.extend(H264);
+            args.push(file.to_str().unwrap());
+            ffmpeg(&args);
+            assert_eq!(stage.open(&file), (true, false), "{name}");
+            stage.settle();
+            assert_eq!(stage.picture.len(), 160 * 120 * 3, "{name}: its frame");
+            stage.mpv.pause(false);
+            let events = stage.pump(2.0, |e| *e == Event::Ended(true));
+            assert_eq!(
+                events.last(),
+                Some(&Event::Ended(true)),
+                "{name}: {events:?}"
+            );
+        }
     }
 
     #[test]

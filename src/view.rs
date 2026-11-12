@@ -489,11 +489,16 @@ impl Viewer {
                 Event::Ended(_) | Event::Loaded { .. } | Event::Failed(_) => {}
             }
         }
+        let p = self.playback().expect("media mode");
         if ended {
+            // a frame not drawn yet shows before the quit: the only frame of a one-frame video, taken undrawn before its shape, was seen with the shape and the end in one batch
+            if (frame || p.owed) && live {
+                self.frame();
+                self.flush();
+            }
             self.quit = true;
             return;
         }
-        let p = self.playback().expect("media mode");
         if frame {
             if !live || p.drawn.elapsed() < FRAME_GAP {
                 p.mpv.skip();

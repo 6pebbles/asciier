@@ -1483,9 +1483,8 @@ fn a_picture_only_mpv_decodes_shows_as_one_frame() {
 }
 
 #[test]
-#[ignore = "defect: a one-frame video draws its frame but never ends: mpv holds it as an image"]
 fn a_one_frame_video_draws_and_ends() {
-    // rows V17, P14: run in this harness the old viewer drew it and ended, exit 0 in 0.45 s
+    // rows V17, P14, N7: run in this harness the old viewer drew it and ended, exit 0 in 0.45 s
     let sandbox = Sandbox::new();
     let one = sandbox.path("one.mp4");
     ffmpeg(
