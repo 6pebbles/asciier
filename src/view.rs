@@ -13,6 +13,7 @@ use crate::term::{self, Geometry, Key, Term, Wake, kitty};
 use crate::theme::Theme;
 use crate::{NAME, Result, err, font};
 use image::RgbImage;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
@@ -164,8 +165,8 @@ struct Playback {
     owed: bool,
     /// The last frame as positioned ASCII rows.
     rows: Vec<u8>,
-    /// What a frame grab is for, while one is under way.
-    grab: Option<Grab>,
+    /// What each frame asked of mpv and not yet given is for, in the order asked.
+    grabs: VecDeque<Grab>,
 }
 
 impl Playback {
@@ -181,6 +182,7 @@ impl Playback {
     }
 }
 
+#[derive(PartialEq)]
 enum Grab {
     Shot,
     Page,
@@ -303,7 +305,7 @@ fn run(file: &Path) -> Result<()> {
                 drawn: Instant::now() - FRAME_GAP,
                 owed: false,
                 rows: Vec::new(),
-                grab: None,
+                grabs: VecDeque::new(),
             };
             playback.pause(false);
             if video {
@@ -467,7 +469,7 @@ impl Viewer {
     fn mpv_events(&mut self) {
         let live = self.help.is_none() && self.page.is_none();
         let Some(p) = self.playback() else { return };
-        let (mut frame, mut grabbed, mut ended) = (false, None, false);
+        let (mut frame, mut grabbed, mut ended) = (false, Vec::new(), false);
         for event in p.mpv.events() {
             match event {
                 Event::Frame => frame = true,
@@ -483,7 +485,7 @@ impl Viewer {
                     frame = true; // the frame mpv holds: the first one may have come before its shape
                 }
                 Event::Ended(true) if p.playing && !p.looping => ended = true,
-                Event::Grabbed(picture, time) => grabbed = Some((picture, time)),
+                Event::Grabbed(picture, time) => grabbed.push((picture, time)),
                 Event::Ended(_) | Event::Loaded { .. } | Event::Failed(_) => {}
             }
         }
@@ -500,7 +502,7 @@ impl Viewer {
                 self.frame();
             }
         }
-        if let Some((picture, time)) = grabbed {
+        for (picture, time) in grabbed {
             self.grabbed(picture, time);
         }
         self.ui.redraw(); // the status row follows the clock
@@ -836,8 +838,8 @@ impl Viewer {
         match &mut self.mode {
             Mode::Audio(..) => {}
             Mode::Video(p) => {
-                if p.shape.is_some() && p.grab.is_none() && p.mpv.grab() {
-                    p.grab = Some(Grab::Shot);
+                if p.shape.is_some() && p.mpv.grab() {
+                    p.grabs.push_back(Grab::Shot);
                     self.ui.say("screenshot ...");
                 }
             }
@@ -871,9 +873,9 @@ impl Viewer {
             return;
         };
         let time = time.unwrap_or(p.time);
-        let (grab, time) = (p.grab.take(), (time * 10.0).round_ties_even() / 10.0);
+        let (grab, time) = (p.grabs.pop_front(), (time * 10.0).round_ties_even() / 10.0);
         let out = convert::out_name(&self.file, Some(time), false);
-        let page = matches!(grab, Some(Grab::Page));
+        let page = grab == Some(Grab::Page);
         match (grab, picture) {
             (Some(Grab::Shot), Some(picture)) => self.save(&picture, &out, true),
             (Some(Grab::Shot), None) => self.ui.say("screenshot failed"),
@@ -892,7 +894,7 @@ impl Viewer {
 
     /// The frame for the render page is on its way: keys wait for the page.
     fn opening(&self) -> bool {
-        matches!(&self.mode, Mode::Video(p) if matches!(p.grab, Some(Grab::Page)))
+        matches!(&self.mode, Mode::Video(p) if p.grabs.contains(&Grab::Page))
     }
 
     /// `r`: the render page for the picture on screen; playback pauses meanwhile.
@@ -900,8 +902,8 @@ impl Viewer {
         match &mut self.mode {
             Mode::Audio(..) => {}
             Mode::Video(p) => {
-                if p.shape.is_some() && p.grab.is_none() && p.mpv.grab() {
-                    p.grab = Some(Grab::Page);
+                if p.shape.is_some() && p.mpv.grab() {
+                    p.grabs.push_back(Grab::Page);
                 }
             }
             Mode::Still(gallery) => {

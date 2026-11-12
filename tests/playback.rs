@@ -1036,6 +1036,79 @@ fn s_says_when_it_fails_and_draws_with_the_look() {
     assert_eq!(tty.exit(), 0);
 }
 
+/// Files of a folder closed after a write, from the watch's start on (inotify). Opens are watched too: inotify merges an event into an identical one still unread before it, and the open between two writes keeps them apart.
+struct Writes(std::os::fd::OwnedFd);
+
+impl Writes {
+    fn watch(folder: &Path) -> Writes {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(folder.as_os_str().as_bytes()).unwrap();
+        // SAFETY: plain calls; the descriptor is owned from here on.
+        unsafe {
+            let fd = libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK);
+            assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+            let fd = std::os::fd::OwnedFd::from_raw_fd(fd);
+            let mask = libc::IN_OPEN | libc::IN_CLOSE_WRITE;
+            let watch = libc::inotify_add_watch(fd.as_raw_fd(), path.as_ptr(), mask);
+            assert!(watch >= 0, "{}", std::io::Error::last_os_error());
+            Writes(fd)
+        }
+    }
+
+    /// The names of the files closed after a write since the last call.
+    fn names(&self) -> Vec<String> {
+        use std::os::fd::AsRawFd;
+        let (mut names, mut buf) = (Vec::new(), [0u8; 4096]);
+        loop {
+            // SAFETY: a read into a buffer of that size.
+            let n = unsafe { libc::read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 {
+                return names;
+            }
+            // each event: wd, mask, cookie, len (4 bytes each), then a name of len bytes padded with NULs
+            let mut at = 0;
+            while at + 16 <= n as usize {
+                let field =
+                    |from: usize| u32::from_ne_bytes(buf[from..from + 4].try_into().unwrap());
+                let (mask, len) = (field(at + 4), field(at + 12) as usize);
+                if mask & libc::IN_CLOSE_WRITE != 0 {
+                    let name = String::from_utf8_lossy(&buf[at + 16..at + 16 + len]);
+                    names.push(name.trim_end_matches('\0').to_string());
+                }
+                at += 16 + len;
+            }
+        }
+    }
+}
+
+#[test]
+fn each_s_saves_its_own_screenshot() {
+    // row P21: screenshot of bin/ascii-viewer:1621 at tag python-final starts a converter for each press, each writing its file, the same file again within the same tenth: two `s` in one write on a paused frame write it twice (run in this harness the old viewer started two converters at once, as a log in a copy of it showed, and this watch read their writes as one: inotify merges identical events left unread); seen before the fix: one write, the second press dropped while the first's frame was on its way
+    let sandbox = Sandbox::new();
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 6.0, 6.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_playing();
+    pause(&mut tty);
+    lands(&mut tty, LEFT, 0, "| 00:00");
+    let writes = Writes::watch(&sandbox.path("."));
+    let at = tty.send(b"ss");
+    tty.expect(at, toast("saved clip-ascii-0s.png"));
+    let (mut written, end) = (Vec::new(), Instant::now() + PATIENCE);
+    while written.len() < 2 && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+        written.extend(
+            writes
+                .names()
+                .into_iter()
+                .filter(|name| name.starts_with("clip-ascii-")),
+        );
+    }
+    assert_eq!(written, ["clip-ascii-0s.png"; 2]);
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
 /// The output name the render page shows on its second row.
 fn page_name(tty: &mut Tty) -> String {
     let row = tty.screen().row(2);

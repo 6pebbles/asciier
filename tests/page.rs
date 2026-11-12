@@ -1238,15 +1238,25 @@ fn keys_right_after_r_on_a_video_act_on_the_page() {
 }
 
 #[test]
-#[ignore = "defect: r right after s on a video is dropped while the screenshot's frame is on its way"]
 fn r_right_after_s_on_a_video_opens_the_page() {
-    // rows P22, P21, V14: screenshot of bin/ascii-viewer:1621 at tag python-final runs in the background, each press its own run, and r opens the page meanwhile; run in this harness the old viewer opened it; seen here: the screenshot saved, no page
+    // rows P22, P21, V14: screenshot of bin/ascii-viewer:1621 at tag python-final runs in the background, each press its own run, and r opens the page meanwhile; run in this harness the old viewer opened it and saved the screenshot; seen before the fix: the screenshot saved, no page (r was dropped while the screenshot's frame was on its way)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
     tty.send(b"sr");
     tty.until("the page", |screen| screen.row(1).starts_with(" Render"));
+    let end = std::time::Instant::now() + PATIENCE;
+    while !std::fs::read_dir(sandbox.path(".")).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("clip-ascii-")
+    }) {
+        assert!(std::time::Instant::now() < end, "no screenshot");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     tty.send(b"q");
     tty.until("the player", |screen| seconds(&screen.row(24)).is_some());
     tty.send(b"q");
