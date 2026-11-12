@@ -27,7 +27,7 @@ fn drawn_out(tty: &Tty) {
     }
 }
 
-/// The synchronized update that holds the byte at `at`, from its `?2026h` to the end of its `?2026l`, waited for.
+/// The synchronized update that holds the byte at `at`, from its `?2026h` to the end of its `?2026l`, waited for; the test fails when that byte was written outside every update.
 fn update_at(tty: &Tty, at: usize) -> Vec<u8> {
     let end = tty.expect(at, b"\x1b[?2026l");
     let out = tty.out();
@@ -35,6 +35,11 @@ fn update_at(tty: &Tty, at: usize) -> Vec<u8> {
         .windows(8)
         .rposition(|w| w == b"\x1b[?2026h")
         .expect("an update begun");
+    assert!(
+        find(&out[start..at], b"\x1b[?2026l", 0).is_none(),
+        "byte {at} is outside the update begun before it: {}",
+        shown(&out[start..end.min(start + 3000)])
+    );
     out[start..end].to_vec()
 }
 
