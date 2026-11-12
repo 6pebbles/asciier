@@ -1278,9 +1278,24 @@ impl Writes {
     }
 }
 
+/// The screenshots written beside the clip from now until `count` writes were seen (at most `PATIENCE`), by name, in order.
+fn shots_written(writes: &Writes, count: usize) -> Vec<String> {
+    let (mut written, end) = (Vec::new(), Instant::now() + PATIENCE);
+    while written.len() < count && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+        written.extend(
+            writes
+                .names()
+                .into_iter()
+                .filter(|name| name.starts_with("clip-ascii-")),
+        );
+    }
+    written
+}
+
 #[test]
 fn each_s_saves_its_own_screenshot() {
-    // row P21: screenshot of bin/ascii-viewer:1621 at tag python-final starts a converter for each press, each writing its file, the same file again within the same tenth: two `s` in one write on a paused frame write it twice (run in this harness the old viewer started two converters at once, as a log in a copy of it showed, and this watch read their writes as one: inotify merges identical events left unread); seen before the fix: one write, the second press dropped while the first's frame was on its way
+    // row P21: screenshot of bin/ascii-viewer:1621 at tag python-final starts a converter for each press, each writing its file, named by its own frame's time, the same file again within the same tenth: two `s` in one write on a paused frame write it twice (run in this harness the old viewer started two converters at once, as a log in a copy of it showed, and this watch read their writes as one: inotify merges identical events left unread); seen before the fix: one write, the second press dropped while the first's frame was on its way; on a playing clip two writes too, each file named by the frame it holds (N5: its time to 0.1 s), and the last toast names the last; a toast cannot be counted: it is drawn again with each frame, and the second replaces the first
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 6.0, 6.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
@@ -1290,17 +1305,19 @@ fn each_s_saves_its_own_screenshot() {
     let writes = Writes::watch(&sandbox.path("."));
     let at = tty.send(b"ss");
     tty.expect(at, toast("saved clip-ascii-0s.png"));
-    let (mut written, end) = (Vec::new(), Instant::now() + PATIENCE);
-    while written.len() < 2 && Instant::now() < end {
-        std::thread::sleep(Duration::from_millis(20));
-        written.extend(
-            writes
-                .names()
-                .into_iter()
-                .filter(|name| name.starts_with("clip-ascii-")),
-        );
+    assert_eq!(shots_written(&writes, 2), ["clip-ascii-0s.png"; 2]);
+    tty.send(b" ");
+    tty.until("playing on", |screen| {
+        screen.row(24).starts_with("> ") && frame(screen) > 10
+    });
+    let at = tty.send(b"ss");
+    let written = shots_written(&writes, 2);
+    assert_eq!(written.len(), 2, "{written:?}");
+    tty.expect(at, toast(&format!("saved {}", written[1])));
+    for name in &written {
+        let held = saved(&sandbox.path(name)).0;
+        assert_eq!(*name, format!("clip-ascii-{}s.png", tenths(held * 4)));
     }
-    assert_eq!(written, ["clip-ascii-0s.png"; 2]);
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }
