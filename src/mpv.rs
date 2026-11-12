@@ -1227,6 +1227,7 @@ pub(crate) mod tests {
 
     #[test]
     fn conf_gives_its_audio_options_only() {
+        // rows P5, N18: of the user's mpv.conf the audio options are read, as mpv reads its lines (the old viewer's mpv read the whole file)
         let conf = "\u{feff}# audio\nao=null\nvolume-max=200\n  volume = 70 # loud\nvo=gpu\npause\nmute\n\
                     audio-device='alsa/default' # quoted\naf=\"lavfi=[loudnorm]\"\naudio-client-name=%5%a b#c\n\
                     replaygain=track\ninput-ipc-server=/tmp/sock\n--audio-channels=stereo\nhwdec=auto\nmute now\n\
@@ -1277,6 +1278,7 @@ pub(crate) mod tests {
     fn new_names_the_stream_and_keeps_the_viewers_options() {
         let conf = "ao=null\nvolume-max=200\nvo=null\npause=yes\naudio-pitch-correction=yes\n[x]\nvolume=5\n";
         let stage = Stage::with_conf(conf);
+        // rows P5, A2, N1, N18: mpv.conf's volume-max applies, its other options do not, pitch is not corrected; the stream's node name is the caller's (`asciier-<pid>` in the viewer)
         // tests/test_viewer.py:647: PIPEWIRE_PROPS == "{ node.name = <stream> }"
         assert_eq!(
             std::env::var("PIPEWIRE_PROPS").unwrap(),
@@ -1328,6 +1330,7 @@ pub(crate) mod tests {
 
     #[test]
     fn open_reports_the_tracks() {
+        // row P26: a file with cover art opens as audio alone
         let tracks = |make: &dyn Fn(&Stage) -> PathBuf| {
             let mut stage = Stage::new();
             let file = make(&stage);
@@ -1443,6 +1446,7 @@ pub(crate) mod tests {
 
     #[test]
     fn plays_at_the_clips_rate() {
+        // rows P2, P4: a 25 fps clip plays at 25 frames a second, in order, its frames on mpv's clock, which `ao=null` runs at the wall clock's pace
         let mut stage = Stage::new();
         let woken = WOKEN.load(Ordering::Relaxed);
         assert_eq!(stage.clip(2.0, 2.0), (true, true));
@@ -1625,6 +1629,7 @@ pub(crate) mod tests {
     fn seeks_and_steps_land_on_the_frame() {
         // tests/test_viewer.py:47-58: times count from the container's start (the first frame under 0.25 s) and a seek lands on time: there within 0.021 s, on the frame at or before the target; mpv shows the first frame at or after it
         // rows N2, N3: a step is one source frame, also above 30 frames a second
+        // row P23: MPEG-TS whose timestamps start at 3 s counts from its start, and its seeks land on time
         let late: &[&str] = &["-output_ts_offset", "3"];
         for (name, rate, extra) in [
             ("plain.mp4", 25, &[][..]),
@@ -1726,6 +1731,7 @@ pub(crate) mod tests {
 
     #[test]
     fn speed_volume_and_mute_are_reported() {
+        // row P12: the mute `m` asks for is mpv's and comes back reported (the key and its toasts: tests/playback.rs)
         let mut stage = Stage::new();
         stage.clip(2.0, 2.0);
         stage.settle();
@@ -1952,6 +1958,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_turned_clip_comes_upright() {
+        // row P1: a display matrix of 90, 180 or 270 degrees turns the picture drawn and the frame grabbed upright, as ffmpeg turns it
         for (asked, turn) in [("90", 270), ("270", 90), ("180", 180)] {
             let mut stage = Stage::new();
             let (flat, file) = (stage.file("flat.mp4"), stage.file("turned.mp4"));

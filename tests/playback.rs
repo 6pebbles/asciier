@@ -306,7 +306,7 @@ fn seeks_move_by_their_steps_and_stop_at_both_ends() {
         (DOWN, 0),
         (b"k", 600),
         (b"j", 0),
-        // a batch adds up (row V14): 180 s on, held at the last frame
+        // three in one write: held at the last frame (that a batch adds up to one seek, row V14, needs a target short of the end)
         (b"kkk", 1304),
         (b"jjj", 0),
     ];
