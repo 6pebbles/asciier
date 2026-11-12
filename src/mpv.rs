@@ -36,8 +36,8 @@ pub enum Event {
         h: u32,
         turn: u32,
     },
-    /// The frame asked for with `grab`, upright, at source size; `None` when mpv had none.
-    Grabbed(Option<RgbImage>),
+    /// The frame asked for with `grab`, upright, at source size (`None` when mpv had none), and the position mpv gave right after it took the frame: that frame's time.
+    Grabbed(Option<RgbImage>, Option<f64>),
 }
 
 pub struct Mpv {
@@ -55,6 +55,8 @@ pub struct Mpv {
     stepped: bool,
     /// `pause` requests mpv has not confirmed yet: its reports of `pause` until then can be older than them.
     pausing: u32,
+    /// The frame of a grab whose time mpv has not given yet.
+    taken: Option<Option<RgbImage>>,
     /// What mpv renders into, 63 bytes longer than the picture: it starts at a multiple of 64.
     surface: Vec<u8>,
     /// mpv's `volume-max`, read when a file opened.
@@ -119,6 +121,7 @@ struct Param {
 }
 
 const EVENT_NONE: c_int = 0;
+const GET_PROPERTY_REPLY: c_int = 3;
 const SET_PROPERTY_REPLY: c_int = 4;
 const COMMAND_REPLY: c_int = 5;
 const END_FILE: c_int = 7;
@@ -142,7 +145,7 @@ const SW_FORMAT: c_int = 18;
 const SW_STRIDE: c_int = 19;
 const SW_POINTER: c_int = 20;
 const UPDATE_FRAME: u64 = 1;
-/// `reply_userdata` of the `screenshot-raw` behind `grab`.
+/// `reply_userdata` of the `screenshot-raw` and the `time-pos` read behind `grab`.
 const GRAB: u64 = 1;
 /// `reply_userdata` of the `pause` set behind `pause`.
 const PAUSE: u64 = 2;
@@ -164,6 +167,12 @@ unsafe extern "C" {
         name: *const c_char,
         format: c_int,
         value: *mut c_void,
+    ) -> c_int;
+    fn mpv_get_property_async(
+        mpv: *mut c_void,
+        userdata: u64,
+        name: *const c_char,
+        format: c_int,
     ) -> c_int;
     fn mpv_get_property_string(mpv: *mut c_void, name: *const c_char) -> *mut c_char;
     fn mpv_observe_property(
@@ -324,6 +333,7 @@ impl Mpv {
             ended: false,
             stepped: false,
             pausing: 0,
+            taken: None,
             surface: Vec::new(),
             volume_max: 130.0,
         };
@@ -545,7 +555,16 @@ impl Mpv {
                     _ => Event::Ended(true),
                 })
             }
-            COMMAND_REPLY if event.userdata == GRAB => Some(Event::Grabbed(self.grabbed(event))),
+            COMMAND_REPLY if event.userdata == GRAB => {
+                self.taken = Some(self.grabbed(event));
+                None
+            }
+            GET_PROPERTY_REPLY if event.userdata == GRAB => {
+                // SAFETY: the data of this event is an `mpv_event_property` whose value, without an error, is the double asked for.
+                let time = (event.error >= 0)
+                    .then(|| unsafe { *((*(event.data as *const Property)).data as *const f64) });
+                Some(Event::Grabbed(self.taken.take().flatten(), time))
+            }
             SET_PROPERTY_REPLY if event.userdata == PAUSE => {
                 self.pausing = self.pausing.saturating_sub(1);
                 None
@@ -661,9 +680,11 @@ impl Mpv {
         unsafe { mpv_render_context_render(self.render, params.as_mut_ptr()) };
     }
 
-    /// Ask for the frame mpv holds, at source size; it arrives as `Event::Grabbed`.
+    /// Ask for the frame mpv holds, at source size, and its time; they arrive as `Event::Grabbed`. mpv takes both requests in order on its own thread, the time right after the frame, before it plays on; a `time-pos` report read later is a later frame's.
     pub fn grab(&self) {
         self.send(GRAB, &[c"screenshot-raw".into(), c"video".into()]);
+        // SAFETY: the name lives through the call.
+        unsafe { mpv_get_property_async(self.handle, GRAB, c"time-pos".as_ptr(), DOUBLE) };
     }
 
     /// The picture in the reply to `screenshot-raw`: a map of `w`, `h`, `stride`, `format` (bgr0) and `data`.
@@ -1651,8 +1672,8 @@ pub(crate) mod tests {
             );
 
             stage.mpv.grab();
-            let events = stage.pump(2.0, |e| matches!(e, Event::Grabbed(_)));
-            let Some(Event::Grabbed(Some(grabbed))) = events.last() else {
+            let events = stage.pump(2.0, |e| matches!(e, Event::Grabbed(..)));
+            let Some(Event::Grabbed(Some(grabbed), _)) = events.last() else {
                 panic!("{asked}: {events:?}")
             };
             assert_eq!(grabbed.dimensions(), (w as u32, h as u32), "{asked}");
@@ -1670,22 +1691,29 @@ pub(crate) mod tests {
         let mut stage = Stage::new();
         assert_eq!(stage.clip(2.0, 0.0), (true, false));
         stage.settle();
-        let grab = |stage: &mut Stage| {
+        // the frame, read `busy` after asking, and its time: row N5, that frame's
+        let grab = |stage: &mut Stage, busy: Duration| {
             stage.mpv.grab();
-            let events = stage.pump(2.0, |e| matches!(e, Event::Grabbed(_)));
-            let Some(Event::Grabbed(Some(grabbed))) = events.last() else {
+            std::thread::sleep(busy);
+            let events = stage.pump(2.0, |e| matches!(e, Event::Grabbed(..)));
+            let Some(Event::Grabbed(Some(grabbed), Some(time))) = events.last() else {
                 panic!("{events:?}")
             };
             // at source size, whatever size is drawn
             assert_eq!(grabbed.dimensions(), (160, 120));
-            number(grabbed.as_raw(), 160, 120)
+            let number = number(grabbed.as_raw(), 160, 120);
+            assert!(
+                near(*time, number as f64 / 25.0, 0.001),
+                "frame {number} at {time}"
+            );
+            number
         };
         stage.size = (16, 12);
         // row N5: the frame on screen when paused, also after a step back
         stage.until_at(&["seek", "1.2", "absolute+exact"], 30, 1.2);
-        assert_eq!(grab(&mut stage), 30);
+        assert_eq!(grab(&mut stage, Duration::ZERO), 30);
         stage.until_at(&["frame-back-step"], 29, 1.16);
-        assert_eq!(grab(&mut stage), 29);
+        assert_eq!(grab(&mut stage, Duration::ZERO), 29);
         // row P6: without sound the picture plays on at its pace
         stage.play_to(1.2);
         let (start, from) = (Instant::now(), stage.time);
@@ -1693,12 +1721,14 @@ pub(crate) mod tests {
         let pace = (stage.time - from) / start.elapsed().as_secs_f64();
         assert!(near(pace, 1.0, 0.2), "{pace} s of the clip a second");
         // row N5: playing, within 3 frames of the frame drawn last
-        let grabbed = grab(&mut stage);
+        let grabbed = grab(&mut stage, Duration::ZERO);
         let drawn = *stage.shown.last().unwrap();
         assert!(
             grabbed + 3 >= drawn && grabbed <= drawn + 3,
             "frame {grabbed} grabbed, {drawn} drawn"
         );
+        // a client busy while mpv plays on: its later reports of `time-pos` are later frames'
+        grab(&mut stage, Duration::from_millis(300));
     }
 
     #[test]
@@ -1764,7 +1794,10 @@ pub(crate) mod tests {
         let events = stage.pump(3.0, |e| *e == Event::Ended(true));
         assert_eq!(events.last(), Some(&Event::Ended(true)), "{events:?}");
         assert!(near(start.elapsed().as_secs_f64(), 1.0, 0.3));
-        assert!(events.contains(&Event::Grabbed(None)), "{events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Grabbed(None, _))),
+            "{events:?}"
+        );
         assert!(
             !events
                 .iter()

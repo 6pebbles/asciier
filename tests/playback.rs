@@ -1076,9 +1076,8 @@ fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
 }
 
 #[test]
-#[ignore = "defect: a frame taken while playing is named by the clock when mpv's answer is read, frames after it"]
 fn a_frame_taken_while_playing_is_named_by_its_time() {
-    // rows N5, P22: the name's time is that of the frame mpv holds, to 0.1 s (open_page of bin/ascii-viewer:2048 at tag python-final named it by the frame on screen); keys right after `r` keep the viewer busy while mpv answers and plays on (each `c` draws the frame again; 40 leave the colour as it was); seen in a full parallel run without them: `clip-ascii-1.8s.png` holding frame 41 (1.64 s)
+    // rows N5, P22: the name's time is that of the frame mpv holds, to 0.1 s (open_page of bin/ascii-viewer:2048 at tag python-final named it by the frame on screen); keys right after `r` keep the viewer busy while mpv answers and plays on (each `c` draws the frame again; 40 leave the colour as it was); seen before the fix, named by the clock when the answer was read: 5.1 to 5.4 s for frames at 1.1 and 1.2 s, and in a full parallel run without the keys `clip-ascii-1.8s.png` holding frame 41 (1.64 s)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 8.0, 8.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();

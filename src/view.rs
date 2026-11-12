@@ -474,7 +474,7 @@ impl Viewer {
                     frame = true; // the frame mpv holds: the first one may have come before its shape
                 }
                 Event::Ended(true) if p.playing && !p.looping => ended = true,
-                Event::Grabbed(picture) => grabbed = Some(picture),
+                Event::Grabbed(picture, time) => grabbed = Some((picture, time)),
                 Event::Ended(_) | Event::Loaded { .. } | Event::Failed(_) => {}
             }
         }
@@ -491,8 +491,8 @@ impl Viewer {
                 self.frame();
             }
         }
-        if let Some(picture) = grabbed {
-            self.grabbed(picture);
+        if let Some((picture, time)) = grabbed {
+            self.grabbed(picture, time);
         }
         self.ui.redraw(); // the status row follows the clock
     }
@@ -852,12 +852,13 @@ impl Viewer {
         });
     }
 
-    /// The frame asked of mpv arrived: the screenshot's, or the render page's.
-    fn grabbed(&mut self, picture: Option<RgbImage>) {
+    /// The frame asked of mpv arrived, with its time: the screenshot's, or the render page's.
+    fn grabbed(&mut self, picture: Option<RgbImage>, time: Option<f64>) {
         let Mode::Video(p) = &mut self.mode else {
             return;
         };
-        let (grab, time) = (p.grab.take(), (p.time * 10.0).round_ties_even() / 10.0);
+        let time = time.unwrap_or(p.time);
+        let (grab, time) = (p.grab.take(), (time * 10.0).round_ties_even() / 10.0);
         let out = convert::out_name(&self.file, Some(time), false);
         match (grab, picture) {
             (Some(Grab::Shot), Some(picture)) => self.save(&picture, &out, true),
