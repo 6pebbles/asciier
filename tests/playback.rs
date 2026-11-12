@@ -401,8 +401,7 @@ fn a_step_on_the_last_frame_keeps_its_place() {
         let sandbox = Sandbox::new();
         let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, audio, &[]);
         let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-        tty.await_playing();
-        pause(&mut tty);
+        paused_at_once(&mut tty);
         lands(&mut tty, LEFT, 0, "| 00:00");
         lands(&mut tty, b"\x1b[1;2C\x1b[1;2C", 50, "| 00:02");
         for number in 51..=54 {
@@ -436,8 +435,7 @@ fn a_step_back_soon_after_a_step_onto_the_last_frame_shows_the_frame_before() {
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 2.5, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    tty.await_playing();
-    pause(&mut tty);
+    paused_at_once(&mut tty);
     lands(&mut tty, LEFT, 0, "| 00:00");
     lands(&mut tty, b"\x1b[1;2C\x1b[1;2C", 50, "| 00:02");
     for number in 51..=53 {
@@ -1084,9 +1082,9 @@ fn s_saves_the_frame_on_screen_beside_the_clip() {
 
 #[test]
 fn a_clip_paused_while_playing_takes_and_seeks_from_the_frame_on_screen() {
-    // rows N5, P9: paused by `space` at whatever point of a frame, `s` saves the frame that then shows, named by its time, and a seek counts from that frame, no other frame drawn before the target; the debug build draws a 200 x 60 window slower than the clip's 25 frames a second, and under load slower than mpv waits for a frame to be taken: the screen then stayed on a frame before the one `s` took (seen in a parallel run before `Mpv::events` reported the late frame: 66 on screen, `clip-ascii-2.7s.png` taken); on an idle machine the guard is `a_caller_slower_than_mpv_waits_draws_the_frame_mpv_holds` in src/mpv.rs, which fails without the late frame (3 of 3: 36 drawn, 47 held); a 400 x 120 window failed here without it 4 of 4 idle, but under load ran this clip out and slowed the group's timed tests into failing
+    // rows N5, P9: paused by `space` at whatever point of a frame, `s` saves the frame that then shows, named by its time, and a seek counts from that frame, no other frame drawn before the target; the debug build draws a 200 x 60 window slower than the clip's 25 frames a second, and under load slower than mpv waits for a frame to be taken: the screen then stayed on a frame before the one `s` took (seen in a parallel run before `Mpv::events` reported the late frame: 66 on screen, `clip-ascii-2.7s.png` taken); on an idle machine the guard is `a_caller_slower_than_mpv_waits_draws_the_frame_mpv_holds` in src/mpv.rs, which fails without the late frame (3 of 3: 36 drawn, 47 held); a 400 x 120 window failed here without it 4 of 4 idle, but under load ran this clip out and slowed the group's timed tests into failing; the clip lasts 30 s, as under load 10 s ran out; the frame a second on is read from whole draws: under load the screen showed it half written, before the draw's end
     let sandbox = Sandbox::new();
-    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 30.0, 30.0, &[]);
     let mut tty = sandbox.view(&video);
     tty.await_playing();
     // the picture covers rows 5 to 55 of the window
@@ -1103,9 +1101,10 @@ fn a_clip_paused_while_playing_takes_and_seeks_from_the_frame_on_screen() {
         assert_eq!(name, format!("clip-ascii-{}s.png", tenths(held * 4)));
         tty.until("the frame taken", |screen| frame(screen) == held);
         let from = tty.send(SHIFT_RIGHT);
-        tty.until("a second on", |screen| {
-            frame(screen) == held + 25 && screen.row(60).starts_with("| ")
-        });
+        let on = |screen: &Screen| frame(screen) == held + 25 && screen.row(60).starts_with("| ");
+        if !tty.wait(from, PATIENCE, |out| replay(out, WIDE, on).contains(&true)) {
+            tty.fail(&format!("no draw of frame {} paused", held + 25));
+        }
         let mut after = replay(&tty.out()[from..], WIDE, frame);
         after.dedup();
         after.retain(|number| *number != held);
