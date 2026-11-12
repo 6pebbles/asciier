@@ -47,7 +47,7 @@ const VIVID: &str =
 const HELD: &str =
     r#"n=0; while [ ! -e "$DUMP/go" ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n + 1)); done"#;
 
-/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $DECODE_BYTES: the decoder fails after that many bytes; $GRAB: a frame grab ignores Ctrl-C and waits for $DUMP/go, `$DUMP/held` said first.
+/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $DECODE_BYTES: the decoder fails after that many bytes; $STALL: the decoder gives that many bytes, then nothing, its pipe open, until $DUMP/go, `$DUMP/held` said first; $GRAB: a frame grab ignores Ctrl-C and waits for $DUMP/go, `$DUMP/held` said first.
 const FFMPEG: &str = r#"#!/bin/sh
 held() { HELD; }
 case " $* " in
@@ -64,6 +64,7 @@ case " $* " in
 *" -an "*)
     printf '%s\n' "$@" > "$DUMP/decode.args"
     if [ -n "$DECODE_BYTES" ]; then "$REAL" "$@" | head -c "$DECODE_BYTES" | tee "$DUMP/decode.ppm"; exit 1; fi
+    if [ -n "$STALL" ]; then "$REAL" "$@" 2> /dev/null | head -c "$STALL" | tee "$DUMP/decode.ppm"; touch "$DUMP/held"; held; exit 0; fi
     "$REAL" "$@" | tee "$DUMP/decode.ppm" ;;
 *" -frames:v "*)
     if [ -n "$GRAB" ]; then trap '' INT; touch "$DUMP/held"; held; fi
@@ -2212,6 +2213,35 @@ fn ctrl_c_writes_the_frames_in_flight_and_finishes_the_file() {
     let fed = std::fs::metadata(sandbox.path("encode.raw")).unwrap().len() as usize;
     assert_eq!(fed, done * FRAME);
     assert_eq!(frames_in(&sandbox, &sandbox.path("long-out.mp4")), done);
+    await_gone(&sandbox);
+}
+
+#[test]
+fn ctrl_c_while_the_decoder_writes_nothing_stops_the_reading() {
+    // rows X9, N25: convert_video of bin/ascii-convert:461 at tag python-final: Ctrl-C reached the old converter in its read of the decoder's pipe (KeyboardInterrupt), so a decoder that writes nothing held no Ctrl-C up: it ended within 3 s of one SIGINT with X9's message (reviewer's probe); a decoder that gives 5 of 20 frames, then nothing with its pipe open, and one Ctrl-C once the 5 are written: the decoder killed, the file finished with the 5, on stderr the progress then `stopped at frame 5: <out> holds the part converted`, the path printed, death by SIGINT, nothing left running
+    let mut sandbox = Sandbox::new();
+    clip(&sandbox, "clip.mp4", 0.8, "160x90", 25);
+    wrap_ffmpeg(&mut sandbox);
+    sandbox.set("STALL", (5 * PPM_FRAME).to_string());
+    let run = Running::start(
+        &sandbox,
+        &["-W", "320", "-H", "180", "-o", "clip-out.mp4", "clip.mp4"],
+    );
+    await_file(&sandbox.path("held"));
+    run.await_err("\r5/20 frames");
+    run.interrupt();
+    let (status, out, err) = run.finish();
+    assert_eq!(
+        (status.signal(), out.as_str()),
+        (Some(libc::SIGINT), "clip-out.mp4\n"),
+        "{err:?}"
+    );
+    let shown = err
+        .strip_suffix("stopped at frame 5: clip-out.mp4 holds the part converted\n")
+        .unwrap_or_else(|| panic!("{err:?}"));
+    let (counts, total) = progress(shown);
+    assert_eq!((counts.last(), total.as_str()), (Some(&5), "20"), "{err:?}");
+    assert_eq!(frames_in(&sandbox, &sandbox.path("clip-out.mp4")), 5);
     await_gone(&sandbox);
 }
 

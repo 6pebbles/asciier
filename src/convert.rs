@@ -14,6 +14,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fit {
@@ -96,8 +97,10 @@ output:
 
 /// Ctrl-C, noted for the whole run: before a video's encoding what runs is killed and nothing made counts; while its frames are read the reading stops and the file is finished (row X9); after the reading the file is finished and nothing said (row C10).
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-/// Set once a video's decoder and encoder are to start: from then on Ctrl-C kills nothing.
+/// Set once a video's decoder and encoder are to start: from then on Ctrl-C kills the decoder alone, while its frames are read.
 static ENCODING: AtomicBool = AtomicBool::new(false);
+/// The decoder's process group while its frames are read (0: none): Ctrl-C kills it then, since a decoder that writes nothing holds the reading up; locked under the kill, so that it is not reaped meanwhile.
+static DECODER: Mutex<libc::pid_t> = Mutex::new(0);
 /// The pipe's end through which SIGINT's handler wakes the Ctrl-C thread.
 static WAKE: AtomicI32 = AtomicI32::new(-1);
 
@@ -187,7 +190,7 @@ extern "C" fn on_ctrl_c(_: libc::c_int) {
     }
 }
 
-/// Ctrl-C for the whole run: a handler notes it and wakes a thread of its own, which, before a video's encoding, kills every child of the main thread: a child may outlive the terminal's SIGINT, or get none when it was sent to the converter alone. A child starts with SIGINT as usual: exec resets a handler, and no signal is blocked. A SIGINT the parent left ignored stays so: a shell without job control starts a background job so, and the terminal's Ctrl-C is not that job's.
+/// Ctrl-C for the whole run: a handler notes it and wakes a thread of its own, which, before a video's encoding, kills every child of the main thread: a child may outlive the terminal's SIGINT, or get none when it was sent to the converter alone; while a video's frames are read it kills the decoder's group, whose pipe the reader still holds open. A child starts with SIGINT as usual: exec resets a handler, and no signal is blocked. A SIGINT the parent left ignored stays so: a shell without job control starts a background job so, and the terminal's Ctrl-C is not that job's.
 fn catch_ctrl_c() {
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     let mut ends = [0; 2];
@@ -206,7 +209,14 @@ fn catch_ctrl_c() {
     std::thread::spawn(move || {
         while woken.read_exact(&mut [0]).is_ok() {
             // a child between its fork and its exec runs the handler too
-            if !INTERRUPTED.load(Ordering::SeqCst) || ENCODING.load(Ordering::SeqCst) {
+            if !INTERRUPTED.load(Ordering::SeqCst) {
+                continue;
+            }
+            if ENCODING.load(Ordering::SeqCst) {
+                let decoder = decoder_group();
+                if *decoder != 0 {
+                    kill(*decoder);
+                }
                 continue;
             }
             let children = std::fs::read_to_string(format!("/proc/{main}/task/{main}/children"))
@@ -667,6 +677,10 @@ fn kill(leader: libc::pid_t) {
     unsafe { libc::kill(-leader, libc::SIGKILL) };
 }
 
+fn decoder_group() -> MutexGuard<'static, libc::pid_t> {
+    DECODER.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// `source` to `out`: ffmpeg decodes at the output's detail, each frame is drawn, ffmpeg encodes; `first` is the frame at 0 s, uncropped.
 fn video(
     options: &Options,
@@ -768,6 +782,7 @@ fn video(
     let mut frames = BufReader::with_capacity(1 << 20, decode.stdout.take().expect("piped"));
     let mut sink = encode.stdin.take().expect("piped");
     let (mut done, mut art, decoder) = (0u64, style.art.clone(), decode.id() as libc::pid_t);
+    *decoder_group() = decoder;
     eprint!("\r0/{shown} frames");
     // two stages side by side, frames in order: reading and cells on a thread, painting and writing here; the decoder is killed before its pipe closes, of which it would complain on stderr
     let (grids, painted) = std::sync::mpsc::sync_channel::<Grid>(8);
@@ -779,7 +794,8 @@ fn video(
                     break Ok(true);
                 }
                 let Some(frame) = ppm_frame(&mut frames) else {
-                    return Ok(false); // the stream's end: the decoder ends by itself
+                    // the stream's end: the decoder ends by itself, or Ctrl-C killed it
+                    return Ok(INTERRUPTED.load(Ordering::SeqCst));
                 };
                 let grid = match art.cells(&frame) {
                     Ok(grid) => grid,
@@ -803,6 +819,7 @@ fn video(
         reader.join().expect("the reader")
     });
     eprintln!("\r{done}/{shown} frames");
+    *decoder_group() = 0;
     let finish = |child: &mut Child| child.wait().map(|status| status.success()).unwrap_or(false);
     let decoded = finish(&mut decode);
     drop(sink);
