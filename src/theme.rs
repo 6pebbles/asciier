@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn recolour_by_hue_then_lightness() {
-        // tests/test_theme.py RecolourTest; the slots are the Python tools' (bl1nk: default, skin off, saturation 0).
+        // rows G2: tests/test_theme.py RecolourTest; the slots are the Python tools' (bl1nk: default, skin off, saturation 0; lib/ascii_theme.py Recolour run again 2026-11-12).
         let palette = bl1nk().colors;
         let mut default = Recolour::new(&palette, 100, Skin::Grey);
         let mut no_skin = Recolour::new(&palette, 100, Skin::Theme);
@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn ties_go_to_the_lower_slot() {
-        // lib/ascii_theme.py Recolour on bl1nk with color15 as color7 and color9 as color1, and on sixteen times #3355ff.
+        // rows G2: lib/ascii_theme.py Recolour on bl1nk with color15 as color7 and color9 as color1, and on sixteen times #3355ff (no grey slot: all 16 serve as greys), run again 2026-11-12: ties go to the lower slot.
         let mut twins = bl1nk().colors;
         (twins[15], twins[9]) = (twins[7], twins[1]);
         let probe = [
@@ -917,7 +917,7 @@ mod tests {
 
     #[test]
     fn every_bucket_follows_the_rule_from_its_centre() {
-        // tests/test_theme.py test_every_key_follows_the_rule_from_its_centre: all 262,144 keys, three settings.
+        // rows G2: tests/test_theme.py test_every_key_follows_the_rule_from_its_centre: all 262,144 keys, three settings.
         let palette = bl1nk().colors;
         for (saturation, skin) in [(100, Skin::Grey), (40, Skin::Theme), (300, Skin::Grey)] {
             let mut recolour = Recolour::new(&palette, saturation, skin);
@@ -934,7 +934,7 @@ mod tests {
 
     #[test]
     fn tables_are_the_python_tables() {
-        // FNV-1a 64 of Recolour(palette, saturation, skin).slots(centres of all 262,144 keys) as bytes, from lib/ascii_theme.py 2026-11-10.
+        // rows G2: FNV-1a 64 of Recolour(palette, saturation, skin).slots(centres of all 262,144 keys) as bytes, from lib/ascii_theme.py 2026-11-10 (all 14 run again 2026-11-12).
         let hues = [
             "#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff00ff", "#00ffff", "#ff8800", "#8800ff",
             "#880000", "#008800", "#000088", "#888800", "#880088", "#008888", "#884400", "#440088",
@@ -975,7 +975,7 @@ mod tests {
 
     #[test]
     fn slots_do_not_depend_on_order() {
-        // tests/test_theme.py test_slots_do_not_depend_on_order: 5000 colours and a twin of each in its 6-bit group.
+        // rows G2: tests/test_theme.py test_slots_do_not_depend_on_order: 5000 colours and a twin of each in its 6-bit group.
         let mut seed = 3u32;
         let mut random = || {
             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);

@@ -146,31 +146,37 @@ mod tests {
 
     #[test]
     fn cell_is_pillows() {
-        let font = Font::open(path(false).unwrap()).unwrap();
-        assert_eq!(
-            font.cell(20.0),
-            Cell {
-                w: 12.0,
-                h: 27,
-                ascent: 21
-            }
-        );
-        assert_eq!(
-            font.cell(23.53),
-            Cell {
-                w: 14.109375,
-                h: 32,
-                ascent: 24
-            }
-        );
-        assert_eq!(
-            font.cell(32.0),
-            Cell {
-                w: 19.203125,
-                h: 43,
-                ascent: 33
-            }
-        );
+        // rows L1, L3: Pillow's getlength("M") and ascent + descent of getmetrics() for both faces at 20, 23.53 and 32 px, as bin/ascii-convert:171-176 measures the cell (run 2026-11-12)
+        for bold in [false, true] {
+            let font = Font::open(path(bold).unwrap()).unwrap();
+            assert_eq!(
+                font.cell(20.0),
+                Cell {
+                    w: 12.0,
+                    h: 27,
+                    ascent: 21
+                },
+                "bold {bold}"
+            );
+            assert_eq!(
+                font.cell(23.53),
+                Cell {
+                    w: 14.109375,
+                    h: 32,
+                    ascent: 24
+                },
+                "bold {bold}"
+            );
+            assert_eq!(
+                font.cell(32.0),
+                Cell {
+                    w: 19.203125,
+                    h: 43,
+                    ascent: 33
+                },
+                "bold {bold}"
+            );
+        }
     }
 
     #[test]
@@ -208,6 +214,7 @@ mod tests {
 
     #[test]
     fn ramp_runs_from_space_to_the_densest() {
+        // rows G6: tests/test_density.py RampTest: 95 glyphs, each of 32..126 once, sorted by coverage from the space at 0 to the densest at 1
         let ramp = ramp(false).unwrap();
         assert_eq!(
             (ramp.glyphs[0], ramp.cover[0], ramp.cover[94]),

@@ -748,7 +748,7 @@ mod tests {
 
     #[test]
     fn cell_statistics_match_the_reference() {
-        // tests/test_density.py CellLightTest: its pictures and grids; the reference works each cell out from its 16 samples in turn.
+        // rows G7: tests/test_density.py CellLightTest: its pictures and grids; the reference works each cell out from its 16 samples in turn.
         for picture in [noise(480, 270), gradient(480, 270)] {
             for (cols, rows) in [(120, 34), (37, 11)] {
                 let fine = picture::box_filter(&picture, 480, 270, cols * 4, rows * 4);
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn shape_leaves_libchafas_cells() {
-        // tests/test_density.py test_shape_leaves_grid
+        // rows G2, G7: tests/test_density.py test_shape_leaves_grid: each cell keeps libchafa's glyph, and its colour goes to the slot Recolour gives
         let picture = gradient(320, 160);
         let art = cells(&picture, 320, 160, 60, None, 0.5, Glyphs::Shape, false);
         let (canvas, mut inks) = (Canvas::draw(&picture, 320, 160, 60, 15, false, 0.2), inks());
@@ -861,7 +861,7 @@ mod tests {
 
     #[test]
     fn mixed_keeps_edges() {
-        // tests/test_density.py test_mixed_keeps_edges: an edge inside a cell (8 px a cell at 40 columns).
+        // rows G7: tests/test_density.py test_mixed_keeps_edges: an edge inside a cell (8 px a cell at 40 columns).
         let picture = edge(320, 160, 162);
         let shape = cells(&picture, 320, 160, 40, None, 0.5, Glyphs::Shape, false);
         let mixed = cells(&picture, 320, 160, 40, None, 0.5, Glyphs::Mixed, false);
@@ -875,7 +875,7 @@ mod tests {
 
     #[test]
     fn flat_cells_take_the_python_tools_glyphs() {
-        // lib/ascii_term.py grid() on the same picture (16 x 8 cells of 8 px, ratio 1) with the same ramp, bl1nk, work 0.2, 2026-11-10.
+        // rows G4, G5, G6, G7: lib/ascii_term.py grid() on the same picture (16 x 8 cells of 8 px, ratio 1) with the same ramp, bl1nk, work 0.2, 2026-11-10.
         // Density draws every cell from the ramp and mixed every flat one: no glyph here is libchafa's.
         let picture = flat(16, 8, 8);
         let chars = " *4>KZl~~~~~~GMSZbirx~~~~~~~~VY^bflpuz~~~~~~gjnquy}~~~~~lprvy}~~KEA988:558GMW`lxqlgdXXYMH[aiNTZa~~~~~~wxz}LMPR~~~~~~~~~~~~~~~~~~";
@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn picked_cells_take_their_mean_colours_slot() {
-        // lib/ascii_term.py grid() on red and blue stripes of 4 px (8 x 4 cells of 8 px, each half red, half blue), same ramp, 2026-11-10.
+        // rows G6, G7: lib/ascii_term.py grid() on red and blue stripes of 4 px (8 x 4 cells of 8 px, each half red, half blue), same ramp, 2026-11-10.
         let picture: Vec<u8> = (0..64 * 32)
             .flat_map(|at| if at % 8 < 4 { [255, 0, 0] } else { [0, 0, 255] })
             .collect();
@@ -971,7 +971,7 @@ mod tests {
 
     #[test]
     fn mono_measures_against_its_own_slot() {
-        // The viewer's luma_mono: mono's cells count as the foreground slot and shine as mono's colour.
+        // rows G6: the luminance a mono cell is measured against is mono's slot's, as lib/ascii_term.py:68 luma_mono gives it: mono's cells count as the foreground slot and shine as mono's colour, so a brighter slot draws sparser glyphs.
         let (picture, mut inks, mode) = (flat(16, 8, 8), inks(), Glyphs::Density);
         let mut draw = |mono: u8| {
             inks.mono = mono;

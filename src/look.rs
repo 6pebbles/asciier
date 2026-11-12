@@ -130,11 +130,13 @@ mod tests {
 
     #[test]
     fn neutral_is_none() {
+        // rows G9: lib/ascii_theme.py:144 tone_table(0, 0) is None
         assert!(tone_table(0, 0).is_none());
     }
 
     #[test]
     fn level_up_raises_the_black_point() {
+        // rows G9: lib/ascii_theme.py:146-148 tone_table(40, 0), run 2026-11-12: under the cut at 102 to 0, the rest stretched to 255
         let t = tone_table(40, 0).unwrap();
         assert!(t[..101].iter().all(|&v| v == 0));
         assert_eq!((t[102], t[103], t[255]), (0, 2, 255));
@@ -143,6 +145,7 @@ mod tests {
 
     #[test]
     fn level_down_lowers_the_white_point() {
+        // rows G9: lib/ascii_theme.py:149-151 tone_table(-40, 0), run 2026-11-12: from the top at 153 on to 255, below it stretched up
         let t = tone_table(-40, 0).unwrap();
         assert_eq!((t[0], t[152] < 255, t[153]), (0, true, 255));
         assert!(t[154..].iter().all(|&v| v == 255));
@@ -150,6 +153,7 @@ mod tests {
 
     #[test]
     fn contrast_spreads_from_mid_grey() {
+        // rows G9: lib/ascii_theme.py:154-155 tone_table(0, 50) and (0, -50), run 2026-11-12: the distance from 127.5 times 1.5 and 0.5
         let (up, down) = (tone_table(0, 50).unwrap(), tone_table(0, -50).unwrap());
         assert_eq!((up[64], up[192], down[64], down[192]), (32, 224, 96, 160));
     }
