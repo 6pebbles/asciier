@@ -1163,7 +1163,7 @@ fn the_next_image_after_a_deletion_starts_at_its_fit() {
 
 #[test]
 fn the_image_goes_at_the_zooms_scale_as_far_as_the_window_holds_it() {
-    // row K1: kitty_image and cut of bin/ascii-viewer:1989 and :209 at tag python-final (tests/test_viewer.py:1083 and :1092): 400 x 300 in 1800 x 1000 px is sent at 400x300, 566x424, 800x600, 1131x849, then 1600x1000 (as high as the window); enlarged by nearest neighbour (1 px stripes at 400 % as blocks of 4 px, 0 and 255 alone), reduced bicubic (flat blocks halved at the fit take values between)
+    // row K1: kitty_image and cut of bin/ascii-viewer:1989 and :209 at tag python-final (tests/test_viewer.py:1083 and :1092): 400 x 300 in 1800 x 1000 px is sent at 400x300, 566x424, 800x600, 1131x849, then 1600x1000 (as high as the window); enlarged by nearest neighbour (1 px stripes at 400 % as blocks of 4 px, 0 and 255 alone), reduced bicubic (flat blocks halved at the fit take values between); a side never under 1 px: 1 x 3000 in 1800 x 1200 px fits at 0.4 and goes as 1 x 1200 (cut of bin/ascii-viewer:217), one cell across at column 100
     let sandbox = kitty_sandbox();
     let window = Size {
         rows: 50,
@@ -1178,10 +1178,12 @@ fn the_image_goes_at_the_zooms_scale_as_far_as_the_window_holds_it() {
         Rgb([255 * ((x / 45 + y / 40) % 2) as u8; 3])
     });
     let blocks = save(&blocks, &sandbox.path("blocks.png"));
+    let thin = save(&gradient(1, 3000), &sandbox.path("thin.png"));
     let mut ttys = [
         kitty_view(&sandbox, &small, window),
         kitty_view(&sandbox, &stripes, window),
         kitty_view(&sandbox, &blocks, HALF),
+        kitty_view(&sandbox, &thin, WIDE),
     ];
     assert_eq!(placed(&ttys[0], 0).size(), (400, 300));
     for (size, text) in [
@@ -1204,6 +1206,13 @@ fn the_image_goes_at_the_zooms_scale_as_far_as_the_window_holds_it() {
     let halved = placed(&ttys[2], 0);
     let values: BTreeSet<u8> = halved.rgb.iter().copied().collect();
     assert!(values.len() > 2, "{values:?}");
+    let sliver = placed(&ttys[3], 0);
+    assert_eq!(sliver.keys, "a=T,f=24,t=t,s=1,v=1200,c=1,r=60,C=1,z=-1,q=2");
+    assert!(
+        sliver.before.ends_with(b"\x1b[1;100H"),
+        "{}",
+        shown(&sliver.before)
+    );
     for tty in &mut ttys {
         quit(tty);
     }
