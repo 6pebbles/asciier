@@ -390,17 +390,36 @@ struct Running {
 }
 
 impl Running {
+    /// Started as a terminal starts a job, whatever the test runner inherited: SIGINT at its default, no signal blocked.
     fn start(sandbox: &Sandbox, args: &[&str]) -> Running {
-        let mut child = sandbox
-            .command(BIN)
+        Running::launch(sandbox, args, libc::SIG_DFL)
+    }
+
+    /// Started as a shell without job control starts a background job: SIGINT ignored.
+    fn ignoring_ctrl_c(sandbox: &Sandbox, args: &[&str]) -> Running {
+        Running::launch(sandbox, args, libc::SIG_IGN)
+    }
+
+    fn launch(sandbox: &Sandbox, args: &[&str], sigint: libc::sighandler_t) -> Running {
+        let mut command = sandbox.command(BIN);
+        command
             .current_dir(&sandbox.dir)
             .arg("convert")
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .unwrap();
+            .process_group(0);
+        // SAFETY: signal and sigprocmask alone, between fork and exec.
+        unsafe {
+            command.pre_exec(move || {
+                libc::signal(libc::SIGINT, sigint);
+                let mut none = std::mem::zeroed();
+                libc::sigemptyset(&mut none);
+                libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+                Ok(())
+            })
+        };
+        let mut child = command.spawn().unwrap();
         let (out, err) = (Arc::default(), Arc::default());
         let collect = |mut pipe: Box<dyn Read + Send>, into: &Arc<Mutex<Vec<u8>>>| {
             let into = into.clone();
@@ -1142,6 +1161,55 @@ fn ctrl_c_while_the_encoder_finishes_ends_it_quietly_too() {
         "{err:?}"
     );
     assert!(err.ends_with("\r10/10 frames\n"), "{err:?}");
+    assert_eq!(frames_in(&sandbox, &sandbox.path("clip-out.mp4")), 10);
+    await_gone(&sandbox);
+}
+
+#[test]
+fn ctrl_c_stays_ignored_when_the_parent_ignored_it() {
+    // rows C10, X9, C4: a shell without job control starts a background job with SIGINT ignored (POSIX; `/bin/sh -c 'grep SigIgn /proc/self/status & wait'` gives 0x6 here), so the terminal's Ctrl-C is not that job's: Python keeps an ignored SIGINT ignored, and the old converter ran on to its end, exit 0 with the file (reviewer's probe); a still held where it waits for fc-match and a video held after 5 of its 10 frames, each given SIGINT then let go: exit 0, nothing on stderr but the progress, the path printed, the whole file made
+    let mut sandbox = Sandbox::new();
+    save(&gradient(80, 40), &sandbox.path("pic.png"));
+    clip(&sandbox, "clip.mp4", 0.4, "160x90", 25);
+    let fc_match = real(&sandbox, "fc-match");
+    wrap_ffmpeg(&mut sandbox);
+    sandbox.program(
+        "fc-match",
+        &format!(
+            "#!/bin/sh\nif [ -n \"$HOLD_FONT\" ]; then touch \"$DUMP/held\"; {HELD}; fi\nexec {fc_match} \"$@\"\n"
+        ),
+    );
+    sandbox.set("HOLD_FONT", "1");
+    let run = Running::ignoring_ctrl_c(&sandbox, &["-c", "20", "pic.png"]);
+    await_file(&sandbox.path("held"));
+    run.interrupt();
+    std::fs::write(sandbox.path("go"), "").unwrap();
+    let (status, out, err) = run.finish();
+    assert_eq!(
+        (status.code(), out.as_str(), err.as_str()),
+        (Some(0), "pic-ascii.png\n", "")
+    );
+    assert_eq!(png_info(&sandbox.path("pic-ascii.png")).0, 240);
+    for file in ["held", "go"] {
+        std::fs::remove_file(sandbox.path(file)).unwrap();
+    }
+    sandbox.unset("HOLD_FONT");
+    sandbox.set("HOLD", "5");
+    sandbox.set("FRAME", FRAME.to_string());
+    let run = Running::ignoring_ctrl_c(
+        &sandbox,
+        &["-W", "320", "-H", "180", "-o", "clip-out.mp4", "clip.mp4"],
+    );
+    run.await_err("\r5/10 frames");
+    run.interrupt();
+    std::fs::write(sandbox.path("go"), "").unwrap();
+    let (status, out, err) = run.finish();
+    assert_eq!(
+        (status.code(), out.as_str()),
+        (Some(0), "clip-out.mp4\n"),
+        "{err:?}"
+    );
+    assert_eq!(progress(&err).0.last(), Some(&10), "{err:?}");
     assert_eq!(frames_in(&sandbox, &sandbox.path("clip-out.mp4")), 10);
     await_gone(&sandbox);
 }

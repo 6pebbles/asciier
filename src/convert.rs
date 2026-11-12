@@ -173,8 +173,13 @@ fn die_by_sigint() -> u8 {
     130
 }
 
-/// Ctrl-C for the whole run: SIGINT blocked in every thread (threads inherit the mask, std starts a child unblocked) and taken by a thread of its own, which notes it and, before a video's encoding, kills every child of the main thread: a child may outlive the terminal's SIGINT, or get none when it was sent to the converter alone.
+/// Ctrl-C for the whole run: SIGINT blocked in every thread (threads inherit the mask, std starts a child unblocked) and taken by a thread of its own, which notes it and, before a video's encoding, kills every child of the main thread: a child may outlive the terminal's SIGINT, or get none when it was sent to the converter alone. A SIGINT the parent left ignored stays so: a shell without job control starts a background job so, and the terminal's Ctrl-C is not that job's.
 fn catch_ctrl_c() {
+    let mut inherited: libc::sigaction = unsafe { std::mem::zeroed() };
+    unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &mut inherited) };
+    if inherited.sa_sigaction == libc::SIG_IGN {
+        return;
+    }
     let set = unsafe {
         let mut set = std::mem::zeroed();
         libc::sigemptyset(&mut set);
