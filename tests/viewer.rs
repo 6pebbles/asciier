@@ -831,18 +831,19 @@ fn the_keys_scroll_when_they_do_not_fit() {
         tty.screen().row(1),
         format!(" {}", cut(lines[0])).trim_end()
     );
-    tty.send(b"j");
-    tty.until("one line down", |screen| {
-        screen.row(1) == format!(" {}", cut(lines[1])).trim_end()
-    });
-    tty.send(DOWN);
-    tty.until("two lines down", |screen| {
-        screen.row(1) == format!(" {}", cut(lines[2])).trim_end()
-    });
-    tty.send(UP);
-    tty.until("one line up", |screen| {
-        screen.row(1) == format!(" {}", cut(lines[1])).trim_end()
-    });
+    // a line a key: k from line 3 and Up from line 2, where a step of two would show another line
+    for (key, top, what) in [
+        (&b"j"[..], 1, "one line down by j"),
+        (DOWN, 2, "one line down by Down"),
+        (DOWN, 3, "one more line down by Down"),
+        (b"k", 2, "one line up by k"),
+        (UP, 1, "one line up by Up"),
+    ] {
+        tty.send(key);
+        tty.until(what, |screen| {
+            screen.row(1) == format!(" {}", cut(lines[top])).trim_end()
+        });
+    }
     // past the end: the last line on row 19
     tty.send(&b"j".repeat(40));
     tty.until("the last line", |screen| {
