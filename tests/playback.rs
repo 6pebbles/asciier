@@ -910,6 +910,38 @@ fn volume_keys_step_by_2_up_to_mpv_confs_volume_max() {
 }
 
 #[test]
+fn the_volume_toast_rounds_mpvs_volume() {
+    // row P11: set_volume of bin/ascii-viewer:1508 at tag python-final toasts the volume mpv gives back, rounded as Python rounds, half to even: mpv.conf's volume=50.6 and `0` make 52.6, `volume 53`, then `9` 50.6 and 48.6; volume=50.5 and `0` make 52.5, `volume 52`, then 54.5, `volume 54`
+    let rounds = [
+        (
+            "50.6",
+            [("0", "volume 53"), ("9", "volume 51"), ("9", "volume 49")],
+        ),
+        (
+            "50.5",
+            [("0", "volume 52"), ("0", "volume 54"), ("9", "volume 52")],
+        ),
+    ];
+    for (volume, toasts) in rounds {
+        let sandbox = Sandbox::new();
+        std::fs::write(
+            sandbox.path("home/.config/mpv/mpv.conf"),
+            format!("ao=null\nvolume={volume}\n"),
+        )
+        .unwrap();
+        let video = clip(&sandbox, "clip.mp4", 20.0, "160x90", 25);
+        let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+        tty.await_playing();
+        pause(&mut tty);
+        for (key, text) in toasts {
+            says(&mut tty, key.as_bytes(), text);
+        }
+        tty.send(b"q");
+        assert_eq!(tty.exit(), 0);
+    }
+}
+
+#[test]
 fn mute_and_volume_hold_through_seeks_and_loops() {
     // rows P7, P12: start_audio and launch_mpv of bin/ascii-viewer:1313 at tag python-final hand volume and mute to each mpv started for a seek or a loop; `m` toasts `muted` and `unmuted`
     let sandbox = Sandbox::new();
