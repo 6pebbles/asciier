@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     fn a_backlog_of_held_keys_is_one_batch() {
-        // rows V11, V14: what one read holds is one batch: the batches tests/test_viewer_tty.py:88 and :96 pin, 300 level keys and q; zooms, pans and q (704 bytes, 404 keys by the Python pattern)
+        // row V11: what one read holds is one batch, as V14's one draw and summed seeks need it: the batches tests/test_viewer_tty.py:88 and :96 pin, 300 level keys and q; zooms, pans and q (704 bytes, 404 keys by the Python pattern)
         let level = [b"3".repeat(300), b"q".to_vec()].concat();
         assert_eq!(polls(&[&level])[0].len(), 301);
         let held = [
