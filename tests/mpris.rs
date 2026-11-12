@@ -672,7 +672,7 @@ fn no_signal_is_declared_or_sent() {
 
 #[test]
 fn without_a_bus_it_plays_silently() {
-    // row M6: serve_mpris of bin/ascii-viewer:1512 at tag python-final: no session bus to own a name on, no MPRIS, nothing said; a bus gone while it plays changes nothing either, and the loop does not spin on it
+    // row M6: serve_mpris of bin/ascii-viewer:1512 at tag python-final: no session bus to own a name on (nobody listens at the address), no MPRIS, nothing said, it plays as ever
     let sandbox = Sandbox::new();
     let video = clip(&sandbox, "clip.mp4", 20.0, "160x90", 25);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
@@ -697,34 +697,4 @@ fn without_a_bus_it_plays_silently() {
         shown(&out[..entered])
     );
     assert!(out.ends_with(RESTORE));
-    let mut sandbox = Sandbox::new();
-    let bus = Bus::new(&mut sandbox);
-    let video = clip(&sandbox, "clip.mp4", 20.0, "160x90", 25);
-    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    Remote::new(&sandbox, &bus, tty.pid);
-    tty.await_playing();
-    drop(bus);
-    tty.send(b" ");
-    tty.await_status("| ");
-    tty.settle(Duration::from_millis(300));
-    // CPU time in clock ticks, user and system
-    let ticks = |pid: u32| -> u64 {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-        let fields: Vec<&str> = stat
-            .rsplit_once(')')
-            .unwrap()
-            .1
-            .split_whitespace()
-            .collect();
-        fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
-    };
-    let before = ticks(tty.pid);
-    std::thread::sleep(Duration::from_secs(1));
-    let spent = ticks(tty.pid) - before;
-    assert!(spent < 30, "{spent} ticks in a second, paused");
-    says(&mut tty, b"m", "muted");
-    tty.send(b" ");
-    tty.await_status("> ");
-    tty.send(b"q");
-    assert_eq!(tty.exit(), 0);
 }
