@@ -8,11 +8,12 @@ use crate::theme::{self, Theme};
 use crate::{Error, Result, desktop, err, term};
 use image::RgbImage;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, IsTerminal, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
+use std::os::fd::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fit {
@@ -97,6 +98,8 @@ output:
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 /// Set once a video's decoder and encoder are to start: from then on Ctrl-C kills nothing.
 static ENCODING: AtomicBool = AtomicBool::new(false);
+/// The pipe's end through which SIGINT's handler wakes the Ctrl-C thread.
+static WAKE: AtomicI32 = AtomicI32::new(-1);
 
 /// How a run ended without its output path.
 enum Stop {
@@ -173,39 +176,56 @@ fn die_by_sigint() -> u8 {
     130
 }
 
-/// Ctrl-C for the whole run: SIGINT blocked in every thread (threads inherit the mask, std starts a child unblocked) and taken by a thread of its own, which notes it and, before a video's encoding, kills every child of the main thread: a child may outlive the terminal's SIGINT, or get none when it was sent to the converter alone. A SIGINT the parent left ignored stays so: a shell without job control starts a background job so, and the terminal's Ctrl-C is not that job's.
-fn catch_ctrl_c() {
-    let mut inherited: libc::sigaction = unsafe { std::mem::zeroed() };
-    unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &mut inherited) };
-    if inherited.sa_sigaction == libc::SIG_IGN {
-        return;
+/// SIGINT's handler: Ctrl-C noted, the Ctrl-C thread woken; errno kept for the code it interrupted.
+extern "C" fn on_ctrl_c(_: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+    let byte = 0u8;
+    unsafe {
+        let errno = *libc::__errno_location();
+        libc::write(WAKE.load(Ordering::SeqCst), (&raw const byte).cast(), 1);
+        *libc::__errno_location() = errno;
     }
-    let set = unsafe {
-        let mut set = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGINT);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-        set
-    };
+}
+
+/// Ctrl-C for the whole run: a handler notes it and wakes a thread of its own, which, before a video's encoding, kills every child of the main thread: a child may outlive the terminal's SIGINT, or get none when it was sent to the converter alone. A child starts with SIGINT as usual: exec resets a handler, and no signal is blocked. A SIGINT the parent left ignored stays so: a shell without job control starts a background job so, and the terminal's Ctrl-C is not that job's.
+fn catch_ctrl_c() {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    let mut ends = [0; 2];
+    unsafe {
+        libc::sigaction(libc::SIGINT, std::ptr::null(), &mut action);
+        if action.sa_sigaction == libc::SIG_IGN
+            || libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) != 0
+        {
+            return;
+        }
+        libc::fcntl(ends[1], libc::F_SETFL, libc::O_NONBLOCK);
+    }
+    WAKE.store(ends[1], Ordering::SeqCst);
+    let mut woken = unsafe { std::fs::File::from_raw_fd(ends[0]) };
     let main = std::process::id();
     std::thread::spawn(move || {
-        loop {
-            let mut signal = 0;
-            unsafe { libc::sigwait(&set, &mut signal) };
-            INTERRUPTED.store(true, Ordering::SeqCst);
-            if !ENCODING.load(Ordering::SeqCst) {
-                let children =
-                    std::fs::read_to_string(format!("/proc/{main}/task/{main}/children"))
-                        .unwrap_or_default();
-                for child in children
-                    .split_whitespace()
-                    .filter_map(|pid| pid.parse().ok())
-                {
-                    unsafe { libc::kill(child, libc::SIGKILL) };
-                }
+        while woken.read_exact(&mut [0]).is_ok() {
+            // a child between its fork and its exec runs the handler too
+            if !INTERRUPTED.load(Ordering::SeqCst) || ENCODING.load(Ordering::SeqCst) {
+                continue;
+            }
+            let children = std::fs::read_to_string(format!("/proc/{main}/task/{main}/children"))
+                .unwrap_or_default();
+            for child in children
+                .split_whitespace()
+                .filter_map(|pid| pid.parse().ok())
+            {
+                unsafe { libc::kill(child, libc::SIGKILL) };
             }
         }
     });
+    // SA_RESTART: a read, write or wait that SIGINT lands in goes on, in libchafa's threads too
+    action.sa_sigaction = on_ctrl_c as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    action.sa_flags = libc::SA_RESTART;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+    }
 }
 
 fn number<T: std::str::FromStr + PartialOrd + std::fmt::Display>(

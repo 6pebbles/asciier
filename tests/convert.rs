@@ -72,6 +72,13 @@ case " $* " in
 esac
 "#;
 
+/// A program the converter starts, first on PATH: notes its arguments and the signals it started with blocked and ignored, a line in $DUMP/masks (`NAME <args>: SigBlk:<hex> SigIgn:<hex>`), then runs REAL, the real one.
+const MASKS: &str = r#"#!/bin/sh
+masks=$(grep -E '^Sig(Blk|Ign)' /proc/self/status | tr -d '\t' | paste -sd ' ')
+echo "NAME $*: $masks" >> "$DUMP/masks"
+exec REAL "$@"
+"#;
+
 fn ran(output: Output) -> Ran {
     Ran {
         code: output.status.code(),
@@ -1212,6 +1219,57 @@ fn ctrl_c_stays_ignored_when_the_parent_ignored_it() {
     assert_eq!(progress(&err).0.last(), Some(&10), "{err:?}");
     assert_eq!(frames_in(&sandbox, &sandbox.path("clip-out.mp4")), 10);
     await_gone(&sandbox);
+}
+
+#[test]
+fn children_start_with_no_signal_blocked() {
+    // rows C10, X9: every child of a video run, started either way (fc-match, ffprobe, the frame grab and the VAAPI trial where the render node is, as they are; the decoder and the encoder in sessions of their own): no signal blocked and SIGINT not ignored, as the converter itself started, so a Ctrl-C reaches what they run as usual; so at 0584662 (reviewer's probe); seen with the blocked SIGINT of 6154efe: SigBlk 0x2 in each
+    let mut sandbox = Sandbox::new();
+    clip(&sandbox, "clip.mp4", 0.2, "160x90", 25);
+    for program in ["ffmpeg", "ffprobe", "fc-match"] {
+        let path = real(&sandbox, program);
+        sandbox.program(
+            program,
+            &MASKS.replace("NAME", program).replace("REAL", &path),
+        );
+    }
+    let dump = sandbox.dir.clone();
+    sandbox.set("DUMP", dump);
+    let run = Running::start(&sandbox, &["-W", "320", "-o", "clip-out.mp4", "clip.mp4"]);
+    let (status, out, err) = run.finish();
+    assert_eq!(
+        (status.code(), out.as_str()),
+        (Some(0), "clip-out.mp4\n"),
+        "{err:?}"
+    );
+    let noted = std::fs::read_to_string(sandbox.path("masks")).unwrap();
+    for kind in [
+        "fc-match ",
+        "ffprobe ",
+        " -frames:v ",
+        " -an ",
+        " rawvideo ",
+    ] {
+        assert!(
+            noted.lines().any(|line| line.contains(kind)),
+            "no {kind:?} in {noted}"
+        );
+    }
+    for line in noted.lines() {
+        let masks = line.rsplit_once(": ").map_or("", |(_, masks)| masks);
+        let mask = |key: &str| {
+            masks
+                .split(' ')
+                .find_map(|mask| mask.strip_prefix(key))
+                .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                .unwrap_or_else(|| panic!("{line}"))
+        };
+        assert_eq!(
+            (mask("SigBlk:"), mask("SigIgn:") & 1 << (libc::SIGINT - 1)),
+            (0, 0),
+            "{line} in {noted}"
+        );
+    }
 }
 
 #[test]
