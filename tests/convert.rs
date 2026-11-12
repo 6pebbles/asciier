@@ -359,6 +359,28 @@ fn await_gone(sandbox: &Sandbox) {
     }
 }
 
+/// Whether SIGINT waits in process `pid` for a thread to take it, sent to the process (ShdPnd) or to one of its threads (SigPnd); false once it ended.
+fn sigint_pending(pid: u32) -> bool {
+    let status = |file: PathBuf| std::fs::read_to_string(file).unwrap_or_default();
+    let holds = |status: &str, key: &str| {
+        status
+            .lines()
+            .filter_map(|line| line.strip_prefix(key))
+            .filter_map(|set| u64::from_str_radix(set.trim(), 16).ok())
+            .any(|set| set & 1 << (libc::SIGINT - 1) != 0)
+    };
+    let process = status(PathBuf::from(format!("/proc/{pid}/status")));
+    if process.contains("\nState:\tZ") {
+        return false;
+    }
+    holds(&process, "ShdPnd:")
+        || std::fs::read_dir(format!("/proc/{pid}/task"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|task| holds(&status(task.path().join("status")), "SigPnd:"))
+}
+
 /// A converter run as a terminal's job: a process group of its own, which Ctrl-C reaches whole; what it prints read as it comes.
 struct Running {
     child: Child,
@@ -414,10 +436,16 @@ impl Running {
         }
     }
 
-    /// Ctrl-C as a terminal sends it: SIGINT to the process group.
+    /// Ctrl-C as a terminal sends it: SIGINT to the process group; back once the converter has taken it, or has ended.
     fn interrupt(&self) {
+        let pid = self.child.id();
         // SAFETY: a signal to the group the child leads, which is not reaped while self holds it.
-        unsafe { libc::kill(-(self.child.id() as libc::pid_t), libc::SIGINT) };
+        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGINT) };
+        let end = Instant::now() + PATIENCE;
+        while sigint_pending(pid) {
+            assert!(Instant::now() < end, "SIGINT never taken: {:?}", self.err());
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Its end within `PATIENCE`, and its output to the end (children holding its pipes gone too): how it ended, stdout, stderr.
