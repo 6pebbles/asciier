@@ -1383,6 +1383,94 @@ fn look_keys_act_on_a_still() {
     quit(&mut tty);
 }
 
+/// A row's bytes without their SGR sequences: its glyphs.
+fn glyphs(row: &[u8]) -> Vec<u8> {
+    let (mut glyphs, mut at) = (Vec::new(), 0);
+    while let Some(start) = find(row, b"\x1b[", at) {
+        glyphs.extend(&row[at..start]);
+        at = start + row[start..].iter().position(|&b| b == b'm').unwrap() + 1;
+    }
+    glyphs.extend(&row[at..]);
+    glyphs
+}
+
+#[test]
+fn bold_takes_the_ramp_of_the_bold_face() {
+    // row G8: Term.render of lib/ascii_term.py:73 at tag python-final measures the density ramp in the face of font_path(bold), fc-match's answer to weight 210: in density mode every cell takes a glyph of the ramp and the slot of its own colour (lib/ascii_density.py:80), so `b` changes glyphs while each row keeps its colour codes, SGR 1 before them
+    let sandbox = Sandbox::new();
+    let file = save(&gradient(800, 400), &sandbox.path("pic.png"));
+    let mut tty = drawn(&sandbox, &file, SMALL);
+    let rows_after = |tty: &mut Tty, keys: &[u8], text: &str| {
+        let at = tty.send(keys);
+        let end = tty.expect(at, toast(text));
+        written_rows(&update_at(tty, end))
+    };
+    let regular = rows_after(&mut tty, b"g", "glyphs: density");
+    let bold = rows_after(&mut tty, b"b", "bold");
+    assert_eq!(regular.len(), 18);
+    assert_eq!(bold.len(), 18);
+    let mut changed = 0;
+    for ((row, _, plain), (_, _, heavy)) in regular.iter().zip(&bold) {
+        let want = [vec!["\x1b[1m".to_string()], codes(plain)].concat();
+        assert_eq!(codes(heavy), want, "row {row}");
+        changed += (glyphs(heavy) != glyphs(plain)) as usize;
+    }
+    assert!(changed > 0, "the same glyphs in bold");
+    quit(&mut tty);
+}
+
+#[test]
+fn the_font_is_looked_up_once_a_weight() {
+    // row G10: font_path of lib/ascii_term.py:21 at tag python-final asks `fc-match -f %{file}` once a weight in a process (functools.cache), JetBrainsMono Nerd Font Mono and its weight 210: `b` three times on a still in ASCII, then the render page drawing its preview in bold and regular as Level and Bold change, ask each once
+    let sandbox = kitty_sandbox();
+    sandbox.program(
+        "fc-match",
+        "#!/bin/sh\n{ printf '%s\\n' \"$@\"; echo --; } >> \"$0.calls\"\nexec /usr/bin/fc-match \"$@\"\n",
+    );
+    let file = save(&gradient(800, 400), &sandbox.path("pic.png"));
+    let mut tty = kitty_view(&sandbox, &file, HALF);
+    placed(&tty, 0);
+    for (key, text) in [
+        ("v", "ascii"),
+        ("b", "bold"),
+        ("b", "regular"),
+        ("b", "bold"),
+    ] {
+        says(&mut tty, key.as_bytes(), text);
+    }
+    // the end of the update that places the page's next preview (its format aside: N29)
+    let previewed = |tty: &mut Tty, keys: &[u8]| {
+        let at = tty.send(keys);
+        let start = tty.expect(at, b"\x1b_Ga=T,");
+        tty.expect(start, b"\x1b[?2026l");
+    };
+    previewed(&mut tty, b"r");
+    tty.until("the page", |screen| screen.row(1).starts_with(" Render"));
+    // Level up and down, then up to Bold (four rows round from Level), off and on: each a preview of its own
+    for keys in [&b"l"[..], b"h", b"kkkkl", b"l"] {
+        previewed(&mut tty, keys);
+    }
+    let at = tty.send(b"q");
+    tty.expect(at, b"\x1b[2J");
+    tty.until("the still", |screen| {
+        !screen.row(1).starts_with(" Render") && screen.inked() > 600
+    });
+    quit(&mut tty);
+    let noted = sandbox.noted("fc-match.calls");
+    let asked: Vec<&str> = noted
+        .split_terminator("--\n")
+        .map(|call| call.lines().last().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            "JetBrainsMono Nerd Font Mono",
+            "JetBrainsMono Nerd Font Mono:weight=210"
+        ],
+        "{noted:?}"
+    );
+}
+
 /// The pixels of the PNG at `file`.
 fn picture_at(file: &Path) -> RgbImage {
     image::open(file)
