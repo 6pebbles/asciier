@@ -937,6 +937,39 @@ mod tests {
     }
 
     #[test]
+    fn mixed_takes_cells_under_the_flat_bound() {
+        // rows G7: lib/ascii_term.py grid() on two cells of 8 px, grey 112 left of 137, then left of 138 (deviation 0.04406 and 0.04606 in linear light), the same ramp, bl1nk, work 0.2, run 2026-11-12: mixed draws the first from the ramp, as density does, and keeps libchafa's glyph for the second, as shape does (FLAT 0.045, lib/ascii_density.py:26, :76)
+        let picture: Vec<u8> = (0..16 * 8)
+            .flat_map(|at| [[112, 137, 112, 138][at % 16 / 4]; 3])
+            .collect();
+        let deviation: Vec<f32> = light(&picture, 16, 8, 2, 1)
+            .iter()
+            .map(|cell| cell.2)
+            .collect();
+        assert!(
+            (deviation[0] - 0.044_064).abs() < 1e-6 && (deviation[1] - 0.046_061).abs() < 1e-6,
+            "{deviation:?}"
+        );
+        // mixed, density, shape
+        for (mono, want, slot) in [
+            (false, ["^@", "^_", "@@"], 14),
+            (true, ["54", "55", "44"], FG),
+        ] {
+            for (glyphs, want) in [Glyphs::Mixed, Glyphs::Density, Glyphs::Shape]
+                .iter()
+                .zip(want)
+            {
+                let art = cells(&picture, 16, 8, 2, None, 1.0, *glyphs, mono);
+                assert_eq!(
+                    (String::from_utf8_lossy(&art.chars), art.slots.as_slice()),
+                    (want.into(), [slot; 2].as_slice()),
+                    "{glyphs:?}, mono {mono}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn mono_measures_against_its_own_slot() {
         // The viewer's luma_mono: mono's cells count as the foreground slot and shine as mono's colour.
         let (picture, mut inks, mode) = (flat(16, 8, 8), inks(), Glyphs::Density);
