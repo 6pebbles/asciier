@@ -96,16 +96,18 @@ fn read_until(master: &OwnedFd, end: &[u8]) -> Vec<u8> {
 
 #[test]
 fn help_and_version_are_words() {
-    // N1: `--help` and `--version` are words of the new program (the old one opened `--help` as a file)
+    // rows V1, N1: `--help` (also `-h`, N1 as amended) and `--version` are words of the new program, where the old one opened `--help` as a file (bin/ascii-viewer:2441 at tag python-final)
     let sandbox = Sandbox::new();
-    let ran = sandbox.run(&[OsStr::new("--help")]);
-    assert_eq!(ran.code, Some(0), "{ran:?}");
-    assert!(
-        ran.stdout.starts_with(
-            "usage: asciier FILE (needs a terminal)\n       asciier convert [options] INPUT"
-        ),
-        "{ran:?}"
-    );
+    for help in ["--help", "-h"] {
+        let ran = sandbox.run(&[OsStr::new(help)]);
+        assert_eq!(ran.code, Some(0), "{help}: {ran:?}");
+        assert!(
+            ran.stdout.starts_with(
+                "usage: asciier FILE (needs a terminal)\n       asciier convert [options] INPUT"
+            ),
+            "{help}: {ran:?}"
+        );
+    }
     let ran = sandbox.run(&[OsStr::new("--version")]);
     assert_eq!(ran.code, Some(0), "{ran:?}");
     assert_eq!(
