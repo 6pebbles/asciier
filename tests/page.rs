@@ -1170,6 +1170,23 @@ fn played(tty: &Tty, from: usize) -> Vec<u32> {
     .collect()
 }
 
+/// The frames the player's draws in `out` show, counted from the clip's start: the counter's 8 bits made whole by the clock beside them (25 frames a second).
+fn whole_frames(out: &[u8]) -> Vec<u32> {
+    let whole = |count: u32, clock: u32| {
+        let near = (clock * 25 + 12) as i64;
+        (0..4)
+            .map(|wraps| count + 256 * wraps)
+            .min_by_key(|n| (*n as i64 - near).abs())
+            .unwrap()
+    };
+    replay(out, SMALL, |screen| {
+        seconds(&screen.row(24)).map(|clock| whole(frame(screen), clock))
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 #[test]
 fn r_on_a_video_pauses_it_under_the_page_until_it_closes() {
     // rows P22, R7, V21, H3: open_page and close_page of bin/ascii-viewer:2048 and :2112 at tag python-final: r on a playing video opens the page on its frame at full size (1920 x 1080 for 160 x 90), named by the frame's time, playback paused under it and under help over it; q and r there go back to the player, cleared, and it plays on from where it paused; q there does not quit
@@ -1178,7 +1195,10 @@ fn r_on_a_video_pauses_it_under_the_page_until_it_closes() {
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
+    let on_screen = *whole_frames(&tty.out()).last().expect("a frame before r");
+    let asked = std::time::Instant::now();
     let preview = open(&mut tty);
+    let opened = asked.elapsed().as_secs_f64();
     assert_eq!(
         (preview.cell.as_str(), preview.keys.as_str()),
         ("9;48", "a=T,f=24,t=t,s=279,v=157,c=31,r=8,C=1,z=-1,q=2")
@@ -1195,20 +1215,23 @@ fn r_on_a_video_pauses_it_under_the_page_until_it_closes() {
     tty.expect(at, b"any other key closes");
     let at = tty.send(b"x");
     placed(&tty, at);
-    // a window for what must not happen: playing on under the page, 50 frames; the pause itself may land some frames after the name's time
+    // a window for what must not happen: playing on under the page, 50 frames
     std::thread::sleep(Duration::from_secs(2));
     let at = tty.send(b"q");
     tty.until("the player", |screen| seconds(&screen.row(24)).is_some());
     assert!(find(&tty.out(), b"\x1b[2J", at).is_some(), "cleared");
-    let first = played(&tty, at)[0];
-    let paused = (time * 25.0).round() as i64;
-    let off = (first as i64 - paused).rem_euclid(256);
+    let first = whole_frames(&tty.out()[at..])[0];
+    // paused on the page's frame or later, and a second after the page showed at the latest: the pause is asked as the page opens, on mpv's answer to r, and mpv takes it on a thread of its own (half a second late seen at load 70, the viewer drawing the first preview meanwhile)
+    let (paused, latest) = (
+        (time * 25.0).round() as u32,
+        on_screen + ((opened + 1.0) * 25.0).ceil() as u32 + 3,
+    );
     assert!(
-        off <= 18 || off >= 250,
-        "paused at frame {paused} (mod 256) under the page, frame {first} after it"
+        first + 2 >= paused && first <= latest,
+        "the frame on screen at r {on_screen}, the page's {paused}, after it {first}, the page {opened:.2} s after r"
     );
     tty.until("playing on", |screen| {
-        screen.row(24).starts_with("> ") && frame(screen) != first
+        screen.row(24).starts_with("> ") && frame(screen) != first % 256
     });
     open(&mut tty);
     let at = tty.send(b"r");
