@@ -4,8 +4,10 @@ mod common;
 
 use common::*;
 use std::ffi::OsStr;
+use std::io::Read;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::process::Stdio;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const KEYS: &str = include_str!("../src/keys.txt");
@@ -93,19 +95,58 @@ fn usage_errors_exit_1_on_stderr() {
         let mut command = sandbox.command(BIN);
         let terminal = Stdio::from(slave.try_clone().unwrap());
         if stdin_is_the_terminal {
-            command.stdin(terminal);
+            command.stdin(terminal).stdout(Stdio::piped());
         } else {
             command.stdout(terminal);
         }
-        let output = command.arg(&picture).output().unwrap();
-        let said = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.code(), Some(1), "{said}");
+        let (code, stdout, said) = ended(command.arg(&picture));
+        assert_eq!(code, Some(1), "{said}");
         assert_eq!(said, "usage: asciier FILE (needs a terminal)\n");
-        assert!(output.stdout.is_empty());
+        assert!(stdout.is_empty());
     }
     // nothing reached the terminal: what the runs wrote comes out of it before this
     put_slave(&slave, b"end");
     assert_eq!(read_until(&master, b"end"), b"end");
+}
+
+/// A run of `command` to its end, its stdout (when piped) and stderr read meanwhile: the exit code, stdout, stderr. A run that has not ended within `PATIENCE` is killed with its process group, and the test fails with the stderr it wrote.
+fn ended(command: &mut Command) -> (Option<i32>, Vec<u8>, String) {
+    let mut child = command
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut got = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut got);
+            }
+            got
+        })
+    }
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let deadline = Instant::now() + PATIENCE;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() > deadline {
+            // SAFETY: a signal to the group the child leads; the child is not reaped yet, so the id is still its own
+            unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let (stdout, stderr) = (
+        stdout.join().unwrap(),
+        String::from_utf8_lossy(&stderr.join().unwrap()).into_owned(),
+    );
+    let Some(status) = status else {
+        panic!("still running after {PATIENCE:?}, killed; its stderr: {stderr:?}");
+    };
+    (status.code(), stdout, stderr)
 }
 
 /// Write `bytes` to a terminal's slave side, as a program on it would.
