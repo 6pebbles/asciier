@@ -1221,7 +1221,7 @@ fn r_on_a_video_pauses_it_under_the_page_until_it_closes() {
     tty.until("the player", |screen| seconds(&screen.row(24)).is_some());
     assert!(find(&tty.out(), b"\x1b[2J", at).is_some(), "cleared");
     let first = whole_frames(&tty.out()[at..])[0];
-    // paused on the page's frame or later, and a second after the page showed at the latest: the pause is asked as the page opens, on mpv's answer to r, and mpv takes it on a thread of its own (half a second late seen at load 70, the viewer drawing the first preview meanwhile)
+    // paused on the page's frame or later, and a second after the page showed at the latest: the pause is asked as the page is made, on mpv's answer to r, and mpv takes it on a thread of its own (0.5 s of play after the asking seen at load 71); counted from the page on screen, the bound passes a pause asked after the page's first draw too: that it is asked before that draw rests on enter_page of src/view.rs
     let (paused, latest) = (
         (time * 25.0).round() as u32,
         on_screen + ((opened + 1.0) * 25.0).ceil() as u32 + 3,
