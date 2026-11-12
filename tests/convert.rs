@@ -2510,29 +2510,43 @@ fn ctrl_c_while_the_decoder_writes_nothing_stops_the_reading() {
 
 #[test]
 fn ctrl_c_before_the_first_frame_ends_as_before_the_encoding() {
-    // rows C10, N25: a Ctrl-C once the decoder and the encoder run but before a frame was written leaves nothing to finish, so it ends as one before a video's encoding: the encoder killed before its input closes, no message, no path, death by SIGINT; the decoder writes nothing, its pipe open, and the Ctrl-C comes once the progress is out; on stderr the progress alone, the encoder's file (made at its start) empty; bin/ascii-convert:476 at tag python-final took it in its read loop and closed the encoder's empty input: exit 1 with ffmpeg's errors and `ffmpeg could not encode the video` where h264_vaapi encodes, `stopped at frame 0` and exit 130 where libx264 does
+    // rows X9, N25: a Ctrl-C while the decoder has given no frame, its pipe open, with the encoder started: N25 ends it as a Ctrl-C before a video's encoding: the encoder, still waiting for its first input, killed before that input closes, so it never opens its output and a file in the way stays as it was; on stderr the progress alone, no path, death by SIGINT; so with either encoder, the trial's pick and libx264 under a VA driver that cannot load; X9's read loop of bin/ascii-convert:471 at tag python-final took this Ctrl-C and closed the encoder's empty input, which made the file in the way over (seen here, 2 of 2): where h264_vaapi encodes, exit 1, ffmpeg's errors and `ffmpeg could not encode the video`, the file 0 bytes; where libx264 does, `stopped at frame 0: <out> holds the part converted`, the path, exit 130, a file of 261 bytes and no frame
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "clip.mp4", 0.8, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
     sandbox.set("STALL", "0");
-    let run = Running::start(
-        &sandbox,
-        &["-W", "320", "-H", "180", "-o", "clip-out.mp4", "clip.mp4"],
-    );
-    await_file(&sandbox.path("held"));
-    run.await_err("\r0/20 frames");
-    run.interrupt();
-    let (status, out, err) = run.finish();
-    assert_eq!(
-        (status.signal(), out.as_str()),
-        (Some(libc::SIGINT), ""),
-        "{err:?}"
-    );
-    let (counts, total) = progress(&err);
-    assert_eq!((counts.last(), total.as_str()), (Some(&0), "20"), "{err:?}");
-    let made = std::fs::metadata(sandbox.path("clip-out.mp4")).map_or(0, |meta| meta.len());
-    assert_eq!(made, 0, "{err:?}");
-    await_gone(&sandbox);
+    for driver in ["", "bogus"] {
+        if !driver.is_empty() {
+            sandbox.set("LIBVA_DRIVER_NAME", driver);
+        }
+        let _ = std::fs::remove_file(sandbox.path("held"));
+        std::fs::write(sandbox.path("clip-out.mp4"), "in the way").unwrap();
+        let run = Running::start(
+            &sandbox,
+            &["-W", "320", "-H", "180", "-o", "clip-out.mp4", "clip.mp4"],
+        );
+        await_file(&sandbox.path("held"));
+        run.await_err("\r0/20 frames");
+        run.interrupt();
+        let (status, out, err) = run.finish();
+        assert_eq!(
+            (status.signal(), out.as_str()),
+            (Some(libc::SIGINT), ""),
+            "{driver:?}: {err:?}"
+        );
+        let (counts, total) = progress(&err);
+        assert_eq!(
+            (counts.last(), total.as_str()),
+            (Some(&0), "20"),
+            "{driver:?}: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sandbox.path("clip-out.mp4")).unwrap(),
+            "in the way",
+            "{driver:?}"
+        );
+        await_gone(&sandbox);
+    }
 }
 
 #[test]

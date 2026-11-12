@@ -95,7 +95,7 @@ output:
   -a, --at SECONDS                  a video's frame at that time, as a PNG
   -h, --help                        this text";
 
-/// Ctrl-C, noted for the whole run: before a video's encoding what runs is killed and nothing made counts; while its frames are read the reading stops and the file is finished (row X9); after the reading the file is finished and nothing said, however the encoder ends (row C10).
+/// Ctrl-C, noted for the whole run: before a video's encoding what runs is killed and nothing made counts; while its frames are read the reading stops and the file is finished (row X9), unless no frame was written: then the run ends as before the encoding (N25); after the reading the file is finished and nothing said, however the encoder ends (row C10).
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 /// Set once a video's decoder and encoder are to start: from then on Ctrl-C kills the decoder alone, while its frames are read.
 static ENCODING: AtomicBool = AtomicBool::new(false);
@@ -850,7 +850,7 @@ fn video(
     });
     say(format!("\r{done}/{shown} frames\n"));
     *decoder_group() = 0;
-    // a Ctrl-C before a frame was written leaves the encoder nothing to finish: killed before its input closes, of which it would complain, it ends as before the encoding (row C10)
+    // a Ctrl-C before a frame was written leaves the encoder nothing to finish: killed while it waits for its first input, it neither complains of an empty one nor opens its output, and the run ends as one before the encoding (N25 against row X9)
     let unmade = || done == 0 && INTERRUPTED.load(Ordering::SeqCst);
     if unmade() {
         kill(encode.id() as libc::pid_t);
