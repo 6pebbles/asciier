@@ -204,8 +204,9 @@ fn no_writes_after(tty: &Tty) {
 
 #[test]
 fn the_status_row_goes_under_the_scope_between_decsc_and_decrc() {
-    // rows A3, P16: draw and run of bin/ascii-viewer:2184 and :2403 at tag python-final: `ESC 7`, the bottom row erased, the status row as for video (its bar round(room x position / length), room 80 - 15 - 1), `ESC 8`, never a synchronized update; while playing it is written as the clock runs (the old viewer after each poll of at most 0.25 s), paused only after a key or the toast's end
-    let sandbox = Sandbox::new();
+    // rows A3, P16, V15: draw and run of bin/ascii-viewer:2184 and :2403 at tag python-final: `ESC 7`, the bottom row erased, the status row as for video (its bar round(room x position / length), room 80 - 15 - 1), `ESC 8`, never a synchronized update; while playing it is written as the clock runs, 4 times a second at least (the old viewer after each poll of at most 0.25 s, bin/ascii-viewer:2407), paused or stopped (MPRIS Stop) only after a key, a request or the toast's end
+    let mut sandbox = Sandbox::new();
+    let bus = Bus::new(&mut sandbox);
     let tone = tone(&sandbox, "tone.m4a", 10.0);
     let mut tty = sandbox.launch().arg(&tone).size(SMALL).start();
     tty.await_playing();
@@ -240,7 +241,8 @@ fn the_status_row_goes_under_the_scope_between_decsc_and_decrc() {
         );
         assert!((low..=high).contains(&bar), "{bar} cells at {second} s");
     }
-    assert!(rows.iter().any(|&(second, _)| second == 1), "{rows:?}");
+    let second = rows.iter().filter(|&&(second, _)| second == 1).count();
+    assert!(second >= 4, "{second} writes in the second 00:01: {rows:?}");
     tty.send(b" ");
     tty.await_status("| ");
     let at = tty.send(DOWN);
@@ -258,8 +260,36 @@ fn the_status_row_goes_under_the_scope_between_decsc_and_decrc() {
     );
     tty.expect(toasted, status_write(24, "| 00:00 / 00:10"));
     no_writes_after(&tty);
+    let at = tty.len();
+    mpris(&sandbox, &bus, tty.pid, "Stop");
+    tty.expect(at, status_write(24, ". 00:00 / 00:10"));
+    no_writes_after(&tty);
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
+}
+
+/// MPRIS `method` of the player `pid` on the test's bus, called once the viewer owns its name there; its empty reply waited for.
+fn mpris(sandbox: &Sandbox, bus: &Bus, pid: u32, method: &str) {
+    let end = Instant::now() + PATIENCE;
+    loop {
+        let output = sandbox
+            .command("dbus-send")
+            .arg(format!("--bus={}", bus.address))
+            .arg("--print-reply")
+            .arg(format!(
+                "--dest=org.mpris.MediaPlayer2.asciier.instance{pid}"
+            ))
+            .arg("/org/mpris/MediaPlayer2")
+            .arg(format!("org.mpris.MediaPlayer2.Player.{method}"))
+            .output()
+            .unwrap();
+        if output.status.success() {
+            return;
+        }
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(Instant::now() < end, "{method}: {said}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
