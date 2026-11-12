@@ -54,11 +54,12 @@ pub struct Mpv {
     at_end: bool,
     time: f64,
     ended: bool,
-    /// Steps since the position last moved by other means: `stepped`, the last went forward; `back`, where the last step forward started, if paused, the target of a step back; `before`, `back` before that step, again `back` when the step did not move (on the last frame). `landing`: where a step forward started, until mpv reports the mark of the last one (`steps` sent): by then one that moves has reported a play or a position 1 ms or more away (`moved`).
+    /// Steps since the position last moved by other means: `stepped`, the last went forward; `back`, where the last step forward started, if paused, the target of a step back; `before`, `back` before that step, again `back` when the step did not move (on the last frame). `landing`: where the last step forward started, until the next step settles it; `marked`, mpv has reported the mark of that step (`steps` sent), a pass past it; `moved`, a play reported or a new frame handed over since: a step on the last frame pauses again in the pass that plays, before mpv reports anything, and hands over no frame.
     stepped: bool,
     back: Option<f64>,
     before: Option<f64>,
     landing: Option<f64>,
+    marked: bool,
     moved: bool,
     steps: u64,
     /// Requests to pause or play that mpv has not confirmed yet: its reports of `pause` until then can be older than them.
@@ -370,6 +371,7 @@ impl Mpv {
             back: None,
             before: None,
             landing: None,
+            marked: false,
             moved: false,
             steps: 0,
             pausing: 0,
@@ -549,11 +551,20 @@ impl Mpv {
     /// One frame forward or back, then paused; a play that waits for a seek is dropped. A step forward onto the last frame leaves the position at the sound's, past that frame (at the sound's end when the step played it out, as it does when little is left), and mpv's step back counts from there: it finds the last frame again. So a step back right after steps forward that started paused seeks to where the last of them that moved started, and a step forward that ends the file is followed by a seek past the end (in `events`), which holds the last frame at its own time.
     pub fn step(&mut self, forward: bool) {
         self.seek_plays = false;
+        // the last step forward, once mpv has run a pass past it: one that did not move gives back the place to step back to
+        if self.landing.is_some() && self.marked {
+            self.moved |= self.new_frame();
+            if !self.moved {
+                self.back = self.before.take();
+            }
+            self.landing = None;
+        }
         if forward {
             let settled = self.paused && self.pausing == 0 && self.landing.is_none();
             self.before = self.back.take();
             (self.back, self.landing) = (settled.then_some(self.time), Some(self.time));
-            (self.stepped, self.moved, self.steps) = (true, false, self.steps + 1);
+            (self.stepped, self.marked, self.moved) = (true, false, false);
+            self.steps += 1;
             self.command(&["frame-step"]);
             let mut mark = self.steps as i64;
             // SAFETY: mpv copies the value before the call returns.
@@ -634,18 +645,8 @@ impl Mpv {
         let due = !self.render.is_null()
             && unsafe { mpv_render_context_update(self.render) } & UPDATE_FRAME != 0;
         events.extend((due || late).then_some(Event::Frame));
-        let mut info = FrameInfo {
-            flags: 0,
-            target_time: 0,
-        };
-        let info_param = Param {
-            kind: NEXT_FRAME_INFO,
-            data: &mut info as *mut FrameInfo as *mut c_void,
-        };
-        // SAFETY: the context is valid while `due`; `info` lives through the call.
-        let new = due && unsafe { mpv_render_context_get_info(self.render, info_param) } >= 0;
-        // a redraw shows no new frame and has no time to be shown at
-        let new = new && info.flags & FRAME_PRESENT != 0 && info.target_time != 0;
+        let new = due && self.new_frame();
+        self.moved |= new;
         // the position of a frame comes with it or in the next look
         match (new, self.first.take()) {
             (true, first) => (self.frameless, self.frame_time) = (0, first.map(|_| self.time)),
@@ -657,6 +658,23 @@ impl Mpv {
         }
         self.looked = Instant::now();
         events
+    }
+
+    /// Whether mpv hands over a new frame: a redraw shows no new one and has no time to be shown at.
+    fn new_frame(&self) -> bool {
+        let mut info = FrameInfo {
+            flags: 0,
+            target_time: 0,
+        };
+        let param = Param {
+            kind: NEXT_FRAME_INFO,
+            data: &mut info as *mut FrameInfo as *mut c_void,
+        };
+        // SAFETY: the context is valid while not null; `info` lives through the call.
+        !self.render.is_null()
+            && unsafe { mpv_render_context_get_info(self.render, param) } >= 0
+            && info.flags & FRAME_PRESENT != 0
+            && info.target_time != 0
     }
 
     /// One of mpv's events as the viewer's, if it is one.
@@ -750,17 +768,11 @@ impl Mpv {
             b"mute" => flag.map(Event::Mute),
             b"time-pos" => {
                 let time = number?;
-                self.moved |= self
-                    .landing
-                    .is_some_and(|from| (time - from).abs() >= 0.001);
                 (self.time, self.first) = (time, self.first.or(Some(time)));
                 Some(Event::Time(time))
             }
             _ if name == STEP_MARK.to_bytes() => {
-                let marked = whole == Some(self.steps as i64);
-                if marked && self.landing.take().is_some() && !self.moved {
-                    self.back = self.before.take();
-                }
+                self.marked |= whole == Some(self.steps as i64);
                 None
             }
             b"duration" => Some(Event::Length(number.filter(|length| *length > 0.0))),
@@ -794,6 +806,7 @@ impl Mpv {
         if self.render.is_null() {
             return None;
         }
+        self.moved |= self.new_frame();
         // mpv tells size and turn only once its first frame is taken
         let Some((.., turn)) = self.shape().filter(|_| w > 0 && h > 0) else {
             self.skip();
@@ -830,6 +843,7 @@ impl Mpv {
         if self.render.is_null() {
             return;
         }
+        self.moved |= self.new_frame();
         let (mut skip, mut block): (c_int, c_int) = (1, 0);
         let mut params = [
             (SKIP_RENDERING, &mut skip as *mut c_int as *mut c_void),
@@ -1823,6 +1837,29 @@ pub(crate) mod tests {
         assert_eq!(
             events.iter().rfind(|e| matches!(e, Event::Pause(_))),
             Some(&Event::Pause(true))
+        );
+    }
+
+    #[test]
+    fn a_step_on_the_last_frame_moves_nothing_on_a_busy_core() {
+        // rows P15, N21: with sound seconds past the picture a step on the last frame plays until mpv pauses again in the same pass; a core busy with requests meanwhile let the sound move the position by more than 1 ms, which passed for a step that moved, and the step back went to where it started, past the frame (seen before a play or a new frame told a step that moved: the position 2 ms on, the step back on 49 at 1.77 s, 3 of 3)
+        let mut stage = Stage::new();
+        stage.clip(2.0, 6.0);
+        stage.after(&["seek", "1.92", "absolute+exact"]);
+        stage.mpv.step(true);
+        stage.settle();
+        let onto = stage.time;
+        stage.mpv.step(true);
+        keep_busy(&stage.mpv, 900);
+        stage.settle();
+        let on = stage.time;
+        stage.mpv.step(false);
+        stage.settle();
+        assert!(
+            stage.shown.last() == Some(&48) && near(stage.time, 1.92, 0.001),
+            "onto 49 at {onto}, on it at {on}, back on {:?} at {}",
+            stage.shown.last(),
+            stage.time
         );
     }
 
