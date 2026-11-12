@@ -4,8 +4,7 @@ use crate::Result;
 use crate::theme::Rgb;
 use fast_image_resize as fir;
 use image::codecs::gif::GifDecoder;
-use image::codecs::png::{CompressionType, FilterType, PngDecoder, PngEncoder};
-use image::codecs::webp::WebPDecoder;
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::metadata::Orientation;
 use image::{
     AnimationDecoder, ColorType, DynamicImage, ImageBuffer, ImageDecoder, ImageFormat, ImageReader,
@@ -13,7 +12,7 @@ use image::{
 };
 use resvg::{tiny_skia, usvg};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -70,15 +69,62 @@ fn caught<T>(work: impl FnOnce() -> T) -> Option<T> {
     crate::term::guard(std::panic::AssertUnwindSafe(work)).ok()
 }
 
-/// Whether the file holds several frames to play: a GIF by its first two frames, APNG and WebP by their headers.
+/// Whether the file holds several frames to play, as Pillow's n_frames counts them (lib/ascii_image.py:61): a GIF by its first two frames, an APNG and a WebP by their chunks, nothing decoded; one of a single frame is a still.
 fn animated(path: &Path, format: Option<ImageFormat>) -> image::ImageResult<bool> {
-    let file = || File::open(path).map(BufReader::new);
+    let mut file = BufReader::new(File::open(path)?);
     Ok(match format {
-        Some(ImageFormat::Gif) => GifDecoder::new(file()?)?.into_frames().take(2).count() > 1,
-        Some(ImageFormat::Png) => PngDecoder::new(file()?)?.is_apng()?,
-        Some(ImageFormat::WebP) => WebPDecoder::new(file()?)?.has_animation(),
+        Some(ImageFormat::Gif) => GifDecoder::new(file)?.into_frames().take(2).count() > 1,
+        Some(ImageFormat::Png) => png_frames(&mut file)? > 1,
+        Some(ImageFormat::WebP) => webp_frames(&mut file)? > 1,
         _ => false,
     })
+}
+
+/// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two.
+fn png_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
+    file.seek(SeekFrom::Start(8))?; // past the signature
+    let (mut frames, mut control) = (None, false);
+    loop {
+        let mut head = [0; 8];
+        file.read_exact(&mut head)?;
+        let length = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+        let mut rest = i64::from(length) + 4; // the data and its CRC
+        match &head[4..] {
+            b"IDAT" | b"fdAT" => return Ok(frames.map_or(1, |n| n + u32::from(!control))),
+            b"fcTL" => control = true,
+            b"acTL" if length >= 8 => {
+                let mut count = [0; 4];
+                file.read_exact(&mut count)?;
+                rest -= 4;
+                let count = u32::from_be_bytes(count);
+                frames = match frames {
+                    Some(_) => None,
+                    None => (1..=0x8000_0000).contains(&count).then_some(count),
+                };
+            }
+            _ => {}
+        }
+        file.seek(SeekFrom::Current(rest))?;
+    }
+}
+
+/// A WebP's frames as libwebp counts them for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP.
+fn webp_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
+    let mut head = [0; 21]; // RIFF, its length, WEBP, the first chunk's kind and length, a byte of its data: VP8X's flags
+    file.read_exact(&mut head)?;
+    if &head[12..16] != b"VP8X" || head[20] & 0x02 == 0 {
+        return Ok(1);
+    }
+    let length = u32::from_le_bytes([head[16], head[17], head[18], head[19]]);
+    let next = 20 + u64::from(length) + u64::from(length % 2); // chunks are padded to even
+    file.seek(SeekFrom::Start(next))?;
+    let (mut frames, mut chunk) = (0, [0; 8]);
+    while frames < 2 && file.read_exact(&mut chunk).is_ok() {
+        let length = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+        frames += u32::from(&chunk[..4] == b"ANMF");
+        file.seek(SeekFrom::Current(i64::from(length) + i64::from(length % 2)))?;
+    }
+    Ok(frames.max(1))
 }
 
 /// The decoder of the raster still at `path`, its header read: the format by content, within `MAX_PIXELS`, no animation.
@@ -151,7 +197,7 @@ pub fn open(path: &Path) -> Opened {
     }
 }
 
-/// Whether `path` holds a still by its header alone (an SVG by its suffix; an image over the limit counts).
+/// Whether `path` holds a still by its header, a GIF's first two frames, an APNG's or a WebP's chunks (an SVG by its suffix; an image over the limit counts).
 pub fn identifies(path: &Path) -> bool {
     let raster = || caught(|| header(path).map(drop));
     is_svg(path) || matches!(raster(), Some(Ok(()) | Err(Not::TooLarge)))
@@ -629,9 +675,10 @@ mod tests {
         ])
     }
 
-    /// An 8 x 8 APNG of two frames.
-    fn apng() -> Vec<u8> {
-        let rows = zlib(&[0; 8 * (1 + 8 * 3)]);
+    /// An 8 x 8 APNG of `frames` frames of #010203: the first in the IDAT, or each in an fdAT behind a default image in the IDAT, outside the animation (`default`).
+    fn apng(frames: u32, default: bool) -> Vec<u8> {
+        let row = [&[0][..], &[1, 2, 3].repeat(8)].concat(); // filter 0
+        let rows = zlib(&row.repeat(8));
         let frame = |sequence: u32| {
             [
                 &sequence.to_be_bytes()[..],
@@ -642,19 +689,24 @@ mod tests {
             ]
             .concat()
         };
-        png_chunks(&[
+        let mut chunks = vec![
             (b"IHDR", ihdr(8, 8, 8, 2)),
-            (b"acTL", [2u32.to_be_bytes(), 0u32.to_be_bytes()].concat()),
-            (b"fcTL", frame(0)),
-            (b"IDAT", rows.clone()),
-            (b"fcTL", frame(1)),
-            (b"fdAT", [&2u32.to_be_bytes()[..], &rows].concat()),
-            (b"IEND", vec![]),
-        ])
+            (b"acTL", [frames.to_be_bytes(), 0u32.to_be_bytes()].concat()),
+        ];
+        if !default {
+            chunks.push((b"fcTL", frame(0)));
+        }
+        chunks.push((b"IDAT", rows.clone()));
+        for sequence in (u32::from(!default)..frames).map(|at| 2 * at - u32::from(!default)) {
+            chunks.push((b"fcTL", frame(sequence)));
+            chunks.push((b"fdAT", [&(sequence + 1).to_be_bytes()[..], &rows].concat()));
+        }
+        chunks.push((b"IEND", vec![]));
+        png_chunks(&chunks)
     }
 
-    /// An 8 x 8 animated WebP of two lossless frames: the container written here around the encoder's frames.
-    fn animated_webp() -> Vec<u8> {
+    /// An 8 x 8 animated WebP of a lossless frame of each red: the container written here around the encoder's frames.
+    fn animated_webp(reds: &[u8]) -> Vec<u8> {
         let chunk = |kind: &[u8; 4], data: &[u8]| {
             let mut out = kind.to_vec();
             out.extend((data.len() as u32).to_le_bytes());
@@ -666,7 +718,7 @@ mod tests {
         let mut body = b"WEBP".to_vec();
         body.extend(chunk(b"VP8X", &[&[0x02, 0, 0, 0][..], &size].concat())); // the animation flag
         body.extend(chunk(b"ANIM", &[0; 6]));
-        for red in [0, 255] {
+        for &red in reds {
             let mut frame = Vec::new();
             RgbaImage::from_pixel(8, 8, Rgba([red, 0, 0, 255]))
                 .write_with_encoder(WebPEncoder::new_lossless(&mut frame))
@@ -1189,19 +1241,24 @@ mod tests {
         out
     }
 
-    // tests/test_image.py:93
+    // rows S1, V17: tests/test_image.py:93 at tag python-final: a GIF, an APNG or an animated WebP of more than one frame is an animation, no still, also an APNG of one frame behind a default image outside the animation, two frames to Pillow's n_frames (lib/ascii_image.py:61; it opened as a still while frames were counted by decoding, which passes over that image); text, a clip, a missing file, a folder are no picture
     #[test]
     fn animations_and_non_images_are_no_stills() {
         let dir = Dir::new("animations");
         assert_eq!(kind(&dir.file("a.gif", gif(3))), "animation");
-        assert_eq!(kind(&dir.file("a.png", apng())), "animation");
-        assert_eq!(kind(&dir.file("a.webp", animated_webp())), "animation");
+        assert_eq!(kind(&dir.file("a.png", apng(2, false))), "animation");
+        assert_eq!(kind(&dir.file("default.png", apng(1, true))), "animation");
+        assert_eq!(
+            kind(&dir.file("a.webp", animated_webp(&[0, 255]))),
+            "animation"
+        );
         assert_eq!(kind(&dir.file("x.png", "not a picture")), "no image");
         assert_eq!(kind(&dir.file("clip.mp4", [0u8; 64])), "no image");
         assert_eq!(kind(&dir.0.join("missing.png")), "no image");
         assert_eq!(kind(&dir.0), "no image");
     }
 
+    // rows S1, V17: is_animation of lib/ascii_image.py:61 at tag python-final: more than one frame (Pillow's n_frames) makes an animation; a GIF, an APNG or an animated WebP of one frame is a still (the last two went to mpv while their headers decided)
     #[test]
     fn one_frame_of_an_animated_format_is_a_still() {
         let dir = Dir::new("one_frame");
@@ -1210,6 +1267,15 @@ mod tests {
         let source = RgbImage::from_pixel(8, 8, [1, 2, 3].into());
         let one = still(&dir.file("one.webp", encoded(&source.into(), ImageFormat::WebP)));
         assert_eq!(rgb(&one.pic).get_pixel(7, 7).0, [1, 2, 3]);
+        let one = still(&dir.file("one.png", apng(1, false)));
+        assert_eq!(rgb(&one.pic).get_pixel(7, 7).0, [1, 2, 3]);
+        // the frame laid on the canvas: 199 by image-webp for 200, which libwebp (Pillow's) keeps
+        let one = still(&dir.file("anim.webp", animated_webp(&[200])));
+        let [red, green, blue] = rgb(&one.pic).get_pixel(7, 7).0;
+        assert!(
+            red.abs_diff(200) <= 1 && green == 0 && blue == 0,
+            "{red} {green} {blue}"
+        );
     }
 
     // row N7: the first page shows (the Python tools played the pages as an animation); a JPEG with more pictures behind it (MPO) shows its first
@@ -1269,6 +1335,7 @@ mod tests {
         assert!(identifies(&full));
     }
 
+    // rows S8, S8a: identifies of lib/ascii_image.py:67 at tag python-final: a still by its header, also one cut short that then does not open, and an SVG by its suffix, unread; an animation of more than one frame (an APNG's default image outside the animation counted, as Pillow counts it), text, a clip or a missing file is passed over
     #[test]
     fn identifies_by_the_header_alone() {
         let dir = Dir::new("identifies");
@@ -1280,9 +1347,12 @@ mod tests {
         assert_eq!(kind(&cut), "no image");
         assert!(!identifies(&dir.file("text.png", "not a picture")));
         assert!(!identifies(&dir.file("a.gif", gif(3))));
-        assert!(!identifies(&dir.file("a.png", apng())));
-        assert!(!identifies(&dir.file("a.webp", animated_webp())));
+        assert!(!identifies(&dir.file("a.png", apng(2, false))));
+        assert!(!identifies(&dir.file("default.png", apng(1, true))));
+        assert!(!identifies(&dir.file("a.webp", animated_webp(&[0, 255]))));
         assert!(identifies(&dir.file("one.gif", gif(1))));
+        assert!(identifies(&dir.file("one.png", apng(1, false))));
+        assert!(identifies(&dir.file("one.webp", animated_webp(&[200]))));
         assert!(!identifies(&dir.file("clip.mp4", [0u8; 64])));
         assert!(!identifies(&dir.0.join("missing.png")));
         assert!(identifies(&dir.0.join("any.svg"))); // by its suffix, unread

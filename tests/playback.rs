@@ -1644,6 +1644,114 @@ fn an_animation_plays_as_video() {
     assert_eq!(tty.exit(), 0);
 }
 
+/// `picture` as an APNG of one frame: acTL and fcTL before the PNG's image data; or, `behind` a default image, acTL alone there, the image data that default image, outside the animation, and the frame after it in an fdAT of the same data (ffmpeg writes one frame as a plain PNG).
+fn one_frame_apng(picture: &image::RgbImage, behind: bool) -> Vec<u8> {
+    let mut png = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png);
+    picture.write_with_encoder(encoder).unwrap();
+    let chunk = |kind: &[u8], data: &[u8]| {
+        let mut crc = flate2::Crc::new();
+        crc.update(kind);
+        crc.update(data);
+        let length = (data.len() as u32).to_be_bytes();
+        [&length[..], kind, data, &crc.sum().to_be_bytes()].concat()
+    };
+    let (w, h) = picture.dimensions();
+    // sequence 0, the whole picture, a delay of 1/10 s
+    let control = [
+        &[0; 4][..],
+        &w.to_be_bytes(),
+        &h.to_be_bytes(),
+        &[0; 8],
+        &[0, 1, 0, 10, 0, 0],
+    ]
+    .concat();
+    let data = find(&png, b"IDAT", 0).unwrap() - 4; // where its length starts
+    let length = u32::from_be_bytes(png[data..data + 4].try_into().unwrap()) as usize;
+    let (pixels, end) = (&png[data + 8..data + 8 + length], data + 12 + length);
+    let animation = chunk(b"acTL", &[0, 0, 0, 1, 0, 0, 0, 0]);
+    if !behind {
+        return [
+            &png[..data],
+            &animation,
+            &chunk(b"fcTL", &control),
+            &png[data..],
+        ]
+        .concat();
+    }
+    let frame = chunk(b"fdAT", &[&1u32.to_be_bytes()[..], pixels].concat()); // sequence 1
+    let rest = [&chunk(b"fcTL", &control)[..], &frame, &png[end..]].concat();
+    [&png[..data], &animation, &png[data..end], &rest].concat()
+}
+
+/// `picture` as an animated WebP of one frame: the encoder's lossless frame in an ANMF chunk (ffmpeg writes one frame as a plain WebP).
+fn one_frame_webp(picture: &image::RgbImage) -> Vec<u8> {
+    let mut frame = Vec::new();
+    let encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut frame);
+    picture.write_with_encoder(encoder).unwrap();
+    let chunk = |kind: &[u8], data: &[u8]| {
+        let length = (data.len() as u32).to_le_bytes();
+        [kind, &length[..], data, &[0][..data.len() % 2]].concat()
+    };
+    let (w, h) = picture.dimensions();
+    let size = [(w - 1).to_le_bytes(), (h - 1).to_le_bytes()].map(|side| side[..3].to_vec());
+    let size = size.concat();
+    // offset, size, a duration of 100 ms, no flags; the frame's chunk follows the encoder's RIFF header
+    let head = [&[0; 6][..], &size, &[100, 0, 0, 0], &frame[12..]].concat();
+    let body = [
+        &b"WEBP"[..],
+        &chunk(b"VP8X", &[&[0x02, 0, 0, 0][..], &size].concat()), // the animation flag
+        &chunk(b"ANIM", &[0; 6]),
+        &chunk(b"ANMF", &head),
+    ]
+    .concat();
+    [&b"RIFF"[..], &(body.len() as u32).to_le_bytes(), &body].concat()
+}
+
+#[test]
+fn a_one_frame_animation_is_a_still() {
+    // rows V17, S11: is_animation of lib/ascii_image.py:61 at tag python-final counts frames (Pillow's n_frames): an APNG or an animated WebP of one frame is a still, which `+` zooms, shown without a status row (it went to mpv while their headers decided)
+    let sandbox = Sandbox::new();
+    let picture = gradient(160, 90);
+    let files = [
+        ("one.png", one_frame_apng(&picture, false)),
+        ("one.webp", one_frame_webp(&picture)),
+    ]
+    .map(|(name, bytes)| {
+        let file = sandbox.path(name);
+        std::fs::write(&file, bytes).unwrap();
+        file
+    });
+    let mut ttys = files
+        .each_ref()
+        .map(|file| sandbox.launch().arg(file).size(SMALL).start());
+    for (tty, file) in ttys.iter_mut().zip(&files) {
+        let name = file.file_name().unwrap().to_string_lossy();
+        tty.until(&format!("{name}'s picture"), |screen| screen.inked() > 600);
+        let at = tty.send(b"+");
+        tty.expect(at, b"\x1b[7m zoom ");
+        tty.send(b"q");
+        assert_eq!(tty.exit(), 0, "{name}");
+        let status = replay(&tty.out(), SMALL, |screen| screen.row(24).starts_with("> "));
+        assert!(!status.contains(&true), "{name}: a status row");
+    }
+}
+
+#[test]
+fn a_one_frame_apng_behind_a_default_image_plays_as_video() {
+    // rows V17, S1: is_animation of lib/ascii_image.py:61 at tag python-final: Pillow's n_frames counts an APNG's default image outside the animation (no fcTL before its image data), so one frame behind it makes two, an animation, which plays through mpv under a status row and ends (it opened as a still while frames were counted by decoding, which passes over that image); run in this harness the old viewer did the same
+    let sandbox = Sandbox::new();
+    let apng = sandbox.path("default.png");
+    std::fs::write(&apng, one_frame_apng(&gradient(160, 90), true)).unwrap();
+    let mut tty = sandbox.launch().arg(&apng).size(SMALL).start();
+    assert_eq!(tty.exit(), 0);
+    let rows = replay(&tty.out(), SMALL, |screen| screen.row(24));
+    assert!(
+        rows.iter().any(|row| row.starts_with("> 00:00")),
+        "no status row: {rows:?}"
+    );
+}
+
 #[test]
 fn a_picture_only_mpv_decodes_shows_as_one_frame() {
     // rows V17, N7: a PCX picture, which the built-in decoders do not take, opens as a one-frame video, its picture under a status row without a length, held until `q` (the old viewer opened it as a still, without a status row)
