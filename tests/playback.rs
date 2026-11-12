@@ -58,6 +58,13 @@ fn taken(tty: &mut Tty, sandbox: &Sandbox) -> u32 {
     saved(&sandbox.path(name)).0
 }
 
+/// Pause as soon as the first frame is written: under load a clip of a few seconds ends before a key sent once it plays on (seen: the viewer gone before the key, the terminal echoing it after the restore).
+fn paused_at_once(tty: &mut Tty) {
+    assert!(tty.wait(0, PATIENCE, |out| !written_rows(out).is_empty()));
+    tty.send(b" ");
+    tty.await_status("| ");
+}
+
 /// Send `keys`, then wait for the toast `text`.
 fn says(tty: &mut Tty, keys: &[u8], text: &str) {
     let at = tty.send(keys);
@@ -449,6 +456,91 @@ fn a_step_back_soon_after_a_step_onto_the_last_frame_shows_the_frame_before() {
         tty.settle(Duration::from_millis(600));
         let status = tty.screen().row(24);
         assert_eq!(frame(tty.screen()), 53, "{wait} ms: {status:?}");
+    }
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
+fn a_seek_and_a_step_in_one_write_end_paused_as_the_old_viewer_left_them() {
+    // rows P9, P15: seek_to and frame_step of bin/ascii-viewer:1423 and :1441 at tag python-final did each key before the next; run in this harness, paused on frame 25, the old viewer showed `l.` and `.l` 151, `l,` and `,l` 149, `..,` 26, paused; seen before the fix: `l.` and `.l` played on to the clip's end with the mark `|` and the run going on there, `l,` 24, `,l` 125, `..,` 24
+    let sandbox = Sandbox::new();
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_playing();
+    pause(&mut tty);
+    for (keys, number, clock) in [
+        (&b"l."[..], 151, "| 00:06"),
+        (b".l", 151, "| 00:06"),
+        (b"l,", 149, "| 00:05"),
+        (b",l", 149, "| 00:05"),
+        (b"..,", 26, "| 00:01"),
+    ] {
+        lands(&mut tty, DOWN, 0, "| 00:00");
+        lands(&mut tty, SHIFT_RIGHT, 25, "| 00:01");
+        tty.send(keys);
+        // `s` waits for the keys before it (`..,` shows 26 on the way too)
+        assert_eq!(taken(&mut tty, &sandbox), number, "{}", shown(keys));
+        lands(&mut tty, b"", number, clock);
+        // a window for what must not happen: playing on
+        std::thread::sleep(Duration::from_millis(500));
+        let screen = tty.screen();
+        let on = (frame(screen), screen.row(24));
+        assert!(
+            on.0 == number && on.1.starts_with(clock),
+            "{}: {on:?}",
+            shown(keys)
+        );
+    }
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
+fn a_step_back_after_a_step_on_the_last_frame_shows_the_frame_before() {
+    // rows P15, N21: `.` on the last frame, frame 54 of this 2.2 s clip reached by Shift+Right, only pauses, and `,` then shows frame 53 and its time, whatever the sound left past the picture (frame_step of bin/ascii-viewer:1441 at tag python-final; N21: the old viewer ended with the picture); seen before the fix: frame 54 stayed for 2.2, 2.5 and 6 s of sound, the clock at 00:01 for 2.5 and 6
+    for audio in [2.2, 2.5, 6.0] {
+        let sandbox = Sandbox::new();
+        let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, audio, &[]);
+        let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+        paused_at_once(&mut tty);
+        lands(&mut tty, LEFT, 0, "| 00:00");
+        lands(&mut tty, SHIFT_RIGHT, 25, "| 00:01");
+        // four steps in one write, each its frame
+        lands(&mut tty, b"....", 29, "| 00:01");
+        lands(&mut tty, SHIFT_RIGHT, 54, "| 00:02");
+        tty.send(b".");
+        // a window for what must not happen: the picture moving on, or the run ending
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(frame(tty.screen()) == 54 && tty.running(), "{audio}");
+        lands(&mut tty, b",", 53, "| 00:02");
+        tty.send(b"q");
+        assert_eq!(tty.exit(), 0);
+    }
+}
+
+#[test]
+fn steps_typed_apart_each_take_their_frame() {
+    // row P15: `.` `.` `,` typed 30 to 100 ms apart end one frame on (frame_step of bin/ascii-viewer:1441 at tag python-final did each before the next key); seen before the fix: 2 of 4 runs had a case 30 ms apart land back on frame 25, mpv taking the step back while the second step waited for its frame
+    let sandbox = Sandbox::new();
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_playing();
+    pause(&mut tty);
+    for gap in [30, 30, 60, 100] {
+        lands(&mut tty, DOWN, 0, "| 00:00");
+        lands(&mut tty, SHIFT_RIGHT, 25, "| 00:01");
+        for key in [&b"."[..], b".", b","] {
+            tty.send(key);
+            // the keys' timing, not a wait for the viewer
+            std::thread::sleep(Duration::from_millis(gap));
+        }
+        // `s` waits for the steps; frame 26 also shows on the way
+        assert_eq!(taken(&mut tty, &sandbox), 26, "{gap} ms apart");
+        lands(&mut tty, b"", 26, "| 00:01");
+        // a window for what must not happen: a step still to come
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(frame(tty.screen()), 26, "{gap} ms apart");
     }
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
