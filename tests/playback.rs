@@ -1170,6 +1170,29 @@ fn a_frame_taken_while_playing_is_named_by_its_time() {
 }
 
 #[test]
+fn a_frame_taken_while_the_sound_plays_on_is_named_by_its_time() {
+    // rows N5, N21, P21: past the picture's end the sound plays on over the last frame, frame 49 of this 2 s clip with 6 s of sound; `s` there saves that frame named by the position mpv gave with it, 1.96 s, which comes a look later under load, or an earlier frame's when mpv dropped the last frames untaken (seen with three test binaries at once: 1.9 to 2.1 s, and 2 s unloaded); seen before: `clip-ascii-3s.png`, the sound's position
+    let sandbox = Sandbox::new();
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.0, 6.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_status("> 00:03");
+    let at = tty.send(b"s");
+    let start = tty.expect(at, b"\x1b[7m saved ");
+    let end = tty.expect(start, b" \x1b[0m") - 5;
+    let name = String::from_utf8(tty.out()[start..end].to_vec()).unwrap();
+    let time: f64 = name["clip-ascii-".len()..name.len() - "s.png".len()]
+        .parse()
+        .unwrap();
+    let number = saved(&sandbox.path(&name)).0;
+    assert!(
+        (1.5..=2.5).contains(&time) && number == 49,
+        "{name}: {number}"
+    );
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
 fn mpeg_ts_counts_time_from_its_start() {
     // row P23: tests/test_viewer.py:47 at tag python-final: times count from the container's start (here 3 s plus the muxer's delay), a seek lands at or before its target, the frame due or the one before (run in this harness the old viewer landed a second in on its seek to the start)
     let sandbox = Sandbox::new();

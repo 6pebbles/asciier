@@ -37,7 +37,7 @@ pub enum Event {
         h: u32,
         turn: u32,
     },
-    /// The frame asked for with `grab`, upright, at source size (`None` when mpv had none), and the position mpv gave right after it took the frame: that frame's time.
+    /// The frame asked for with `grab`, upright, at source size (`None` when mpv had none), and that frame's time: the position mpv gave right after it took the frame; past the picture's end, where the position is the sound's, the position given with the last frame mpv handed over, later than that frame's by the wait for the next look, and an earlier frame's when mpv dropped the last frames untaken.
     Grabbed(Option<RgbImage>, Option<f64>),
 }
 
@@ -69,6 +69,10 @@ pub struct Mpv {
     seek_plays: bool,
     /// The frame of a grab whose time mpv has not given yet.
     taken: Option<Option<RgbImage>>,
+    /// A new position comes with a new frame, except past the picture's end, where the sound plays on: `frameless` counts the looks (`events` calls, late ones aside: frames may have gone unseen before them) that brought a position and no new frame; `frame_time`, the position given with the last new frame (`None` while it is to come); `first`, the first position of the look under way.
+    frameless: u32,
+    frame_time: Option<f64>,
+    first: Option<f64>,
     /// When `events` last returned.
     looked: Instant,
     /// What mpv renders into, 63 bytes longer than the picture: it starts at a multiple of 64.
@@ -134,6 +138,12 @@ struct Param {
     data: *mut c_void,
 }
 
+#[repr(C)]
+struct FrameInfo {
+    flags: u64,
+    target_time: i64,
+}
+
 const EVENT_NONE: c_int = 0;
 const GET_PROPERTY_REPLY: c_int = 3;
 const SET_PROPERTY_REPLY: c_int = 4;
@@ -159,7 +169,9 @@ const SW_SIZE: c_int = 17;
 const SW_FORMAT: c_int = 18;
 const SW_STRIDE: c_int = 19;
 const SW_POINTER: c_int = 20;
+const NEXT_FRAME_INFO: c_int = 11;
 const UPDATE_FRAME: u64 = 1;
+const FRAME_PRESENT: u64 = 1;
 /// `reply_userdata` of the `screenshot-raw` and the `time-pos` read behind `grab`.
 const GRAB: u64 = 1;
 /// `reply_userdata` of the `pause` set behind `pause`.
@@ -211,6 +223,7 @@ unsafe extern "C" {
         data: *mut c_void,
     );
     fn mpv_render_context_update(render: *mut c_void) -> u64;
+    fn mpv_render_context_get_info(render: *mut c_void, param: Param) -> c_int;
     fn mpv_render_context_render(render: *mut c_void, params: *mut Param) -> c_int;
     fn mpv_render_context_free(render: *mut c_void);
 }
@@ -364,6 +377,9 @@ impl Mpv {
             seek_due: false,
             seek_plays: false,
             taken: None,
+            frameless: 0,
+            frame_time: None,
+            first: None,
             looked: Instant::now(),
             surface: Vec::new(),
             volume_max: 130.0,
@@ -618,6 +634,27 @@ impl Mpv {
         let due = !self.render.is_null()
             && unsafe { mpv_render_context_update(self.render) } & UPDATE_FRAME != 0;
         events.extend((due || late).then_some(Event::Frame));
+        let mut info = FrameInfo {
+            flags: 0,
+            target_time: 0,
+        };
+        let info_param = Param {
+            kind: NEXT_FRAME_INFO,
+            data: &mut info as *mut FrameInfo as *mut c_void,
+        };
+        // SAFETY: the context is valid while `due`; `info` lives through the call.
+        let new = due && unsafe { mpv_render_context_get_info(self.render, info_param) } >= 0;
+        // a redraw shows no new frame and has no time to be shown at
+        let new = new && info.flags & FRAME_PRESENT != 0 && info.target_time != 0;
+        // the position of a frame comes with it or in the next look
+        match (new, self.first.take()) {
+            (true, first) => (self.frameless, self.frame_time) = (0, first.map(|_| self.time)),
+            (false, Some(first)) if !late => match self.frame_time {
+                None => self.frame_time = Some(first),
+                Some(_) => self.frameless += 1,
+            },
+            _ => {}
+        }
         self.looked = Instant::now();
         events
     }
@@ -657,6 +694,11 @@ impl Mpv {
                 // SAFETY: the data of this event is an `mpv_event_property` whose value, without an error, is the double asked for.
                 let time = (event.error >= 0)
                     .then(|| unsafe { *((*(event.data as *const Property)).data as *const f64) });
+                let time = if self.frameless >= 2 {
+                    self.frame_time.or(time)
+                } else {
+                    time
+                };
                 Some(Event::Grabbed(self.taken.take().flatten(), time))
             }
             SET_PROPERTY_REPLY if event.userdata == PAUSE => {
@@ -711,7 +753,7 @@ impl Mpv {
                 self.moved |= self
                     .landing
                     .is_some_and(|from| (time - from).abs() >= 0.001);
-                self.time = time;
+                (self.time, self.first) = (time, self.first.or(Some(time)));
                 Some(Event::Time(time))
             }
             _ if name == STEP_MARK.to_bytes() => {
@@ -1973,6 +2015,34 @@ pub(crate) mod tests {
         );
         // a client busy while mpv plays on: its later reports of `time-pos` are later frames'
         grab(&mut stage, Duration::from_millis(300));
+    }
+
+    #[test]
+    fn a_grab_while_the_sound_plays_on_names_the_last_frame() {
+        // rows N5, N21: past the picture's end, the sound playing on, mpv holds the last frame and the position is the sound's: the frame is named by the position given with it, paused there too (seen before: frame 49 named 3.06 s playing, 3.07 s paused; with a redraw on the pause taken for a new frame, 3.07 s paused)
+        let mut stage = Stage::new();
+        stage.clip(2.0, 4.0);
+        stage.after(&["seek", "1.7", "absolute+exact"]);
+        let grab = |stage: &mut Stage| {
+            stage.mpv.grab();
+            let events = stage.pump(2.0, |e| matches!(e, Event::Grabbed(..)));
+            let Some(Event::Grabbed(Some(grabbed), Some(time))) = events.last() else {
+                panic!("{events:?}")
+            };
+            (number(grabbed.as_raw(), 160, 120), *time)
+        };
+        stage.mpv.pause(false);
+        stage.pump(3.0, |e| matches!(e, Event::Time(t) if *t > 3.0));
+        let playing = grab(&mut stage);
+        stage.mpv.pause(true);
+        stage.settle();
+        let paused = grab(&mut stage);
+        for (number, time) in [playing, paused] {
+            assert!(
+                number == 49 && near(time, 1.96, 0.01),
+                "{playing:?} {paused:?}"
+            );
+        }
     }
 
     #[test]
