@@ -3030,6 +3030,58 @@ pub(crate) mod tests {
         assert_eq!(stage.shown.last(), Some(&49), "on the video's last frame");
     }
 
+    /// A property as a double, read the asynchronous way (`None`: mpv has no value); what mpv reports meanwhile waits for the stage's next pump.
+    fn read_double(stage: &mut Stage, name: &CStr) -> Option<f64> {
+        const ASKED: u64 = 99;
+        // SAFETY: the name lives through the call.
+        unsafe { mpv_get_property_async(stage.mpv.handle, ASKED, name.as_ptr(), DOUBLE) };
+        let end = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < end {
+            // SAFETY: mpv keeps the event until the next wait.
+            let event = unsafe { &*mpv_wait_event(stage.mpv.handle, 0.1) };
+            match event.id {
+                // SAFETY: without an error the reply's value is the double asked for.
+                GET_PROPERTY_REPLY if event.userdata == ASKED => {
+                    return (event.error >= 0).then(|| unsafe {
+                        *((*(event.data as *const Property)).data as *const f64)
+                    });
+                }
+                EVENT_NONE => {}
+                _ => {
+                    let reported = stage.mpv.report(event);
+                    stage.waiting.extend(reported);
+                }
+            }
+        }
+        panic!("mpv did not answer for {name:?}");
+    }
+
+    #[test]
+    fn a_seek_back_into_the_sound_plays_it_again() {
+        // row P6: start_audio and seek_to of bin/ascii-viewer:1339 and :1423 at tag python-final: when mpv's sound was over before the picture, the picture played on and the next seek started a fresh mpv, the sound again from the target; one mpv plays both here: of 2 s of picture and 1 s of sound, played to 1.5 s, the sound over (mpv's audio-pts is unavailable once the output holds the sound's end: seen 0.18 s before the end of a 0.5 s sound), a seek to 0.1 s and 0.3 s of play: the sound runs again with the picture
+        let mut stage = Stage::new();
+        let file = stage.counter("clip.mp4", 25, 2.0, 1.0, &[]);
+        assert_eq!(stage.open(&file), (true, true));
+        stage.settle();
+        stage.play_to(1.5);
+        let at = stage.time;
+        assert_eq!(
+            read_double(&mut stage, c"audio-pts"),
+            None,
+            "the sound over at {at}"
+        );
+        stage.mpv.command(&["seek", "0.1", "absolute+exact"]);
+        let mut heard = Vec::new();
+        for at in [0.2, 0.4] {
+            stage.pump(5.0, |e| matches!(e, Event::Time(t) if *t >= at && *t < 1.0));
+            heard.push((stage.time, read_double(&mut stage, c"audio-pts")));
+        }
+        let ran = heard
+            .iter()
+            .all(|(time, sound)| sound.is_some_and(|sound| near(sound, *time, 0.05)));
+        assert!(ran && heard[0].1 < heard[1].1, "{heard:?}");
+    }
+
     #[test]
     fn a_turned_clip_comes_upright() {
         // row P1: a display matrix of 90, 180 or 270 degrees turns the picture drawn and the frame grabbed upright, as ffmpeg turns it
