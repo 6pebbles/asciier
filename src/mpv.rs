@@ -101,7 +101,7 @@ enum Op {
         paused: bool,
         seeks: bool,
     },
-    /// A step forward, mpv's.
+    /// A step forward: mpv's when paused; playing, a pause and a seek to the frame after the one on screen (`shown`).
     Step,
     /// A step back; how is settled as it goes (`back_step`).
     Back,
@@ -1969,7 +1969,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_step_back_after_a_seek_that_plays_ends_paused() {
-        // rows P8a, P15: `,` right after a seek that plays (`l,` after MPRIS Stop) ends paused: in place of the seek mpv has not run, or, once it runs it, on its target (mpv drops a step back during a seek); the play that waited for the seek came after the step (seen in this test before a step dropped the play: at 1.92 s on frame 48, half a second later at 2.44 s on 61, 3 of 3)
+        // rows P8a, P15: `,` right after a seek that plays (`l,` after MPRIS Stop) ends paused, on the frame before the seek's target since the step waits for the seek; the play that waited for the seek came after the step (seen in this test before a step dropped the play: at 1.92 s on frame 48, half a second later at 2.44 s on 61, 3 of 3)
         let mut stage = Stage::new();
         stage.clip(10.0, 10.0);
         stage.until_at(&["seek", "1", "absolute+exact"], 25, 1.0);
