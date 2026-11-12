@@ -184,7 +184,8 @@ impl Playback {
 
 #[derive(PartialEq)]
 enum Grab {
-    Shot,
+    /// `s`, with the look of its press.
+    Shot(Options),
     Page,
 }
 
@@ -837,13 +838,14 @@ impl Viewer {
         }
     }
 
-    /// `s`: the picture on screen saved as the converter draws it, beside the file.
+    /// `s`: the picture on screen saved as the converter draws it with the look of the press, beside the file.
     fn screenshot(&mut self) {
+        let options = self.options();
         match &mut self.mode {
             Mode::Audio(..) => {}
             Mode::Video(p) => {
                 if p.shape.is_some() && p.mpv.grab() {
-                    p.grabs.push_back(Grab::Shot);
+                    p.grabs.push_back(Grab::Shot(options));
                     self.ui.say("screenshot ...");
                 }
             }
@@ -854,13 +856,13 @@ impl Viewer {
                 let out = convert::out_name(gallery.path(), None, false);
                 self.ui.say("screenshot ...");
                 self.flush();
-                self.save(&picture, &out, false);
+                self.save(&picture, &out, false, &options);
             }
         }
     }
 
-    fn save(&mut self, picture: &RgbImage, out: &Path, frame: bool) {
-        let saved = convert::draw(picture, &self.options(), frame)
+    fn save(&mut self, picture: &RgbImage, out: &Path, frame: bool, options: &Options) {
+        let saved = convert::draw(picture, options, frame)
             .and_then(|drawn| picture::png(&drawn))
             .and_then(|png| Ok(std::fs::write(out, png)?));
         let name = out.file_name().unwrap_or_default().to_string_lossy();
@@ -881,8 +883,8 @@ impl Viewer {
         let out = convert::out_name(&self.file, Some(time), false);
         let page = grab == Some(Grab::Page);
         match (grab, picture) {
-            (Some(Grab::Shot), Some(picture)) => self.save(&picture, &out, true),
-            (Some(Grab::Shot), None) => self.ui.say("screenshot failed"),
+            (Some(Grab::Shot(options)), Some(picture)) => self.save(&picture, &out, true, &options),
+            (Some(Grab::Shot(_)), None) => self.ui.say("screenshot failed"),
             (Some(Grab::Page), Some(picture)) => self.enter_page(picture, out),
             (Some(Grab::Page), None) => self.ui.say("no frame"),
             (None, _) => {}

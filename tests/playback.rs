@@ -1305,6 +1305,47 @@ fn each_s_saves_its_own_screenshot() {
     assert_eq!(tty.exit(), 0);
 }
 
+#[test]
+fn s_draws_with_the_look_of_its_press() {
+    // row P21: screenshot of bin/ascii-viewer:1621 at tag python-final takes the converter's options at the press (a clip of 60 s: under load the keys, the save and the test's reading of the picture outlasted one of 10, and the viewer had ended at `4`): `s3` in one write on a playing clip of grey 235 at 90 % darker saves at 90 %, the grey still inked, where 95 %, the level after `3`, leaves nothing but bl1nk's background (#111111, as s_says_when_it_fails_and_draws_with_the_look shows); run in this harness the old viewer saved it at 90 %; seen before the look went with the grab: `grey-ascii-2.1s.png: 0 px inked`, the look read when mpv's frame came
+    let sandbox = Sandbox::new();
+    let video = sandbox.path("grey.mp4");
+    ffmpeg(
+        &sandbox,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0xebebeb:s=160x90:r=25:d=60",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=d=60",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            video.to_str().unwrap(),
+        ],
+    );
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_playing();
+    says(&mut tty, &[b'3'; 18], "level 90% darker");
+    let at = tty.send(b"s3");
+    let start = tty.expect(at, b"\x1b[7m saved ");
+    let end = tty.expect(start, b" \x1b[0m") - 5;
+    let name = String::from_utf8(tty.out()[start..end].to_vec()).unwrap();
+    let shot = image::open(sandbox.path(&name)).unwrap().to_rgb8();
+    let inked = shot.pixels().filter(|px| px.0 != [0x11; 3]).count();
+    assert!(inked > 10_000, "{name}: {inked} px inked");
+    // the key after it took: from 95 %, `4` makes 90 %
+    says(&mut tty, b"4", "level 90% darker");
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
 /// The output name the render page shows on its second row.
 fn page_name(tty: &mut Tty) -> String {
     let row = tty.screen().row(2);
