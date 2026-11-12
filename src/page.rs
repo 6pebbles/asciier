@@ -1910,6 +1910,27 @@ echo '[{"width": 2560, "height": 1440, "focused": true}]'
     }
 
     #[test]
+    fn a_long_theme_name_is_cut_to_its_column() {
+        // rows R2, R12: RenderPage.draw of bin/ascii-viewer:1144 and :1127 at tag python-final, run by python3 with this name: a menu row is cut to 45 cells, where ` > Theme      ` leaves a name of 40 characters its first 31; the theme list cuts a name to 24, before its strip
+        let mut stage = Stage::new();
+        let name = "The Forty Character Theme Name Of Kitty!";
+        assert_eq!(name.chars().count(), 40);
+        let colours = stage.page.themes[1].1.clone();
+        stage.page.themes.push((name.to_string(), colours.clone()));
+        stage.page.theme = 4;
+        let rows = stage.on(Row::Theme).column(30);
+        let row = format!("\x1b[7m > Theme      {}\x1b[0m", &name[..31]);
+        assert_eq!(rows[17], row);
+        assert_eq!(plain(&row).chars().count(), WIDTH - 1);
+        stage.keys(&[ENTER]);
+        let rows = stage.column(30);
+        assert_eq!(
+            rows[6],
+            format!("\x1b[7m > {}\x1b[0m {colours}", &name[..24])
+        );
+    }
+
+    #[test]
     fn a_long_list_keeps_the_cursor_near_the_middle() {
         // row R12; (window rows, cursor) -> (first theme shown, how many): RenderPage.draw of bin/ascii-viewer:1096 at tag python-final on 30 themes, run by python3
         let mut stage = Stage::new();
