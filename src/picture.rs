@@ -799,6 +799,33 @@ mod tests {
         assert_eq!(picture.get_pixel(9, 9).0, [255, 255, 255, 255]);
     }
 
+    // row S3: open_picture of lib/ascii_image.py:109 at tag python-final: a colour key (tRNS of an RGB or a grey PNG) is transparency, clear on the key's pixels alone; these files give these pixels there too
+    #[test]
+    fn a_colour_key_is_transparency() {
+        let dir = Dir::new("colour_key");
+        // 4 x 1 px each, a row of filter 0, the key black: black, near black, grey, white
+        let row = [0, 0, 0, 0, 0, 0, 1, 128, 128, 128, 255, 255, 255];
+        let rgb = png_chunks(&[
+            (b"IHDR", ihdr(4, 1, 8, 2)),
+            (b"tRNS", vec![0; 6]),
+            (b"IDAT", zlib(&row)),
+            (b"IEND", vec![]),
+        ]);
+        let grey = png_chunks(&[
+            (b"IHDR", ihdr(4, 1, 8, 0)),
+            (b"tRNS", vec![0; 2]),
+            (b"IDAT", zlib(&[0, 0, 1, 128, 255])),
+            (b"IEND", vec![]),
+        ]);
+        let seen = [("rgb.png", rgb), ("grey.png", grey)].map(|(name, data)| {
+            let opened = still(&dir.file(name, data));
+            rgba(&opened.pic).pixels().map(|p| p.0).collect::<Vec<_>>()
+        });
+        let (white, grey) = ([255, 255, 255, 255], [128, 128, 128, 255]);
+        assert_eq!(seen[0], [[0, 0, 0, 0], [0, 0, 1, 255], grey, white]);
+        assert_eq!(seen[1], [[0, 0, 0, 0], [1, 1, 1, 255], grey, white]);
+    }
+
     // tests/test_image.py:38
     #[test]
     fn opaque_is_rgb() {
