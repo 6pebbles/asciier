@@ -282,19 +282,22 @@ fn a_stream_without_times_plays_at_25_frames_a_second() {
     );
     let probed = probe(&sandbox, &raw, "stream=avg_frame_rate,duration", None);
     assert_eq!(probed, "avg_frame_rate=25/1\nduration=N/A\n");
-    let mut tty = sandbox.launch().arg(&raw).size(SMALL).start();
+    // in this window a viewer slow under load still draws most frames (at 80 x 24 under load 50: 11 in 3 s)
+    let mut tty = sandbox.launch().arg(&raw).size(QUICK).start();
     assert_eq!(tty.exit(), 0);
     // the draws while the clock showed 00:01 to 00:03: each frame within the second the clock shows, 3 frames either side
-    let drawn: Vec<(u32, u32)> = drawn(&tty.out())
-        .into_iter()
-        .filter_map(|(at, number)| at.filter(|at| (1..=3).contains(at)).map(|at| (at, number)))
-        .collect();
+    let drawn: Vec<(u32, u32)> = replay(&tty.out(), QUICK, |screen| {
+        (seconds(&screen.row(9)), counted(screen, 4, 1, 32))
+    })
+    .into_iter()
+    .filter_map(|(at, number)| at.filter(|at| (1..=3).contains(at)).map(|at| (at, number)))
+    .collect();
     let inside = drawn
         .iter()
         .filter(|&&(at, number)| number + 3 >= at * 25 && number < at * 25 + 28)
         .count();
     assert!(
-        drawn.len() >= 20 && inside * 10 >= drawn.len() * 9,
+        drawn.len() >= 12 && inside * 10 >= drawn.len() * 9,
         "{inside} of {} draws within their second: {drawn:?}",
         drawn.len()
     );
@@ -323,7 +326,7 @@ fn late_frames_are_passed_over_and_the_picture_keeps_up_with_the_sound() {
 
 #[test]
 fn space_and_p_pause_and_play_on() {
-    // row P8: bin/ascii-viewer:2270 at tag python-final: `space` and `p` pause and play; after `,` play goes on from the frame on screen
+    // row P8: bin/ascii-viewer:2270 at tag python-final: `space` and `p` pause and play; after `,` play goes on from the frame on screen, here at 25 %, a frame each 160 ms, so that a viewer slow under load draws the frames after it too (at 100 % one drew frame 30 first)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
@@ -349,6 +352,7 @@ fn space_and_p_pause_and_play_on() {
     lands(&mut tty, DOWN, 0, "| 00:00");
     lands(&mut tty, SHIFT_RIGHT, 25, "| 00:01");
     lands(&mut tty, b",", 24, "| 00:00");
+    says(&mut tty, b"{{", "speed 25%");
     let from = tty.send(b" ");
     tty.until("playing on", |screen| {
         screen.row(24).starts_with("> ") && frame(screen) > 24
@@ -1733,7 +1737,8 @@ fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
 fn a_frame_taken_while_playing_is_named_by_its_time() {
     // rows N5, P21, P22: the name's time is that of the frame mpv holds, to 0.1 s, for `s` and `r` alike (screenshot and open_page of bin/ascii-viewer:1621 and :2048 at tag python-final named it by the frame on screen); keys right after `s` keep the viewer busy while mpv answers and plays on (each `c` draws the frame again; 10 leave the colour as it was, and under load 40 outlasted an 8 s clip), keys right after `r` wait for the page; seen before the fix, named by the clock when the answer was read: with `r` and the keys 5.1 to 5.4 s for frames at 1.1 and 1.2 s, and in a full parallel run without them `clip-ascii-1.8s.png` holding frame 41 (1.64 s); with `s` and the keys, the clock put back in place of the frame's time: 1.3 and 1.4 s for frame 25 (1 s), 3 of 3
     let sandbox = Sandbox::new();
-    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
+    // 30 s: under load 50 the keys, the save and the test's reading of the picture outlasted a 10 s clip, and `r` came after the end
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 30.0, 30.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
     let at = tty.send(&[&b"s"[..], &[b'c'; 10]].concat());
