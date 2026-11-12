@@ -399,8 +399,8 @@ fn a_batch_of_look_keys_is_one_draw() {
 }
 
 #[test]
-fn seek_keys_in_one_batch_add_up_to_one_seek() {
-    // row V14: consecutive seek keys of a batch add up to one seek, held to the clip once (bin/ascii-viewer:2357-2374 at tag python-final): from 0 on a 130.5 s clip `kkkj` lands at 02:00, where a clamp a key would give 01:10; mpv sums the relative seeks it holds queued too (queue_seek, player/playloop.c of mpv 0.41), so this pins where the batch lands, not which side adds it up
+fn seek_keys_in_one_batch_land_at_their_sum() {
+    // row V14: where its summed seek lands: consecutive seek keys of a batch add up, held to the clip once (bin/ascii-viewer:2357-2374 at tag python-final): from 0 on a 130.5 s clip `kkkj` lands at 02:00, where a clamp a key would give 01:10; mpv adds up the relative seeks it holds queued too (queue_seek, player/playloop.c of mpv 0.41), so a viewer seeking once a key lands there as well while mpv runs none of them before the last comes: this pins the landing, not which side adds it up
     let sandbox = Sandbox::new();
     // 10 frames a second: a frame's number is its time in tenths (mod 256)
     let video = counter(&sandbox, "long.mp4", "160x90", 10, 130.5, 0.0, &[]);
