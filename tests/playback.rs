@@ -1396,14 +1396,18 @@ fn damaged_frames_are_passed_over() {
     std::fs::write(&video, bytes).unwrap();
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.until("the first status row", |screen| !screen.row(24).is_empty());
-    let start = Instant::now();
+    // the clip's time then, by the frame on screen: a test thread late under load sees a later frame
+    let (start, from) = (Instant::now(), frame(tty.screen()));
     assert_eq!(tty.exit(), 0);
-    let took = start.elapsed();
+    let took = from as f64 / 25.0 + start.elapsed().as_secs_f64();
     let mut numbers: Vec<u32> = drawn(&tty.out()).into_iter().map(|(_, n)| n).collect();
     numbers.dedup();
     // on past the damage, to the clip's end
     assert!(numbers.last() >= Some(&42), "{numbers:?}");
-    assert!(took > Duration::from_millis(1600), "ended after {took:?}");
+    assert!(
+        took > 1.6,
+        "ended {took:.2} s into the clip, from frame {from}"
+    );
 }
 
 #[test]

@@ -13,8 +13,16 @@ fn shown_still(sandbox: &Sandbox) -> Tty {
     let picture = save(&gradient(800, 400), &sandbox.path("pic.png"));
     let mut tty = sandbox.view(&picture);
     tty.until("the picture", |screen| screen.inked() > 1000);
-    tty.settle(Duration::from_millis(300));
+    drawn_out(&tty);
     tty
+}
+
+/// Wait for the end of the last synchronized update begun: a draw seen on screen is read to its end, whatever pauses its writing has under load.
+fn drawn_out(tty: &Tty) {
+    let out = tty.out();
+    if let Some(start) = out.windows(8).rposition(|w| w == b"\x1b[?2026h") {
+        tty.expect(start, b"\x1b[?2026l");
+    }
 }
 
 #[test]
@@ -473,6 +481,7 @@ fn f1_shows_the_keys_and_any_key_closes_them() {
         tty.until("the picture again", |screen| {
             screen.inked() > 1000 && !screen.row(1).starts_with(" Keys")
         });
+        drawn_out(&tty);
         assert!(tty.running());
     }
     // a key that closes the keys has no other effect: 3 there is no level, so 4 after it brightens from 0
