@@ -208,23 +208,46 @@ fn frames_come_at_the_clips_rate_and_the_end_quits() {
     );
 }
 
+/// A window of 32 x 9 cells: a debug build draws a frame in it faster than the cap lets it, under load too. The counter covers rows 1 to 8 and all 32 columns.
+const QUICK: Size = Size {
+    rows: 9,
+    cols: 32,
+    xpx: 288,
+    ypx: 180,
+};
+
+/// The frames first drawn while the status row showed `second`, in the order drawn: a frame on screen when the clock turns shows again under the next second, and counts where it showed first.
+fn first_drawn_in(drawn: &[(Option<u32>, u32)], second: u32) -> Vec<u32> {
+    let mut before = None;
+    let mut first = Vec::new();
+    for &(at, number) in drawn {
+        if before != Some(number) && at == Some(second) {
+            first.push(number);
+        }
+        before = Some(number);
+    }
+    first
+}
+
 #[test]
 fn a_faster_clip_is_drawn_at_30_frames_a_second_at_most() {
-    // rows P2, P24: MAX_FPS of bin/ascii-viewer:106 at tag python-final: of a 60 fps source at most 30 frames a second show, the others passed over (the old viewer drew every other one); the new one skips a frame due within 30 ms of the last drawn
+    // rows P2, P24: MAX_FPS of bin/ascii-viewer:106 at tag python-final: of a 60 fps source at most 30 frames a second show, the others passed over (the old viewer drew every other one); the new one draws a frame at most every 1/30 s. With sound the clock is ao=null's, at the wall clock's pace, and in this window a debug build draws as often as the cap lets it: each of seconds 1 to 3 holds 30 frames first drawn in it at most (seen: 30, and 33 or 34 each with the gap at 30 ms); a 4th second would wrap the counter's 8 bits
     let sandbox = Sandbox::new();
-    let video = counter(&sandbox, "fast.mp4", "160x90", 60, 3.0, 0.0, &[]);
-    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    let video = counter(&sandbox, "fast.mp4", "160x90", 60, 5.0, 5.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(QUICK).start();
     assert_eq!(tty.exit(), 0);
-    let second = frames_in(&drawn(&tty.out()), 1);
-    assert!(
-        (1..=34).contains(&second.len()),
-        "{} frames in a second: {second:?}",
-        second.len()
-    );
-    assert!(
-        second.windows(2).all(|pair| pair[0] < pair[1]),
-        "{second:?}"
-    );
+    let drawn = replay(&tty.out(), QUICK, |screen| {
+        (seconds(&screen.row(9)), counted(screen, 4, 1, 32))
+    });
+    for second in 1..=3 {
+        let first = first_drawn_in(&drawn, second);
+        assert!(
+            (1..=30).contains(&first.len()),
+            "{} frames first drawn in second {second}: {first:?}",
+            first.len()
+        );
+        assert!(first.windows(2).all(|pair| pair[0] < pair[1]), "{first:?}");
+    }
 }
 
 #[test]

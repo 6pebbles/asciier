@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 /// Seconds a toast shows.
 const TOAST: Duration = Duration::from_millis(1200);
-/// A frame arriving sooner after the last drawn one is skipped: at most about 30 a second.
-const FRAME_GAP: Duration = Duration::from_millis(30);
+/// A frame arriving sooner after the last drawn one waits, the newest drawn once the gap is up: at most 30 a second (1/30 s, rounded up).
+const FRAME_GAP: Duration = Duration::from_nanos(1_000_000_000u64.div_ceil(30));
 const HELP: &str = include_str!("keys.txt");
 const F1: [&[u8]; 3] = [b"\x1bOP", b"\x1b[11~", b"\x1b[P"];
 
