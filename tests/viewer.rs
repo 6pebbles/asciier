@@ -764,7 +764,7 @@ fn f1_shows_the_keys_and_any_key_closes_them() {
 
 #[test]
 fn the_keys_scroll_when_they_do_not_fit() {
-    // rows H1, H2: in 20 rows the 34 lines scroll by j k and Down Up, clamped; the hint says so
+    // rows H1, H2: in 20 rows the 34 lines scroll a line by j, Down, k and Up, clamped, and the hint says so; where they fit, j and Up close them as any other key does (bin/ascii-viewer:2080-2098 at tag python-final)
     let sandbox = Sandbox::new();
     let picture = save(&gradient(800, 400), &sandbox.path("pic.png"));
     let size = Size {
@@ -793,7 +793,7 @@ fn the_keys_scroll_when_they_do_not_fit() {
     tty.until("two lines down", |screen| {
         screen.row(1) == format!(" {}", cut(lines[2])).trim_end()
     });
-    tty.send(b"k");
+    tty.send(UP);
     tty.until("one line up", |screen| {
         screen.row(1) == format!(" {}", cut(lines[1])).trim_end()
     });
@@ -810,6 +810,23 @@ fn the_keys_scroll_when_they_do_not_fit() {
     tty.until("the picture", |screen| {
         !screen.row(20).contains("any other key") && screen.inked() > 100
     });
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+    // 200 x 60: they fit, and a scroll key closes them; the picture comes back from a cleared screen
+    let mut tty = shown_still(&sandbox);
+    for close in [&b"j"[..], UP] {
+        let at = tty.send(F1);
+        tty.expect(
+            at,
+            b"\x1b[60;1H\x1b[2m any other key closes\x1b[0m\x1b[?2026l",
+        );
+        let at = tty.send(close);
+        tty.expect(at, b"\x1b[2J");
+        tty.until("the picture again", |screen| {
+            screen.inked() > 1000 && !screen.row(1).starts_with(" Keys")
+        });
+        drawn_out(&tty);
+    }
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }
