@@ -830,3 +830,51 @@ fn without_a_bus_it_plays_silently() {
     );
     assert!(out.ends_with(RESTORE));
 }
+
+#[test]
+fn without_a_bus_address_it_plays_silently() {
+    // row M6: serve_mpris of bin/ascii-viewer:1512 at tag python-final: no session bus, no MPRIS, nothing said; here no address at all, no DISPLAY and an XDG_RUNTIME_DIR without a `bus` socket: the session bus libdbus looks for by default is not there, and with no X display to start one for (by inference from libdbus's autolaunch) the viewer plays and says nothing, alone in its session
+    let mut sandbox = Sandbox::new();
+    sandbox.unset("DBUS_SESSION_BUS_ADDRESS");
+    sandbox.unset("DISPLAY");
+    assert!(!sandbox.path("runtime/bus").exists());
+    let video = clip(&sandbox, "clip.mp4", 20.0, "160x90", 25);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_playing();
+    says(&mut tty, b"m", "muted");
+    tty.await_status("> ");
+    // the picture covers rows 2 to 22: nothing written above or below it
+    let screen = tty.screen();
+    assert_eq!(
+        (screen.row(1), screen.row(23)),
+        (String::new(), String::new())
+    );
+    // no bus daemon started for it: the processes of its session, by /proc/<pid>/stat (state, parent, group, session, ...)
+    let session: Vec<u32> = std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let fields: Vec<&str> = stat
+                .rsplit_once(')')
+                .map_or("", |(_, rest)| rest)
+                .split_whitespace()
+                .collect();
+            fields.get(3) == Some(&tty.pid.to_string().as_str())
+        })
+        .collect();
+    assert_eq!(session, [tty.pid]);
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+    // before the alternate screen the title alone, after it nothing
+    let out = tty.out();
+    let entered = find(&out, b"\x1b[?1049h", 0).unwrap();
+    let title = out[..entered].strip_prefix(b"\x1b[22;2t\x1b]2;");
+    assert!(
+        title.is_some_and(|title| title.iter().position(|&b| b == 0x07) == Some(title.len() - 1)),
+        "{}",
+        shown(&out[..entered])
+    );
+    assert!(out.ends_with(RESTORE));
+}
