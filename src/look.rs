@@ -155,6 +155,15 @@ mod tests {
     }
 
     #[test]
+    fn halves_round_to_even() {
+        // rows G9: lib/ascii_theme.py:155 rounds by Python's round(), half to even, run 2026-11-12: (20, 0) takes 53 and 57 to 2.5 and 7.5, so 2 and 8 (1.25 and 3.75 beside them, so 1 and 4); under (-84, 0) 2 and 6 come to 12.5 and 37.5 at the rounding, so 12 and 38
+        let up = tone_table(20, 0).unwrap();
+        assert_eq!((up[52], up[53], up[54], up[57]), (1, 2, 4, 8));
+        let down = tone_table(-84, 0).unwrap();
+        assert_eq!((down[2], down[6]), (12, 38));
+    }
+
+    #[test]
     fn labels() {
         assert_eq!(
             (level_label(0), level_label(15), level_label(-5)),
