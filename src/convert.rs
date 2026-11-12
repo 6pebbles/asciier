@@ -1136,7 +1136,7 @@ mod tests {
 
     #[test]
     fn a_decoder_whose_encoder_cannot_start_is_killed_and_reaped() {
-        // a black-box run cannot fail the encoder's spawn alone: both resolve the same ffmpeg on PATH within microseconds
+        // a black-box run cannot fail the encoder's spawn alone: both run the same ffmpeg on PATH, the encoder started right after the decoder, before anything the decoder runs could change what PATH finds
         let children = || std::fs::read_to_string("/proc/thread-self/children").unwrap();
         let before = children();
         let said = match start(
