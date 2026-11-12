@@ -2348,7 +2348,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_seek_and_a_step_sent_together_end_paused_as_the_old_viewer_left_them() {
-        // rows P8a, P9, P15: requests that reach mpv in one pass run there together: a seek and a step forward played on to the clip's end (the step plays until its frame; the seek, run after it, dropped the step but not its play), a step back took the place of a waiting seek or added itself to it as a second (seen before the fix, paused on frame 76: 6 of 6 played on; the black-box `l,` landed on 24, `,l` on 125 for 149); the old viewer did each key before the next (seek_to and frame_step of bin/ascii-viewer:1423 and :1441 at tag python-final; run in this harness, paused on frame 25: `l.` and `.l` 151, `l,` and `,l` 149; stopped by MPRIS: `l.` 150, the target's frame, which its step read first, `l,` 149)
+        // rows P8a, P9, P15: requests that reach mpv in one pass run there together: a seek and a step forward played on to the clip's end (the step plays until its frame; the seek, run after it, dropped the step but not its play), a step back took the place of a waiting seek or added itself to it as a second (seen before the fix, paused on frame 76: a seek and a step forward in either order, and a step forward after a seek that plays, went on to the clip's end, frame 249; a step back with a seek, or after a seek that plays, landed on 75 or 76; the black-box `l,` landed on 24, `,l` on 125 for 149); the old viewer did each key before the next (seek_to and frame_step of bin/ascii-viewer:1423 and :1441 at tag python-final; run in this harness, paused on frame 25: `l.` and `.l` 151, `l,` and `,l` 149; stopped by MPRIS: `l.` 150, the target's frame, which its step read first, `l,` 149)
         let seek = |mpv: &mut Mpv| mpv.seek(&["seek", "1", "relative+exact"]);
         let plays = |mpv: &mut Mpv| mpv.seek_and_play(&["seek", "1", "relative+exact"]);
         type Keys<'a> = &'a dyn Fn(&mut Mpv);
@@ -2428,7 +2428,7 @@ pub(crate) mod tests {
 
     #[test]
     fn steps_sent_apart_each_take_their_frame() {
-        // row P15: `.` `.` `,` typed 30 ms apart came back to the frame they left (black-box, 2 of 4 runs): mpv took the step back while the second step forward waited for its frame, stopped that step and counted back from the first one's frame; the old viewer did each key before the next, two on and one back (frame_step of bin/ascii-viewer:1441 at tag python-final)
+        // row P15: `.` `.` `,` sent apart came back to the frame they left, or one before (seen in this test before the fix, from frame 25: 25 sent 10 and 30 ms apart, 24 sent at once): mpv took the step back while the second step forward waited for its frame, stopped that step and counted back from the frame before; the old viewer did each key before the next, two on and one back (frame_step of bin/ascii-viewer:1441 at tag python-final)
         let mut stage = Stage::new();
         stage.clip(10.0, 10.0);
         let mut wrong = Vec::new();
@@ -2452,7 +2452,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_step_back_from_the_last_frame_shows_the_frame_before() {
-        // rows P15, N2, N21: on the last frame mpv's position is the sound's, past that frame, and its step back counts from there and finds the frame again; seen before the fix, frame 49 stayed after a seek onto it and a step (positions 2.0, 1.76 and 1.76 for 2.0, 2.3 and 6.0 s of sound) and when played into the sound's tail and paused (49 at 2.41 s); now a step back shows frame 48 at its time, also sent together with the steps forward before it (`.,` on the last frame, `..,` onto it)
+        // rows P15, N2, N21: on the last frame mpv's position is the sound's, past that frame, and its step back counts from there and finds the frame again; seen in this test before the fix: frame 49 stayed after a seek onto it and a step (2.0 s of sound), when played into the sound's tail and paused (at 2.43 s), and with the step back sent together with the step (6 s), and two steps and a step back sent together from frame 47 ended on 46; now a step back shows frame 48 at its time
         let onto = |stage: &mut Stage| {
             stage.mpv.seek(&["seek", "1.96", "absolute+exact"]);
             assert!(stage.reach(49, 1.96, 10.0));
@@ -2508,7 +2508,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_grab_in_the_tail_is_named_by_the_last_frame_however_seldom_the_caller_looks() {
-        // rows N5, N21, P21: past the picture's end, the sound playing on, a frame taken is named by the position given with the last frame mpv handed over; a caller that looks more than 200 ms apart, as a loaded viewer does, never counted as one past the end (seen before the fix: the caller looking every 250 ms, frame 49 named by the sound's position, 3.7 s)
+        // rows N5, N21, P21: past the picture's end, the sound playing on, a frame taken is named by the position given with the last frame mpv handed over; a caller that looks more than 200 ms apart, as a loaded viewer does, never counted as one past the end (seen in this test before the fix: frame 49 named 3.25 and 3.31 s, the sound's position, looking every 250 and 400 ms, and 1.88 s, an earlier frame's, every 150 ms)
         let mut wrong = Vec::new();
         for look in [150u64, 250, 400] {
             let mut stage = Stage::new();
@@ -2548,7 +2548,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_seek_mpv_cannot_do_lets_the_play_after_it_go() {
-        // rows P8a, P9: mpv answers a seek when it takes it and may then drop it without running it, so no `MPV_EVENT_SEEK` comes, here a seek past what it has read of a stream it cannot seek in; the play of `seek_and_play` waited for that event (seen before: still paused 2 s later, a pause report held for ever); now the mark behind the seek, reported once mpv has run a pass past it, ends the seek; the viewer opens regular files alone, where every seek tried runs (inference from runs on mp4, mpegts, mkv, h264, mjpeg, y4m, m1v, gif, apng, ivf, nut)
+        // rows P8a, P9: mpv answers a seek when it takes it and may then drop it without running it, so no `MPV_EVENT_SEEK` comes, here a seek past what it has read of a stream it cannot seek in; the play of `seek_and_play` waited for that event (seen before: still paused 1.5 s later, the play's pause request counted as unconfirmed, which holds back every later report of `pause`); now the mark behind the seek, reported once mpv has run a pass past it, ends the seek; the viewer opens regular files alone, where every seek tried runs (inference from runs on mp4, mpegts, mkv, h264, mjpeg, y4m, m1v, gif, apng, ivf, nut)
         let mut stage = Stage::new();
         let fifo = stage.file("pipe.ts");
         let made = Command::new("mkfifo").arg(&fifo).status().unwrap();

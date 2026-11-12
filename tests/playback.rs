@@ -496,7 +496,7 @@ fn a_seek_and_a_step_in_one_write_end_paused_as_the_old_viewer_left_them() {
 
 #[test]
 fn a_step_back_after_a_step_on_the_last_frame_shows_the_frame_before() {
-    // rows P15, N21: `.` on the last frame, frame 54 of this 2.2 s clip reached by Shift+Right, only pauses, and `,` then shows frame 53 and its time, whatever the sound left past the picture (frame_step of bin/ascii-viewer:1441 at tag python-final; N21: the old viewer ended with the picture); seen before the fix: frame 54 stayed for 2.2, 2.5 and 6 s of sound, the clock at 00:01 for 2.5 and 6
+    // rows P15, N21: `.` on the last frame, frame 54 of this 2.2 s clip reached by Shift+Right, only pauses, and `,` then shows frame 53 and its time, whatever the sound left past the picture (frame_step of bin/ascii-viewer:1441 at tag python-final; N21: the old viewer ended with the picture); seen before the fix: frame 53 never came (the review saw 54 stay for 2.2, 2.5 and 6 s of sound, the clock at 00:01 for 2.5 and 6)
     for audio in [2.2, 2.5, 6.0] {
         let sandbox = Sandbox::new();
         let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, audio, &[]);
@@ -520,7 +520,7 @@ fn a_step_back_after_a_step_on_the_last_frame_shows_the_frame_before() {
 
 #[test]
 fn steps_typed_apart_each_take_their_frame() {
-    // rows P15, N5: `.` `.` `,` typed 30 to 100 ms apart end one frame on (frame_step of bin/ascii-viewer:1441 at tag python-final did each before the next key; run in this harness the old viewer showed frame 26, read on the screen, while its `s`, which N5 makes mpv's frame, took 28); seen before the fix: 2 of 4 runs had a case 30 ms apart land back on frame 25, mpv taking the step back while the second step waited for its frame
+    // rows P15, N5: `.` `.` `,` typed 30 to 100 ms apart end one frame on (frame_step of bin/ascii-viewer:1441 at tag python-final did each before the next key; run in this harness the old viewer showed frame 26, read on the screen, while its `s`, which N5 makes mpv's frame, took 28); seen in this test before the fix: frame 25 for keys 30 ms apart (the review: 2 of 4 runs), mpv taking the step back while the second step waited for its frame
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();

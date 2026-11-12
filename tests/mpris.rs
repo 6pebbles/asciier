@@ -467,7 +467,7 @@ fn playerctl_drives_it_as_the_media_keys_do() {
 
 #[test]
 fn stop_holds_the_frame_until_a_seek_or_space_plays() {
-    // rows P8a, P8, M2, H3: halt, seek_to and frame_step of bin/ascii-viewer:1304, :1423 and :1441 at tag python-final (tests/test_viewer.py:187): MPRIS Stop is the stopped state, mark `.`, the last frame held; `.` and `,` do nothing there, nor F1 and a key closing the keys (open_help and close_help of bin/ascii-viewer:2061 and :2096: help_resume is false when not playing; run in this harness the old viewer stayed stopped on its frame); a seek key or an MPRIS Seek plays from its target; `space` plays from 0; under load the screen read after a quiet window was 7 to 14 frames behind the frame mpv held (3 of 3 runs with four test binaries at once), so the held frame is the one `s` takes, and the screen must come to it (N5: mpv's; the old viewer's `s` took another, P21a)
+    // rows P8a, P8, M2, H3: halt, seek_to and frame_step of bin/ascii-viewer:1304, :1423 and :1441 at tag python-final (tests/test_viewer.py:187): MPRIS Stop is the stopped state, mark `.`, the last frame held; `.` and `,` do nothing there, nor F1 and a key closing the keys (open_help and close_help of bin/ascii-viewer:2061 and :2096: help_resume is false when not playing; run in this harness the old viewer stayed stopped on its frame); a seek key or an MPRIS Seek plays from its target; `space` plays from 0; under load the screen read after a quiet window was 7 to 14 frames behind the frame mpv held (the review: 3 of 3 runs with four test binaries at once), so the held frame is the one `s` takes, and the screen must come to it (N5: mpv's; the old viewer's `s` took another, P21a)
     let mut sandbox = Sandbox::new();
     let bus = Bus::new(&mut sandbox);
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
@@ -605,7 +605,7 @@ fn a_seek_from_the_stopped_state_counts_from_the_frame_on_screen() {
 
 #[test]
 fn a_step_back_right_after_a_seek_from_the_stopped_state_ends_paused() {
-    // rows P8a, P15: `l,` in one batch after MPRIS Stop: the seek leaves the stopped state and `,` pauses on the frame before its target, never drawn playing, as the old viewer did (seek_to and frame_step of bin/ascii-viewer:1423 and :1441 at tag python-final; run in this harness: stopped on frame 25, `l,` 149); seen before a step dropped the play: `> 00:01`, `> 00:02`, `> 00:07` after the window (3 of 3), and before the requests went one at a time on the frame before the held one (24 for 25); a wait for `| ` alone passed without the fix (2 of 9): it found the pause at the clip's end
+    // rows P8a, P15: `l,` in one batch after MPRIS Stop: the seek leaves the stopped state and `,` pauses on the frame before its target, never drawn playing, as the old viewer did (seek_to and frame_step of bin/ascii-viewer:1423 and :1441 at tag python-final; run in this harness: stopped on frame 25, `l,` 149); seen before a step dropped the play: `> 00:01`, `> 00:02`, `> 00:07` after the window (3 of 3), and before the requests went one at a time on the frame before the held one (24 for 25); a wait for `| ` alone passed without the fix (the review: 2 of 9), finding the pause at the clip's end
     steps_from_the_stopped_state(b"l,", 124);
 }
 
