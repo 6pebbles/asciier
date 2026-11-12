@@ -1719,7 +1719,7 @@ fn crop_takes_a_window_black_past_the_borders() {
 
 #[test]
 fn transparency_is_drawn_over_the_theme_background() {
-    // row L10: main of bin/ascii-convert:551 at tag python-final: a still's transparency is put over the theme's background before the cells: white at alpha 0 is the background, nothing drawn; at alpha 128 a mid grey, drawn as the old converter drew it in this harness; the same white without alpha draws brighter
+    // row L10: main of bin/ascii-convert:551 at tag python-final: a still's transparency is put over the theme's background before the cells: white at alpha 0 is the background, nothing drawn; at alpha 128 a mid grey, drawn as the old converter drew it in this harness; the same white without alpha draws brighter; an animation's frames are not put over it (convert_video, bin/ascii-convert:405, decodes them as they are): an APNG of white at alpha 0 converts as a video whose first frame is a tenth or more ink (white's glyphs), where the background alone would be none
     let sandbox = Sandbox::new();
     for (name, alpha) in [("clear.png", 0), ("half.png", 128)] {
         image::RgbaImage::from_pixel(80, 40, image::Rgba([255, 255, 255, alpha]))
@@ -1727,10 +1727,24 @@ fn transparency_is_drawn_over_the_theme_background() {
             .unwrap();
     }
     save(&flat(80, 40, [255; 3]), &sandbox.path("white.png"));
+    let moving = sandbox.path("clear-moving.png");
+    ffmpeg(
+        &sandbox,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=white@0:s=80x44:r=10:d=0.3,format=rgba",
+            "-f",
+            "apng",
+            moving.to_str().unwrap(),
+        ],
+    );
     let runs = [
         vec!["-c", "20", "clear.png"],
         vec!["-c", "20", "half.png"],
         vec!["-c", "20", "white.png"],
+        vec!["-W", "320", "clear-moving.png"],
     ];
     for ran in converts(&sandbox, &runs) {
         assert_eq!(ran.code, Some(0), "{ran:?}");
@@ -1742,6 +1756,15 @@ fn transparency_is_drawn_over_the_theme_background() {
     let white = pixels(&sandbox.path("white-ascii.png"));
     let light = |picture: &RgbImage| picture.pixels().map(|px| px.0[1] as u64).sum::<u64>();
     assert!(light(&white) > light(&half) && light(&half) > light(&clear));
+    let video = sandbox.path("clear-moving-ascii.mp4");
+    assert_eq!(streams(&sandbox, &video), ["video h264 320x190"]);
+    let frame = first_frame(&sandbox, &video);
+    let inked = frame
+        .pixels()
+        .filter(|px| px.0.iter().zip(GROUND).any(|(&v, g)| v.abs_diff(g) > 24))
+        .count();
+    let all = (frame.width() * frame.height()) as usize;
+    assert!(inked * 10 > all, "{inked} of {all} px inked");
 }
 
 #[test]
