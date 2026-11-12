@@ -327,6 +327,56 @@ fn a_batch_of_keys_draws_once_and_quits_at_once() {
 }
 
 #[test]
+fn a_batch_of_look_keys_is_one_draw() {
+    // row V14: the keys of one read act, then the screen is drawn once (flush after the batch, bin/ascii-viewer:2351-2377 at tag python-final): `3333` in one write is one draw, its toast the last key's
+    let sandbox = Sandbox::new();
+    let mut tty = shown_still(&sandbox);
+    let at = tty.send(b"3333");
+    let sentinel = toast("level 20% darker");
+    let end = tty.expect(at, &sentinel);
+    let update = update_at(&tty, end - sentinel.len());
+    let out = tty.out();
+    assert_eq!(
+        find(&out, b"\x1b[7m", at),
+        Some(end - sentinel.len()),
+        "a toast before the batch's: {}",
+        shown(&out[at..end])
+    );
+    assert_eq!(
+        count(&out[at..end], b"\x1b[?2026h"),
+        1,
+        "more than one draw"
+    );
+    assert!(out[at..].starts_with(&update));
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
+fn seek_keys_in_one_batch_add_up_to_one_seek() {
+    // row V14: consecutive seek keys of a batch add up to one seek, held to the clip once (bin/ascii-viewer:2357-2374 at tag python-final): from 0 on a 130.5 s clip `kkkj` lands at 02:00, where a clamp a key would give 01:10; mpv sums the relative seeks it holds queued too (queue_seek, player/playloop.c of mpv 0.41), so this pins where the batch lands, not which side adds it up
+    let sandbox = Sandbox::new();
+    // 10 frames a second: a frame's number is its time in tenths (mod 256)
+    let video = counter(&sandbox, "long.mp4", "160x90", 10, 130.5, 0.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_playing();
+    tty.send(b" ");
+    tty.await_status("| ");
+    // the 16:9 counter covers all 80 columns of rows 2 to 22
+    for (keys, frame, status) in [
+        (&b"j"[..], 0, "| 00:00 / 02:10"),
+        (b"kkkj", 1200 % 256, "| 02:00 / 02:10"),
+    ] {
+        tty.send(keys);
+        tty.until(&format!("frame {frame} and {status:?}"), |screen| {
+            counted(screen, 12, 1, 80) == frame && screen.row(24).starts_with(status)
+        });
+    }
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
 fn a_toast_shows_on_the_bottom_row_for_a_while() {
     // row V16: reverse video on the bottom row, 1.2 s (bin/ascii-viewer:118), cut to cols - 2
     let sandbox = Sandbox::new();
