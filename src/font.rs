@@ -25,7 +25,7 @@ pub struct Font {
     face: freetype::Face,
 }
 
-/// The font file (`fc-match -f %{file}`), the heaviest face at or under weight 210 for bold; once a weight per process.
+/// The font file (`fc-match -f %{file}`), for bold the face whose weight is nearest 210; once a weight per process.
 pub fn path(bold: bool) -> Result<&'static Path> {
     static FILES: [OnceLock<Option<PathBuf>>; 2] = [OnceLock::new(), OnceLock::new()];
     let found = FILES[bold as usize].get_or_init(|| {
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn the_faces_are_fc_matchs_answers() {
-        // rows G8, G10: the files lib/ascii_term.py:21-26 font_path() takes from fc-match, for the family and for the family at weight 210: the regular face, and the heaviest at or under 210, ExtraBold here
+        // rows G8, G10: the files lib/ascii_term.py:21-26 font_path() takes from fc-match, for the family and for the family at weight 210: the regular face, and the face whose weight is nearest 210 (fontconfig's black), ExtraBold (205) here
         for (bold, weight, style) in [(false, "", "Regular"), (true, ":weight=210", "ExtraBold")] {
             let query = format!("JetBrainsMono Nerd Font Mono{weight}");
             let asked = std::process::Command::new("fc-match")
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn ramp_runs_from_space_to_the_densest() {
-        // rows G6: tests/test_density.py RampTest: 95 glyphs, each of 32..126 once, sorted by coverage from the space at 0 to the densest at 1
+        // rows G6: tests/test_density.py RampTest: 95 glyphs sorted by coverage from the space at 0 to the densest at 1; plus each of 32..126 once
         let ramp = ramp(false).unwrap();
         assert_eq!(
             (ramp.glyphs[0], ramp.cover[0], ramp.cover[94]),
