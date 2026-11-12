@@ -665,6 +665,22 @@ fn bad_values_are_usage_errors() {
             "argument -l/--level: not a number: '1.5'",
         ),
         (
+            &["--contrast", "1.5", "in.png"],
+            "argument --contrast: not a number: '1.5'",
+        ),
+        (
+            &["-s", "50.5", "in.png"],
+            "argument -s/--saturation: not a number: '50.5'",
+        ),
+        (
+            &["-W", "16.5", "in.png"],
+            "argument -W/--width: not a number: '16.5'",
+        ),
+        (
+            &["-H", "1e3", "in.png"],
+            "argument -H/--height: not a number: '1e3'",
+        ),
+        (
             &["-c", "40.0", "in.png"],
             "argument -c/--columns: not a number: '40.0'",
         ),
