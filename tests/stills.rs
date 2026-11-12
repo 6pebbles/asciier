@@ -1848,6 +1848,37 @@ fn repeated_columns(sent: &Placed) -> f64 {
     same as f64 / (w - 1) as f64
 }
 
+/// The columns of a placed image that are #00ff00 from top to bottom.
+fn green_columns(sent: &Placed) -> usize {
+    let (w, h) = sent.size();
+    (0..w)
+        .filter(|&x| (0..h).all(|y| sent.px(x, y) == [0, 255, 0]))
+        .count()
+}
+
+/// Wait until `test` holds for the number of the viewer's threads named `svg part`, the SVG parts drawing in the background; fails the test after `PATIENCE`. None left: each part asked for has been handed to the loop and its wake sent, so the loop takes it before a key sent after.
+fn await_parts(tty: &Tty, what: &str, test: impl Fn(usize) -> bool) {
+    let tasks = PathBuf::from(format!("/proc/{}/task", tty.pid));
+    let drawing = || {
+        let named = |task: &std::fs::DirEntry| {
+            std::fs::read_to_string(task.path().join("comm")).is_ok_and(|name| name == "svg part\n")
+        };
+        std::fs::read_dir(&tasks)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(named)
+            .count()
+    };
+    let end = std::time::Instant::now() + PATIENCE;
+    while !test(drawing()) {
+        if std::time::Instant::now() > end {
+            tty.fail(&format!("never {what}"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn a_zoomed_svg_is_drawn_again_from_the_svg_at_the_size_shown() {
     // rows Z8, Z9: part, render_parts and zoom_by of bin/ascii-viewer:1799, :1817 and :1769 at tag python-final (tests/test_viewer.py:1220 and :1267): an SVG's zoom counts px of its 1600 px raster (100 x 50 units in 900 x 600 px: fit 56 %, the first step `zoom 80%`, not the 141 % of its own units), and the fit stays when finer parts were drawn; past 1 screen px a raster px the raster shows enlarged by nearest neighbour first (runs of equal columns at 636 %), then the part drawn alone at the size shown takes its place, the diagonal edge in every column
@@ -1885,7 +1916,7 @@ fn a_zoomed_svg_is_drawn_again_from_the_svg_at_the_size_shown() {
 
 #[test]
 fn a_zoomed_svg_shows_the_part_of_the_view_on_screen_alone() {
-    // row Z8: part, render_parts and thumbnail of bin/ascii-viewer:1799, :1817 and :1836 at tag python-final: in ASCII a zoomed SVG is drawn from a part too: 200 x 60 cells at 800 %, the rows of the part differ from those of the raster, drawn with the toast, along the diagonal edge alone; in image mode a part for a view that is gone when it lands never shows: `+` six times (450 % in 900 x 600 px), and once more (636 %) before that part lands: placed then, the 636 % raster enlarged and the 636 % part alone, nothing more in the 2 s after
+    // row Z8: part, render_parts and thumbnail of bin/ascii-viewer:1799, :1817 and :1836 at tag python-final: in ASCII a zoomed SVG is drawn from a part too: 200 x 60 cells at 800 %, the rows of the part differ from those of the raster, drawn with the toast, along the diagonal edge alone; in image mode a part for a view that is gone when it lands never shows: `+` six times (450 % in 900 x 600 px), and once more (636 %) before that part lands; a green bar at x 44 to 45 of the 100 units lies in the 450 % view (x 43.75 to 56.25) and not in the 636 % one (x 45.58 to 54.42): placed then, the 636 % raster enlarged and the 636 % part alone, no bar in either, nothing more by the toast of a look key sent once both parts' threads have ended
     let plain = Sandbox::new();
     let edge = plain.path("edge.svg");
     std::fs::write(
@@ -1895,10 +1926,10 @@ fn a_zoomed_svg_shows_the_part_of_the_view_on_screen_alone() {
     .unwrap();
     let sandbox = kitty_sandbox();
     let noisy = sandbox.path("noisy.svg");
-    // noise over every view from 450 % on: a part costs about 2 s, the next key comes in milliseconds
+    // noise over every view from 450 % on: a part costs about 2 s, the next key comes in milliseconds; the bar over it, the views' heights through
     std::fs::write(
         &noisy,
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><filter id="n" x="0" y="0" width="1" height="1"><feTurbulence baseFrequency="0.5" numOctaves="2"/></filter><rect width="100" height="50" fill="#fff"/><path d="M0 50 L100 0 L100 50 Z"/><rect x="40" y="18" width="20" height="14" filter="url(#n)"/></svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><filter id="n" x="0" y="0" width="1" height="1"><feTurbulence baseFrequency="0.5" numOctaves="2"/></filter><rect width="100" height="50" fill="#fff"/><path d="M0 50 L100 0 L100 50 Z"/><rect x="40" y="18" width="20" height="14" filter="url(#n)"/><rect x="44" y="18" width="1" height="14" fill="#0f0"/></svg>"##,
     )
     .unwrap();
     let mut ascii = drawn(&plain, &edge, WIDE);
@@ -1945,21 +1976,33 @@ fn a_zoomed_svg_shows_the_part_of_the_view_on_screen_alone() {
     let at = image.send(&[b'+'; 6]);
     let toasted = image.expect(at, toast("zoom 450%"));
     let first = placed(&image, at);
-    assert!(first.end > toasted && repeated_columns(&first) > 0.7);
+    // the next key at once, the 450 % part still drawing: the scans below take seconds in a debug build under load
     let at = image.send(b"+");
-    let toasted = image.expect(at, toast("zoom 636%"));
+    let next = image.expect(at, toast("zoom 636%"));
     let raster = placed(&image, at);
-    assert!(raster.end > toasted && repeated_columns(&raster) > 0.7);
     assert_eq!(
         count(&image.out()[first.end..raster.end], b"\x1b_Ga=T,"),
         1,
         "the 450 % part landed before the next key"
     );
+    // the parts draw on threads named for the wait below: without the name it would wait for nothing
+    await_parts(&image, "a part drawing", |drawing| drawing > 0);
+    let bars = green_columns(&first);
+    assert!(
+        first.end > toasted && repeated_columns(&first) > 0.7 && bars > 50,
+        "the 450 % raster: {bars} green columns"
+    );
+    assert!(raster.end > next && repeated_columns(&raster) > 0.7);
+    assert_eq!(green_columns(&raster), 0, "the bar in the 636 % view");
     let part = placed(&image, raster.end);
     assert!(repeated_columns(&part) < 0.2, "the raster again");
-    // a window for what must not come: the earlier part, asked first, lands about when this one did
-    std::thread::sleep(Duration::from_secs(2));
-    let late = count(&image.out()[part.end..], b"\x1b_Ga=T,");
+    assert_eq!(green_columns(&part), 0, "the 450 % part shown");
+    // both parts handed over before a look key, which draws its toast alone: a part drawn at all is drawn by its end
+    await_parts(&image, "the parts ended", |drawing| drawing == 0);
+    let at = image.send(b"3");
+    let toasted = image.expect(at, toast(DARKER));
+    let end = image.expect(toasted, b"\x1b[?2026l");
+    let late = count(&image.out()[part.end..end], b"\x1b_Ga=T,");
     assert_eq!(late, 0, "placed after the part of the view shown");
     quit(&mut image);
 }

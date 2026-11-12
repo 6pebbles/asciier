@@ -250,12 +250,16 @@ impl Gallery {
         if self.asked.as_ref() != Some(&key) {
             self.asked = Some(key.clone());
             let (logical, rotation, jobs) = (self.logical, self.rotation, ui.jobs.clone());
-            std::thread::spawn(move || {
-                let image = svg.part(logical, rotation, bbox, size).ok();
-                if jobs.send(Job::Part(Part { key, image })).is_ok() {
-                    term::wake(Wake::Job);
-                }
-            });
+            // named: tests/stills.rs waits for the parts in flight to end by this name
+            std::thread::Builder::new()
+                .name("svg part".into())
+                .spawn(move || {
+                    let image = svg.part(logical, rotation, bbox, size).ok();
+                    if jobs.send(Job::Part(Part { key, image })).is_ok() {
+                        term::wake(Wake::Job);
+                    }
+                })
+                .expect("failed to spawn thread");
         }
         None
     }
