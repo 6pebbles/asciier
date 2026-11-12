@@ -461,7 +461,7 @@ fn a_step_back_soon_after_a_step_onto_the_last_frame_shows_the_frame_before() {
 
 #[test]
 fn a_seek_and_a_step_in_one_write_end_paused_as_the_old_viewer_left_them() {
-    // rows P9, P15: seek_to and frame_step of bin/ascii-viewer:1423 and :1441 at tag python-final did each key before the next; run in this harness, paused on frame 25, the old viewer showed `l.` and `.l` 151, `l,` and `,l` 149, `..,` 26, paused; seen before the fix: `l.` and `.l` played on to the clip's end with the mark `|` and the run going on there, `l,` 24, `,l` 125, `..,` 24
+    // rows P9, P15, N5: seek_to and frame_step of bin/ascii-viewer:1423 and :1441 at tag python-final did each key before the next; run in this harness, read on the screen (the frame `s` takes, after the keys, is mpv's, N5: the old viewer's `s` took 150 for `l.`), paused on frame 25, the old viewer showed `l.` and `.l` 151, `l,` and `,l` 149, `..,` 26, paused; seen before the fix: `l.` and `.l` played on to the clip's end with the mark `|` and the run going on there, `l,` 24, `,l` 125, `..,` 24
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
@@ -519,7 +519,7 @@ fn a_step_back_after_a_step_on_the_last_frame_shows_the_frame_before() {
 
 #[test]
 fn steps_typed_apart_each_take_their_frame() {
-    // row P15: `.` `.` `,` typed 30 to 100 ms apart end one frame on (frame_step of bin/ascii-viewer:1441 at tag python-final did each before the next key); seen before the fix: 2 of 4 runs had a case 30 ms apart land back on frame 25, mpv taking the step back while the second step waited for its frame
+    // rows P15, N5: `.` `.` `,` typed 30 to 100 ms apart end one frame on (frame_step of bin/ascii-viewer:1441 at tag python-final did each before the next key; run in this harness the old viewer showed frame 26, read on the screen, while its `s`, which N5 makes mpv's frame, took 28); seen before the fix: 2 of 4 runs had a case 30 ms apart land back on frame 25, mpv taking the step back while the second step waited for its frame
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
