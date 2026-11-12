@@ -1117,12 +1117,12 @@ fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
 
 #[test]
 fn a_frame_taken_while_playing_is_named_by_its_time() {
-    // rows N5, P22: the name's time is that of the frame mpv holds, to 0.1 s (open_page of bin/ascii-viewer:2048 at tag python-final named it by the frame on screen); keys right after `r` keep the viewer busy while mpv answers and plays on (each `c` draws the frame again; 40 leave the colour as it was); seen before the fix, named by the clock when the answer was read: 5.1 to 5.4 s for frames at 1.1 and 1.2 s, and in a full parallel run without the keys `clip-ascii-1.8s.png` holding frame 41 (1.64 s)
+    // rows N5, P22: the name's time is that of the frame mpv holds, to 0.1 s (open_page of bin/ascii-viewer:2048 at tag python-final named it by the frame on screen); keys right after `r` keep the viewer busy while mpv answers and plays on (each `c` draws the frame again; 10 leave the colour as it was, and under load 40 outlasted an 8 s clip, whose end quit the viewer before the page came); seen before the fix, named by the clock when the answer was read: 5.1 to 5.4 s for frames at 1.1 and 1.2 s, and in a full parallel run without the keys `clip-ascii-1.8s.png` holding frame 41 (1.64 s)
     let sandbox = Sandbox::new();
-    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 8.0, 8.0, &[]);
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
-    tty.send(&[&b"r"[..], &[b'c'; 40]].concat());
+    tty.send(&[&b"r"[..], &[b'c'; 10]].concat());
     tty.until("the page", |screen| screen.row(1).starts_with(" Render"));
     let name = page_name(&mut tty);
     let (grabbed, _) = exported(&mut tty, &sandbox, &name);
