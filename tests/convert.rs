@@ -1228,7 +1228,7 @@ fn ctrl_c_while_the_encoder_finishes_ends_it_quietly_too() {
 
 #[test]
 fn ctrl_c_while_a_picture_is_written_prints_no_path() {
-    // rows C10, C4, N25: main of bin/ascii-convert:561 at tag python-final: Ctrl-C ends a still at once, whatever its run is doing, here waiting in the write of its PNG: no message, the file as far as it got (C10), no path, which goes with a done run (C4), then death by SIGINT (N25); `-o` names a FIFO whose pipe of one page is full, so the write waits, then SIGINT: the run ends with the pipe still full, whose page is then all that went through, a PNG cut short; the old converter, which could not open a FIFO (Pillow opens its output `w+b`), ended at once on a regular file: SIGINT during its save gave exit 130 and the PNG as far as it got (983253 of 1286502 bytes, seen here); seen at 6154efe (reviewer's probe): the path printed, exit 130; at d189788: the run ended only once the FIFO was read, the whole PNG written
+    // rows C10, N25: main of bin/ascii-convert:561 at tag python-final: Ctrl-C ends a still at once, whatever its run is doing, here waiting in the write of its PNG: no message, no path (it goes with a done run), the file as far as it got (C10), then death by SIGINT (N25); `-o` names a FIFO whose pipe of one page is full, so the write waits, then SIGINT: the run ends with the pipe still full, whose page is then all that went through, a PNG cut short; the old converter, which could not open a FIFO (Pillow opens its output `w+b`), ended at once on a regular file: SIGINT during its save gave exit 130 and the PNG as far as it got (983253 of 1286502 bytes, seen here); a handler that only notes the Ctrl-C lets the run end once the FIFO is read, the whole PNG written
     let sandbox = Sandbox::new();
     save(&gradient(80, 40), &sandbox.path("pic.png"));
     let fifo = sandbox.path("out.png");
@@ -1327,7 +1327,7 @@ fn ctrl_c_stays_ignored_when_the_parent_ignored_it() {
 
 #[test]
 fn children_start_with_no_signal_blocked() {
-    // rows C10, X9: every child of a video run, started either way (fc-match, ffprobe, the frame grab and the VAAPI trial where the render node is, as they are; the decoder and the encoder in sessions of their own): no signal blocked and SIGINT not ignored, as the converter itself started, so a Ctrl-C reaches what they run as usual; so at 0584662 (reviewer's probe); seen with the blocked SIGINT of 6154efe: SigBlk 0x2 in each
+    // rows C10, X9: every child of a video run, started either way (fc-match, ffprobe, the frame grab and the VAAPI trial where the render node is, as they are; the decoder and the encoder in sessions of their own): no signal blocked and SIGINT not ignored, as the converter itself started, so a Ctrl-C reaches what they run as usual; so before the converter caught Ctrl-C (reviewer's probe); seen while a converter blocked SIGINT for its Ctrl-C thread: SigBlk 0x2 in each
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "clip.mp4", 0.2, "160x90", 25);
     for program in ["ffmpeg", "ffprobe", "fc-match"] {
