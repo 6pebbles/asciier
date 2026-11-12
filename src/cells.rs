@@ -584,6 +584,35 @@ mod tests {
     }
 
     #[test]
+    fn the_work_factor_changes_the_glyphs() {
+        // rows G1: lib/ascii_term.py grid() on this noise at 60 x 20 cells, bl1nk, run 2026-11-12: libchafa's glyphs at work 0.2 (the viewer's, lib/ascii_term.py:29) and 0.5 (the converter's, bin/ascii-convert:206) differ in 2 of the 1200 cells in truecolour and in 432 in two colours
+        let picture = noise(96, 64);
+        let glyphs = |mono: bool, work: f32| {
+            let (mut inks, ramp) = (inks(), ramp());
+            let art = grid(
+                &picture,
+                96,
+                64,
+                60,
+                None,
+                0.5,
+                Glyphs::Shape,
+                mono,
+                &mut inks,
+                &ramp,
+                work,
+            );
+            art.unwrap().chars
+        };
+        let differ = |mono: bool| {
+            let (live, drawn) = (glyphs(mono, 0.2), glyphs(mono, 0.5));
+            assert_eq!((live.len(), drawn.len()), (1200, 1200));
+            live.iter().zip(&drawn).filter(|(a, b)| a != b).count()
+        };
+        assert_eq!((differ(false), differ(true)), (2, 432));
+    }
+
+    #[test]
     fn the_picture_lands_the_right_way_round() {
         // lib/ascii_chafa.py's cells for four flat quarters, white and red over blue and black: 20 x 5 cells, the middle row holding both halves.
         let colour = |x: usize, y: usize| match (x < 80, y < 40) {
