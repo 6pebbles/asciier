@@ -898,7 +898,8 @@ impl Viewer {
     fn enter_page(&mut self, picture: RgbImage, out: PathBuf) {
         match Page::new(picture, out, self.options()) {
             Ok(page) => {
-                self.resume = self.pause_for_layer();
+                // a layer open already keeps its resume
+                self.resume |= self.pause_for_layer();
                 self.page = Some(page);
                 self.ui.clear();
             }

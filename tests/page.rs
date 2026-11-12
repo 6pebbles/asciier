@@ -1255,6 +1255,33 @@ fn r_right_after_s_on_a_video_opens_the_page() {
 }
 
 #[test]
+fn f1_right_after_r_on_a_video_leaves_the_resume_to_the_page() {
+    // rows P22, H3, R7: open_page and open_help of bin/ascii-viewer:2048 and :2061 at tag python-final: r pauses and opens the page before the batch's next key, F1 then shows the page's keys and leaves playback to the page (help_resume: not playing), which plays on when it closes; run in this harness the old viewer played on after both closed; seen before the fix: paused after both, the keys having paused playback before mpv's frame came and the page finding nothing to resume
+    let sandbox = Sandbox::new();
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_playing();
+    tty.send(&[b"r", F1].concat());
+    tty.until("the page's keys", |screen| {
+        screen.row(1).starts_with(" Render page (r):")
+    });
+    settled(&tty);
+    tty.send(b"x");
+    tty.until("the page", |screen| {
+        let top = screen.row(1);
+        top.starts_with(" Render") && !top.starts_with(" Render page")
+    });
+    let at = tty.send(b"q");
+    tty.until("the player", |screen| seconds(&screen.row(24)).is_some());
+    let first = played(&tty, at)[0];
+    tty.until("playing on", |screen| {
+        screen.row(24).starts_with("> ") && frame(screen) != first
+    });
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
 fn without_kitty_graphics_the_menu_works_all_the_same() {
     // row R19 (U, kept: the menu and export work, no preview): no kitty variables, TERM xterm-256color, no probe; the menu, its keys and the export as in kitty (the old page wrote the preview's placement whatever the terminal, bin/ascii-viewer:1161 at tag python-final); nothing of the run left in /dev/shm
     let sandbox = Sandbox::new();
