@@ -1737,10 +1737,11 @@ fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
 fn a_frame_taken_while_playing_is_named_by_its_time() {
     // rows N5, P21, P22: the name's time is that of the frame mpv holds, to 0.1 s, for `s` and `r` alike (screenshot and open_page of bin/ascii-viewer:1621 and :2048 at tag python-final named it by the frame on screen); keys right after `s` keep the viewer busy while mpv answers and plays on (each `c` draws the frame again; 10 leave the colour as it was, and under load 40 outlasted an 8 s clip), keys right after `r` wait for the page; seen before the fix, named by the clock when the answer was read: with `r` and the keys 5.1 to 5.4 s for frames at 1.1 and 1.2 s, and in a full parallel run without them `clip-ascii-1.8s.png` holding frame 41 (1.64 s); with `s` and the keys, the clock put back in place of the frame's time: 1.3 and 1.4 s for frame 25 (1 s), 3 of 3
     let sandbox = Sandbox::new();
-    // 30 s: under load 50 the keys, the save and the test's reading of the picture outlasted a 10 s clip, and `r` came after the end
-    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 30.0, 30.0, &[]);
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
+    // looping: under load 50 the keys, the save and the test's reading of the picture outlasted the clip, and `r` came after its end; a longer clip would take the counter past its 8 bits
+    says(&mut tty, b"L", "loop on");
     let at = tty.send(&[&b"s"[..], &[b'c'; 10]].concat());
     let start = tty.expect(at, b"\x1b[7m saved ");
     let end = tty.expect(start, b" \x1b[0m") - 5;
