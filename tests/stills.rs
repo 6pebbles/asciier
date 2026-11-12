@@ -1421,7 +1421,7 @@ fn bold_takes_the_ramp_of_the_bold_face() {
 
 #[test]
 fn the_font_is_looked_up_once_a_weight() {
-    // row G10: font_path of lib/ascii_term.py:21 at tag python-final asks `fc-match -f %{file}` once a weight in a process (functools.cache), JetBrainsMono Nerd Font Mono and its weight 210: `b` three times on a still in ASCII, then the render page drawing its preview in bold and regular as Level and Bold change, ask each once
+    // rows G10, G8: font_path of lib/ascii_term.py:21 at tag python-final asks `fc-match -f %{file}` once a weight in a process (functools.cache), JetBrainsMono Nerd Font Mono and, for bold, its weight 210: `b` three times on a still in ASCII, then the render page drawing its preview in bold and regular as Level and Bold change, ask each once
     let sandbox = kitty_sandbox();
     sandbox.program(
         "fc-match",
