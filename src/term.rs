@@ -264,6 +264,12 @@ impl Term {
         Ok(Term { geometry: None })
     }
 
+    /// A `Term` that entered nothing, for tests that draw without a terminal: leaving it does nothing.
+    #[cfg(test)]
+    pub fn detached() -> Term {
+        Term { geometry: None }
+    }
+
     /// Restore everything `enter` changed; safe to call twice.
     pub fn leave(&mut self) {
         // the handlers stay: a signal repeated during the caller's cleanup still only wakes

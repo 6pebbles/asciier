@@ -1196,6 +1196,77 @@ fn seek_step(key: &[u8]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::picture::{Ground, Pic, Still};
+
+    /// A `Ui` that draws without a terminal: `geometry`, the look at its defaults, the black-box tests' bl1nk theme, no kitty graphics.
+    fn ui(geometry: Geometry) -> Ui {
+        let theme = Theme::from_text(include_str!("../tests/bl1nk.conf")).unwrap();
+        let look = Look::default();
+        Ui {
+            term: Term::detached(),
+            geometry,
+            look,
+            inks: Inks::new(&theme, look.saturation, Skin::Grey),
+            theme,
+            graphics: false,
+            transfer: kitty::Transfer::default(),
+            jobs: channel().0,
+            epoch: 0,
+            toast: None,
+            stale: 0,
+        }
+    }
+
+    #[test]
+    fn a_still_is_rendered_once_across_a_toast() {
+        // row S16: a still's ASCII is rendered as a video frame is, by Ui::ascii from the picture at the grid's px, and kept until the picture, the view, the window or the look changes, so a status-only redraw renders nothing again, as at a toast's end (the cache of bin/ascii-viewer:2215 at tag python-final)
+        let colours = RgbImage::from_fn(960, 480, |x, y| {
+            image::Rgb([(x * 255 / 959) as u8, (y * 255 / 479) as u8, 96])
+        });
+        let pic = Pic::Rgb(colours);
+        let still = Still {
+            pic: pic.clone(),
+            svg: None,
+        };
+        let mut gallery = Gallery::new(PathBuf::from("colours.png"), still, false);
+        let mut ui = ui(Geometry {
+            cols: 80,
+            rows: 24,
+            cell_w: 9.0,
+            cell_h: 20.0,
+        });
+        let first = gallery.draw(&mut ui, false);
+        // a frame of that shape: 80 x 18 cells, 640 x 144 px for libchafa
+        let (cols, rows) = cells::geometry(960, 480, 80, Some(24), ui.ratio());
+        let size = (cols * CELL_PX, rows * CELL_PX);
+        let mut frame = picture::cut(
+            &pic,
+            [0.0, 0.0, 960.0, 480.0],
+            size,
+            false,
+            Ground::Colour([128; 3]),
+        );
+        let frame = ui.ascii(&mut frame, size.0, size.1).unwrap();
+        assert!(first.ends_with(&frame), "not drawn as a frame is");
+        // a render from here on takes grey inks: a draw equal to the first rendered nothing
+        ui.inks = Inks::new(&ui.theme, 0, Skin::Grey);
+        ui.say("no kitty graphics");
+        assert!(ui.toast_row().is_some());
+        assert!(
+            gallery.draw(&mut ui, false) == first,
+            "rendered for the toast"
+        );
+        // the toast's end as Viewer::tick has it: gone, and a redraw
+        ui.toast = None;
+        ui.redraw();
+        assert!(ui.toast_row().is_none());
+        assert!(gallery.draw(&mut ui, false) == first, "rendered at its end");
+        // the screen covered (help, the page, a resize): rendered again, in grey now, once
+        ui.epoch += 1;
+        let again = gallery.draw(&mut ui, false);
+        assert!(again != first, "no render after a cover");
+        assert!(gallery.draw(&mut ui, false) == again);
+    }
 
     #[test]
     fn the_loop_sleeps_to_the_end_of_its_wait() {
