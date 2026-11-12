@@ -56,6 +56,7 @@ One program: `asciier FILE` views video, audio and stills as ASCII art in the ki
 - 2026-11-11: a crop window over 179 megapixels is an error: it is allocated whole.
 - 2026-11-11: Python tools removed from the tree; tag `python-final` keeps them.
 - 2026-11-12: the converter's Ctrl-C (N25): a SIGINT handler sets a flag and wakes a thread of its own, which kills the children before a video's encoding and the decoder's group while frames are read; cleanup and messages as before, then death by SIGINT: a shell shows 130, a script running it stops; a SIGINT the parent left ignored stays ignored.
+- 2026-11-12: mpv holds the frame of a one-frame stream without sound for `image-display-duration`: 0, `inf` for a picture, so a picture mpv opens stays until `q` and a one-frame video ends after its frame (N7, P14). A picture by mpv's demuxer at the load: one of FFmpeg's picture demuxers (`*_pipe`, `fits`, `alias_pix`, ...), mpv's `mf` (a picture by its suffix, 1 s long), or FFmpeg's MP4 one without a length (HEIC, AVIF; every MP4 or MOV video has one, fragmented too). The length alone does not tell: a Matroska live stream, NUT, raw H.264 and HEVC have none; nor the track's image flag: mpv sets it for a one-frame Matroska video and for one HEVC or AV1 frame in MP4. Measured: 17 pictures of 11 demuxers and 34 one-frame videos of 13 that reach mpv, mpv 0.41, FFmpeg 9.0.
 
 ## Open questions
 

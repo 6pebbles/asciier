@@ -381,13 +381,15 @@ fn explain(error: c_int) -> String {
     words.to_string_lossy().into_owned()
 }
 
-/// Whether mpv's demuxer (`file-format`) is one of FFmpeg's picture demuxers (`pcx_pipe`, `j2k_pipe`, `image2`, ...): a picture file. A track's `image` flag is no test: it also marks a one-frame Matroska video.
-fn picture(format: &str) -> bool {
+/// Whether mpv opened a picture, by its demuxer (`file-format`): one of FFmpeg's picture demuxers (`pcx_pipe`, `j2k_pipe`, `fits`, ...), mpv's (`mf`: a picture known by its suffix, 1 s long at mf-fps 1), or FFmpeg's MP4 one without a `length` (HEIC, AVIF; every video in it has one). The length alone does not tell (a Matroska live stream, NUT, raw H.264 or HEVC has none), nor a track's `image` flag (mpv sets it for a one-frame Matroska video and for one HEVC or AV1 frame in MP4).
+fn picture(format: &str, length: Option<f64>) -> bool {
+    let mp4 = format.split(',').next() == Some("mov");
     format.ends_with("_pipe")
         || matches!(
             format,
-            "image2" | "image2pipe" | "alias_pix" | "brender_pix" | "fits" | "gif" | "ico"
+            "image2" | "image2pipe" | "alias_pix" | "brender_pix" | "fits" | "gif" | "ico" | "mf"
         )
+        || mp4 && !length.is_some_and(|length| length > 0.0)
 }
 
 /// Both of mpv's callbacks: `wake` is the function given to `Mpv::new`.
@@ -1036,8 +1038,9 @@ impl Mpv {
                 if matches!(format.as_str(), "mpegts" | "mpeg") {
                     self.set("hr-seek-demuxer-offset", "1.5");
                 }
-                // mpv holds any lone frame for image-display-duration: a picture stays until `q`, a one-frame video ends after its frame; set and waited for, as mpv may reorder an asynchronous request after the play
-                if picture(&format) {
+                // mpv holds the frame of a one-frame stream without sound for image-display-duration, 0: a one-frame video ends after its frame, with a length or without one (a Matroska live stream, NUT, raw H.264 or HEVC); a picture stays until `q`; set and waited for, as mpv may reorder an asynchronous request after the play
+                let length = self.get(c"duration").and_then(|length| length.parse().ok());
+                if picture(&format, length) {
                     self.option("image-display-duration", "inf");
                 }
                 let plays = |track| self.get(track).is_some_and(|id| id != "no");
@@ -3264,35 +3267,65 @@ pub(crate) mod tests {
     }
     #[test]
     fn a_single_picture_holds_without_an_end() {
-        let mut stage = Stage::new();
-        let file = stage.file("still.png");
-        ffmpeg(&[
-            "-f",
-            "lavfi",
-            "-i",
-            QUADRANTS,
-            "-frames:v",
-            "1",
-            file.to_str().unwrap(),
-        ]);
-        assert_eq!(stage.open(&file), (true, false));
-        stage.settle();
-        assert_eq!(
-            (stage.size, stage.length, stage.picture.len()),
-            ((160, 120), None, 160 * 120 * 3)
-        );
-        stage.mpv.set("pause", "no");
-        assert_eq!(stage.pump(0.5, |_| false), [Event::Pause(false)]);
+        // row N7: a picture mpv opens stays: through FFmpeg's picture demuxers (PNG), its MP4 one without a length (tests/golden/picture-testsrc2.heic, heif-enc's of ffmpeg's testsrc2: it ended at once while the rule went by demuxer names alone), or mpv's by the suffix (X-Face, which FFmpeg does not probe: 1 s long at mf-fps 1; it ended after its frame while the rule went by the length)
+        let pictures = [
+            ("still.png", (160, 120), None),
+            ("still.heic", (160, 90), None),
+            ("still.xface", (48, 48), Some(1.0)),
+        ];
+        for (name, size, length) in pictures {
+            let mut stage = Stage::new();
+            let file = stage.file(name);
+            let mut args = vec!["-f", "lavfi", "-i", QUADRANTS, "-frames:v", "1"];
+            match name {
+                "still.heic" => {
+                    let heic = include_bytes!("../tests/golden/picture-testsrc2.heic");
+                    std::fs::write(&file, heic).unwrap();
+                }
+                _ => {
+                    if name == "still.xface" {
+                        args.extend(["-s", "48x48", "-c:v", "xface", "-pix_fmt", "monob"]);
+                        args.extend(["-f", "image2"]);
+                    }
+                    args.push(file.to_str().unwrap());
+                    ffmpeg(&args);
+                }
+            }
+            assert_eq!(stage.open(&file), (true, false), "{name}");
+            stage.settle();
+            assert_eq!(
+                (stage.size, stage.length, stage.picture.len()),
+                (size, length, (size.0 * size.1 * 3) as usize),
+                "{name}"
+            );
+            stage.mpv.set("pause", "no");
+            assert_eq!(stage.pump(0.5, |_| false), [Event::Pause(false)], "{name}");
+        }
     }
 
     #[test]
     fn a_one_frame_video_ends_after_its_frame() {
-        // rows P14, N7: a one-frame video file ends after its frame, also in Matroska, whose track mpv calls an image; mpv holds any lone frame for image-display-duration (seen before the fix: no end within 2 s)
-        for name in ["one.mp4", "one.mkv"] {
+        // rows P14, N7: a one-frame video file ends after its frame: MP4, also of one HEVC frame, whose track mpv calls an image; Matroska, an image to mpv too, also written as a live stream, without a length (no seek back to write one); NUT, raw H.264 and HEVC, without a length too (these four held until `q` while the rule went by the length); YUV4MPEG; MPEG-PS; mpv holds the frame of a one-frame stream for image-display-duration (seen before the fix: no end within 2 s)
+        let x265 = ["-c:v", "libx265", "-x265-params", "log-level=error"];
+        let names = [
+            "one.mp4", "hevc.mp4", "one.mkv", "live.mkv", "one.nut", "one.h264", "one.hevc",
+            "one.y4m", "one.mpg",
+        ];
+        let mut held = Vec::new();
+        for name in names {
             let mut stage = Stage::new();
             let file = stage.file(name);
             let mut args = vec!["-f", "lavfi", "-i", QUADRANTS, "-frames:v", "1"];
-            args.extend(H264);
+            match name {
+                "hevc.mp4" => args.extend(x265),
+                "live.mkv" => args.extend([&H264[..], &["-live", "1"]].concat()),
+                "one.nut" => args.extend(["-c:v", "ffv1"]),
+                "one.h264" => args.extend([&H264[..], &["-f", "h264"]].concat()),
+                "one.hevc" => args.extend([&x265[..], &["-f", "hevc"]].concat()),
+                "one.y4m" => args.extend(["-pix_fmt", "yuv420p"]),
+                "one.mpg" => args.extend(["-c:v", "mpeg2video", "-f", "mpeg"]),
+                _ => args.extend(H264),
+            }
             args.push(file.to_str().unwrap());
             ffmpeg(&args);
             assert_eq!(stage.open(&file), (true, false), "{name}");
@@ -3300,12 +3333,11 @@ pub(crate) mod tests {
             assert_eq!(stage.picture.len(), 160 * 120 * 3, "{name}: its frame");
             stage.mpv.pause(false);
             let events = stage.pump(2.0, |e| *e == Event::Ended(true));
-            assert_eq!(
-                events.last(),
-                Some(&Event::Ended(true)),
-                "{name}: {events:?}"
-            );
+            if events.last() != Some(&Event::Ended(true)) {
+                held.push(format!("{name}: {events:?}"));
+            }
         }
+        assert_eq!(held, Vec::<String>::new(), "held, no end within 2 s");
     }
 
     #[test]

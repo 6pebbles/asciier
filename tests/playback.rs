@@ -1673,34 +1673,86 @@ fn a_picture_only_mpv_decodes_shows_as_one_frame() {
 }
 
 #[test]
-fn a_one_frame_video_draws_and_ends() {
-    // rows V17, P14, N7: run in this harness the old viewer drew it and ended, exit 0 in 0.45 s
+fn a_heic_picture_shows_until_q() {
+    // rows V17, N7: a HEIC picture (tests/golden/picture-testsrc2.heic, heif-enc's of ffmpeg's testsrc2), which the built-in decoders do not take and mpv reads through FFmpeg's MP4 demuxer, opens as a one-frame video held until `q` (it ended right after its frame while the rule went by demuxer names; run in this harness the old viewer drew it under `> 00:00` and ended within the second)
     let sandbox = Sandbox::new();
-    let one = sandbox.path("one.mp4");
+    let heic = sandbox.path("pic.heic");
+    std::fs::copy(
+        Path::new(CRATE).join("tests/golden/picture-testsrc2.heic"),
+        &heic,
+    )
+    .unwrap();
+    let mut tty = sandbox.launch().arg(&heic).size(SMALL).start();
+    tty.until("the picture", |screen| {
+        screen.inked() > 1000 && screen.row(24) == "> 00:00"
+    });
+    // a window for what must not happen: an end
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(tty.running());
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
+fn a_picture_mpv_knows_by_its_suffix_shows_until_q() {
+    // rows V17, N7: an X-Face picture, which neither the built-in decoders nor FFmpeg's probes take, opens through mpv's picture demuxer by its suffix (mf), 1 s long at mf-fps 1, as a one-frame video held until `q` (it ended after its frame while the rule went by the length; run in this harness the old viewer drew nothing and ended)
+    let sandbox = Sandbox::new();
+    let face = sandbox.path("pic.xface");
     ffmpeg(
         &sandbox,
         &[
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=s=160x90:r=25:d=1",
+            "testsrc2=s=48x48:d=1",
             "-frames:v",
             "1",
             "-c:v",
-            "libx264",
+            "xface",
             "-pix_fmt",
-            "yuv420p",
-            one.to_str().unwrap(),
+            "monob",
+            "-f",
+            "image2",
+            face.to_str().unwrap(),
         ],
     );
-    let mut tty = sandbox.launch().arg(&one).size(SMALL).start();
-    let status = tty.exit_within(Duration::from_secs(10));
-    let drew = replay(&tty.out(), SMALL, Screen::inked)
-        .into_iter()
-        .max()
-        .unwrap_or(0);
-    assert!(drew > 1000, "no picture: {drew} cells");
-    assert_eq!(status.and_then(|status| status.code()), Some(0));
+    let mut tty = sandbox.launch().arg(&face).size(SMALL).start();
+    tty.until("the picture", |screen| {
+        screen.inked() > 300 && screen.row(24).starts_with("> 00:00")
+    });
+    // a window for what must not happen: an end
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(tty.running());
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
+fn a_one_frame_video_draws_and_ends() {
+    // rows V17, P14, N7: an MP4, and a Matroska file written as a live stream, which has no length (held until `q` while the rule went by the length); run in this harness the old viewer drew each and ended, exit 0 (the MP4 in 0.45 s)
+    let sandbox = Sandbox::new();
+    let videos = [("one.mp4", None), ("live.mkv", Some("-live"))].map(|(name, live)| {
+        let file = sandbox.path(name);
+        let mut args = vec!["-f", "lavfi", "-i", "testsrc2=s=160x90:r=25:d=1"];
+        args.extend(["-frames:v", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+        args.extend(live.map(|live| [live, "1"]).iter().flatten());
+        args.push(file.to_str().unwrap());
+        ffmpeg(&sandbox, &args);
+        file
+    });
+    let mut ttys = videos
+        .each_ref()
+        .map(|video| sandbox.launch().arg(video).size(SMALL).start());
+    for (tty, video) in ttys.iter_mut().zip(&videos) {
+        let name = video.file_name().unwrap().to_string_lossy();
+        let status = tty.exit_within(Duration::from_secs(10));
+        let drew = replay(&tty.out(), SMALL, Screen::inked)
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+        assert!(drew > 1000, "{name}: no picture: {drew} cells");
+        assert_eq!(status.and_then(|status| status.code()), Some(0), "{name}");
+    }
 }
 
 #[test]
