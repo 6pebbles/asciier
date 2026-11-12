@@ -50,7 +50,7 @@ const VIVID: &str =
 const HELD: &str =
     r#"n=0; while [ ! -e "$DUMP/go" ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n + 1)); done"#;
 
-/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $DECODE_BYTES: the decoder fails after that many bytes; $STALL: the decoder gives that many bytes, then nothing, its pipe open, until $DUMP/go, `$DUMP/held` said first; $GRAB: a frame grab ignores Ctrl-C and waits for $DUMP/go, `$DUMP/held` said first.
+/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $CHATTER: the decoder says that line on stderr again and again while it decodes; $DECODE_BYTES: the decoder fails after that many bytes; $STALL: the decoder gives that many bytes, then nothing, its pipe open, until $DUMP/go, `$DUMP/held` said first; $GRAB: a frame grab ignores Ctrl-C and waits for $DUMP/go, `$DUMP/held` said first.
 const FFMPEG: &str = r#"#!/bin/sh
 held() { HELD; }
 case " $* " in
@@ -66,6 +66,10 @@ case " $* " in
     exit $status ;;
 *" -an "*)
     printf '%s\n' "$@" > "$DUMP/decode.args"
+    if [ -n "$CHATTER" ]; then
+        while :; do echo "$CHATTER"; done >&2 &
+        "$REAL" "$@" | tee "$DUMP/decode.ppm"; status=$?; kill $!; exit $status
+    fi
     if [ -n "$DECODE_BYTES" ]; then "$REAL" "$@" | head -c "$DECODE_BYTES" | tee "$DUMP/decode.ppm"; exit 1; fi
     if [ -n "$STALL" ]; then "$REAL" "$@" 2> /dev/null | head -c "$STALL" | tee "$DUMP/decode.ppm"; touch "$DUMP/held"; held; exit 0; fi
     "$REAL" "$@" | tee "$DUMP/decode.ppm" ;;
@@ -2225,6 +2229,35 @@ fn progress_counts_the_frames_on_stderr() {
         "{}",
         shown(&out)
     );
+}
+
+#[test]
+fn a_childs_lines_on_stderr_fall_between_the_progress_lines() {
+    // row X8: bin/ascii-convert:475 at tag python-final: each `\r<done>/<total> frames` goes to stderr in one write (print flushed it at its `\r`), so a line a child writes there meanwhile lands between two, never inside one, as it did while one `eprint!` wrote its pieces apart; a decoder that says a line on stderr again and again while it gives its 250 frames: every stretch of the converter's text between two of its lines is whole progress lines, the old converter's too
+    let mut sandbox = Sandbox::new();
+    clip(&sandbox, "long.mp4", 10.0, "160x90", 25);
+    wrap_ffmpeg(&mut sandbox);
+    sandbox.set("CHATTER", "decoder says");
+    let ran = convert(
+        &sandbox,
+        &["-W", "320", "-H", "180", "-o", "long-out.mp4", "long.mp4"],
+    );
+    assert_eq!((ran.code, ran.stdout.as_str()), (Some(0), "long-out.mp4\n"));
+    let stretches: Vec<&str> = ran.stderr.split("decoder says\n").collect();
+    assert!(
+        stretches.len() > 100,
+        "{} lines of the decoder",
+        stretches.len() - 1
+    );
+    let cut: Vec<&&str> = stretches
+        .iter()
+        .filter(|text| {
+            !text.is_empty() && !(text.starts_with('\r') && text.trim_end().ends_with(" frames"))
+        })
+        .collect();
+    assert_eq!(cut, Vec::<&&str>::new());
+    let (counts, total) = progress(&stretches.concat());
+    assert_eq!((counts.last(), total.as_str()), (Some(&250), "250"));
 }
 
 #[test]

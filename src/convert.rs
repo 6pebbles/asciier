@@ -129,7 +129,7 @@ pub fn main(args: impl Iterator<Item = OsString>) -> u8 {
             return 0;
         }
         Err((code, text)) => {
-            eprintln!("{USAGE}\nasciier convert: error: {text}");
+            say(format!("{USAGE}\nasciier convert: error: {text}\n"));
             return code;
         }
     };
@@ -155,11 +155,11 @@ pub fn main(args: impl Iterator<Item = OsString>) -> u8 {
     match ended {
         Ok(()) => 0,
         Err(Stop::Usage(text)) => {
-            eprintln!("{USAGE}\nasciier convert: error: {text}");
+            say(format!("{USAGE}\nasciier convert: error: {text}\n"));
             2
         }
         Err(Stop::Failed(text)) => {
-            eprintln!("asciier: {text}");
+            say(format!("asciier: {text}\n"));
             1
         }
         Err(Stop::Interrupted(out)) => {
@@ -169,6 +169,11 @@ pub fn main(args: impl Iterator<Item = OsString>) -> u8 {
             die_by_sigint()
         }
     }
+}
+
+/// Text to stderr in one write, so that a line a child writes there meanwhile lands between two of the converter's, never inside one, as it can between the pieces one `eprint!` writes apart (stderr is unbuffered).
+fn say(text: String) {
+    let _ = std::io::stderr().write_all(text.as_bytes());
 }
 
 /// Ctrl-C's end once its cleanup and messages are done: death by SIGINT, which a shell shows as 130 and which stops a script that ran the converter, where an exit 130 lets the script go on (N25); 130 only should the signal return.
@@ -808,7 +813,7 @@ fn video(
     let mut sink = encode.stdin.take().expect("piped");
     let (mut done, mut art, decoder) = (0u64, style.art.clone(), decode.id() as libc::pid_t);
     *decoder_group() = decoder;
-    eprint!("\r0/{shown} frames");
+    say(format!("\r0/{shown} frames"));
     // two stages side by side, frames in order: reading and cells on a thread, painting and writing here; the decoder is killed before its pipe closes, of which it would complain on stderr
     let (grids, painted) = std::sync::mpsc::sync_channel::<Grid>(8);
     // Ok(true): Ctrl-C stopped the reading
@@ -839,11 +844,11 @@ fn video(
                 break;
             }
             done += 1;
-            eprint!("\r{done}/{shown} frames");
+            say(format!("\r{done}/{shown} frames"));
         }
         reader.join().expect("the reader")
     });
-    eprintln!("\r{done}/{shown} frames");
+    say(format!("\r{done}/{shown} frames\n"));
     *decoder_group() = 0;
     // a Ctrl-C before a frame was written leaves the encoder nothing to finish: killed before its input closes, of which it would complain, it ends as before the encoding (row C10)
     let unmade = || done == 0 && INTERRUPTED.load(Ordering::SeqCst);
@@ -862,10 +867,10 @@ fn video(
         return Err(Stop::Failed("ffmpeg could not encode the video".into()));
     }
     if stopped {
-        eprintln!(
-            "stopped at frame {done}: {} holds the part converted",
+        say(format!(
+            "stopped at frame {done}: {} holds the part converted\n",
             out.display()
-        );
+        ));
         return Err(Stop::Interrupted(Some(out.to_path_buf())));
     }
     if INTERRUPTED.load(Ordering::SeqCst) {
