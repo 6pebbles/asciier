@@ -399,7 +399,7 @@ while :; do sleep 0.02; done
 
     #[test]
     fn the_window_is_the_nearest_ancestors() {
-        // Player.fullscreen of bin/ascii-viewer:1601 at tag python-final: the pid walk and its dict of pid to address, read from the code
+        // row V22: the window of this process or its nearest ancestor, by address: Player.fullscreen of bin/ascii-viewer:1601 at tag python-final, the pid walk and its dict of pid to address, read from the code
         let window = |clients: serde_json::Value| owner(&clients, 100, parent_of);
         let listed =
             |pid: i64, address: &str| serde_json::json!({ "pid": pid, "address": address });
@@ -476,6 +476,7 @@ while :; do sleep 0.02; done
 
     #[test]
     fn fullscreen_is_silent_without_a_window_or_hyprctl() {
+        // row V22: silent on failure: nothing dispatched without an ancestor's window, clients, JSON or a list, nor without hyprctl
         let stubs = Stubs::new();
         stubs.stub("hyprctl", NOTES);
         // no ancestor's window, no clients, no JSON, no list, nothing
@@ -572,7 +573,7 @@ while :; do sleep 0.02; done
 
     #[test]
     fn copy_hands_wl_copy_the_png_in_a_session_of_its_own() {
-        // row S14; the command of bin/ascii-viewer:1666 at tag python-final; tests/test_viewer_tty.py:190
+        // rows S14, V6: the command of bin/ascii-viewer:1666 at tag python-final; tests/test_viewer_tty.py:190; wl-copy leads a session of its own, so the end of the viewer's terminal does not reach it (V6: it outlives the viewer)
         let stubs = Stubs::new();
         stubs.stub("wl-copy", COPY);
         let png: Vec<u8> = (0..300_000u32).map(|i| (i * 7) as u8).collect();
@@ -627,6 +628,7 @@ while :; do sleep 0.02; done
 
     #[test]
     fn the_scope_beside_the_program_comes_before_the_paths() {
+        // row A1: the scope beside the executable first, else the one on PATH (bin/ascii-viewer:112-113 at tag python-final)
         let stubs = Stubs::new();
         stubs.stub("scope", SCOPE);
         let beside = stubs.dir.join("bin/beside/scope");

@@ -859,6 +859,7 @@ mod tests {
 
     #[test]
     fn whole_input_is_split_into_keys_and_replies_are_dropped() {
+        // rows V11, V12: tokens are APC strings, CSI, SS3 and single bytes; a terminal's replies (APC, CSI ?) are no keys
         for (input, want) in WHOLE {
             assert_eq!(split(input, false), (keys(want), &b""[..]), "{input:?}");
         }
@@ -866,6 +867,7 @@ mod tests {
 
     #[test]
     fn input_cut_inside_a_sequence_leaves_it_as_the_tail() {
+        // row V11: a read that ends inside a sequence leaves it to be completed; with no more input its bytes are keys, a lone Esc one
         for (input, last) in CUT {
             let (whole, tail) = split(input, false);
             // ESC O takes any byte for its third, an ESC too: the keys are whole where the Python pattern still waits
@@ -883,6 +885,7 @@ mod tests {
 
     #[test]
     fn reads_are_joined_while_a_sequence_is_open() {
+        // rows V11, V12: a sequence cut by a read's end is completed by the next read; a reply cut across reads is no keys either
         for (reads, want) in READS {
             let got = polls(reads);
             let want: Vec<Vec<Key>> = want.iter().map(|batch| keys(batch)).collect();
@@ -896,6 +899,7 @@ mod tests {
 
     #[test]
     fn an_escape_sequence_split_across_reads_is_one_key() {
+        // row V11
         assert_eq!(
             polls(&[b"\x1b[A\x1b[", b"B"]),
             [keys(&[b"\x1b[A", b"\x1b[B"])]
@@ -904,7 +908,7 @@ mod tests {
 
     #[test]
     fn terminal_replies_are_no_keys() {
-        // kitty's answers to the start-up probe, come after it stopped waiting: whole, and cut by the reads' ends
+        // row V12: kitty's answers to the start-up probe, come after it stopped waiting: whole, and cut by the reads' ends
         let whole: Keys = &[
             b"l\x1b_Gi=31;EBADF:Failed to open file for graphics transmission: /dev/shm/x with error: [2] No such file or directory\x1b\\\x1b[?62;22ck",
         ];
@@ -916,12 +920,13 @@ mod tests {
 
     #[test]
     fn a_lone_escape_is_a_key() {
+        // row V11: no rest comes: the Esc alone
         assert_eq!(polls(&[b"\x1b"]), [keys(&[b"\x1b"])]);
     }
 
     #[test]
     fn a_backlog_of_held_keys_is_one_batch() {
-        // tests/test_viewer_tty.py:88, :96: 300 level keys and q; zooms, pans and q (704 bytes, 404 keys by the Python pattern)
+        // rows V11, V14: what one read holds is one batch: the batches tests/test_viewer_tty.py:88 and :96 pin, 300 level keys and q; zooms, pans and q (704 bytes, 404 keys by the Python pattern)
         let level = [b"3".repeat(300), b"q".to_vec()].concat();
         assert_eq!(polls(&[&level])[0].len(), 301);
         let held = [
@@ -936,7 +941,7 @@ mod tests {
 
     #[test]
     fn geometry_from_what_the_terminal_reports() {
-        // (rows, cols, x px, y px) of TIOCGWINSZ -> Player.window() of bin/ascii-viewer:1709 with COLUMNS and LINES unset, run by python3; all zeros is also what a failing ioctl leaves
+        // row V9: (rows, cols, x px, y px) of TIOCGWINSZ -> Player.window() of bin/ascii-viewer:1709 with COLUMNS and LINES unset (N8), run by python3; all zeros is also what a failing ioctl leaves
         for ((rows, cols, xpx, ypx), (want_cols, want_rows, cell_w, cell_h)) in [
             ((60, 200, 1800, 1200), (200, 60, 9.0, 20.0)),
             ((30, 100, 1000, 660), (100, 30, 10.0, 22.0)),
@@ -1355,7 +1360,7 @@ mod tests {
 
     #[test]
     fn a_resize_wakes_and_is_measured_once_told() {
-        // rows V9, V10; GeometryTest of tests/test_viewer.py:407: the same two windows
+        // rows V9, V10: one snapshot until SIGWINCH, measured again after it (of V10 the re-read alone; the draws at the new size: tests/viewer.rs); GeometryTest of tests/test_viewer.py:407: the same two windows
         let mut pty = Pty::start(SIZE, b"", false);
         pty.says(&format!("geometry {AT_START}"));
         pty.resize([30, 100, 1000, 660]);
@@ -1392,6 +1397,7 @@ mod tests {
 
     #[test]
     fn a_fault_restores_the_terminal_and_ends_by_its_signal() {
+        // row V2: SIGSEGV and SIGABRT (libmpv aborts on some input): the restore written once, last, the mode cooked again, then the signal's own end
         for (key, signal) in [(b"S", libc::SIGSEGV), (b"A", libc::SIGABRT)] {
             let mut pty = Pty::start(SIZE, b"", false);
             pty.says(&format!("geometry {AT_START}"));
@@ -1410,7 +1416,7 @@ mod tests {
 
     #[test]
     fn a_panic_restores_the_terminal_before_its_message() {
-        // stderr on the terminal: one stream, one order
+        // row V2: the restore before the panic's message; stderr on the terminal: one stream, one order
         let mut pty = Pty::start(SIZE, b"", true);
         pty.until(true, AT_START.as_bytes(), 0);
         pty.type_keys(b"!");
@@ -1551,6 +1557,7 @@ mod tests {
 
     #[test]
     fn without_a_terminal_nothing_is_entered() {
+        // row V1: stdin no terminal: nothing entered, no escape byte written
         let child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "term::tests::pty_child", "--nocapture"])
             .env("ASCIIER_PTY_CHILD", "1")
