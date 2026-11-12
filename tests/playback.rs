@@ -928,6 +928,46 @@ fn s_saves_the_frame_on_screen_beside_the_clip() {
     assert_eq!(tty.exit(), 0);
 }
 
+#[test]
+fn a_clip_paused_while_playing_takes_and_seeks_from_the_frame_on_screen() {
+    // rows N5, P9: paused by `space` at whatever point of a frame, `s` saves the frame that then shows, named by its time, and a seek counts from that frame, no other frame drawn before the target; the debug build draws a 200 x 60 window slower than the clip's 25 frames a second, and under load slower than mpv waits for a frame to be taken: the screen then stayed on a frame before the one `s` took (seen in a parallel run before `Mpv::events` reported the late frame: 66 on screen, `clip-ascii-2.7s.png` taken)
+    let sandbox = Sandbox::new();
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
+    let mut tty = sandbox.view(&video);
+    tty.await_playing();
+    // the picture covers rows 5 to 55 of the window
+    let frame = |screen: &Screen| counted(screen, 30, 1, 200);
+    for _ in 0..3 {
+        tty.send(b" ");
+        tty.await_status("| ");
+        // the screen can lag mpv under load: the frame `s` takes is the reference, and the screen must come to it
+        let at = tty.send(b"s");
+        let start = tty.expect(at, b"\x1b[7m saved ");
+        let end = tty.expect(start, b" \x1b[0m") - 5;
+        let name = String::from_utf8(tty.out()[start..end].to_vec()).unwrap();
+        let held = saved(&sandbox.path(&name)).0;
+        assert_eq!(name, format!("clip-ascii-{}s.png", tenths(held * 4)));
+        tty.until("the frame taken", |screen| frame(screen) == held);
+        let from = tty.send(SHIFT_RIGHT);
+        tty.until("a second on", |screen| {
+            frame(screen) == held + 25 && screen.row(60).starts_with("| ")
+        });
+        let mut after = replay(&tty.out()[from..], WIDE, frame);
+        after.dedup();
+        after.retain(|number| *number != held);
+        assert_eq!(after, [held + 25], "a second on from frame {held}");
+        // on from the start: the screen's lag under load would otherwise run the clip out
+        tty.send(DOWN);
+        tty.until("the start", |screen| frame(screen) == 0);
+        tty.send(b" ");
+        tty.until("playing on", |screen| {
+            screen.row(60).starts_with("> ") && frame(screen) > 25
+        });
+    }
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
 /// `s`, then its toasts: `screenshot ...` and the one that says how it went.
 fn shot(tty: &mut Tty, said: &str) {
     let at = tty.send(b"s");

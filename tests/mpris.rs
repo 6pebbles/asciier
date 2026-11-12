@@ -489,7 +489,7 @@ fn stop_holds_the_frame_until_a_seek_or_space_plays() {
     assert_eq!(find(&tty.out(), b"\x1b[7m", at), Some(end - sentinel.len()));
     tty.await_status(". ");
     assert_eq!(frame(tty.screen()), held, "a step moved it");
-    // a second on from the held frame, playing; a frame after it, decoded before the stop, may land first
+    // a second on from the held frame, playing
     let jumps = |out: &[u8], held: u32, step: u32| {
         let after = frames(out);
         let first = after.iter().find(|&&number| number > held + 2).unwrap();
@@ -517,6 +517,68 @@ fn stop_holds_the_frame_until_a_seek_or_space_plays() {
     tty.until("playing from the start", |screen| {
         screen.row(24).starts_with("> 00:00") && frame(screen) < 25
     });
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+/// `s` on a stopped counter clip: the frame its picture holds (a bar lit where its middle is brighter than the theme's background).
+fn taken(tty: &mut Tty, sandbox: &Sandbox) -> u32 {
+    let at = tty.send(b"s");
+    let start = tty.expect(at, b"\x1b[7m saved ");
+    let end = tty.expect(start, b" \x1b[0m") - 5;
+    let name = String::from_utf8(tty.out()[start..end].to_vec()).unwrap();
+    let picture = image::open(sandbox.path(name)).unwrap().to_rgb8();
+    let (w, h) = picture.dimensions();
+    let lit = |bar: u32| {
+        let (left, right) = (w * bar / 8 + w / 32, w * (bar + 1) / 8 - w / 32);
+        let sum: u64 = (h * 3 / 8..h * 5 / 8)
+            .flat_map(|y| (left..right).map(move |x| (x, y)))
+            .map(|(x, y)| picture.get_pixel(x, y)[1] as u64)
+            .sum();
+        sum / ((right - left) as u64 * (h / 4) as u64) > 50
+    };
+    (0..8).filter(|&bar| lit(bar)).map(|bar| 1 << bar).sum()
+}
+
+#[test]
+fn a_seek_from_the_stopped_state_counts_from_the_frame_on_screen() {
+    // rows P8a, P9, N5: a seek after MPRIS Stop, by key or by MPRIS, plays from its target counted from the held frame, the one `s` takes, and the target is the first frame drawn after it; the debug build draws a 200 x 60 window slower than the clip's 25 frames a second, so mpv has a frame due when it stops, which play asked with the seek showed first and counted the seek from (seen before the fix: 35, 36, 61; under load at 80 x 24 also 29, 30, 55 and 28, 54)
+    let mut sandbox = Sandbox::new();
+    let bus = Bus::new(&mut sandbox);
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
+    let mut tty = sandbox.view(&video);
+    let remote = Remote::new(&sandbox, &bus, tty.pid);
+    tty.await_playing();
+    // the picture covers rows 5 to 55 of the window
+    let frame = |screen: &Screen| counted(screen, 30, 1, 200);
+    let seeks: [(&[u8], &[&str]); 3] = [
+        (SHIFT_RIGHT, &[]),
+        (b"", &["int64:1000000"]),
+        (SHIFT_RIGHT, &[]),
+    ];
+    for (keys, seek) in seeks {
+        remote.send("Stop", &[]);
+        tty.await_status(". ");
+        // the screen can lag mpv under load: the frame `s` takes is the reference, and the screen must come to it
+        let held = taken(&mut tty, &sandbox);
+        tty.until("the frame taken", |screen| frame(screen) == held);
+        let from = tty.send(keys);
+        if !seek.is_empty() {
+            remote.send("Seek", seek);
+        }
+        tty.until("frames after the target", |screen| {
+            screen.row(60).starts_with("> ") && frame(screen) > held + 30
+        });
+        let mut after = replay(&tty.out()[from..], WIDE, frame);
+        after.dedup();
+        let first = after.iter().find(|&&number| number != held);
+        assert_eq!(first, Some(&(held + 25)), "from frame {held}: {after:?}");
+        // on from the start: the screen's lag under load would otherwise run the clip out
+        tty.send(DOWN);
+        tty.until("playing from the start", |screen| {
+            screen.row(60).starts_with("> ") && frame(screen) < 25
+        });
+    }
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }

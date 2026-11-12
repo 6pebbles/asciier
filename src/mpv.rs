@@ -5,6 +5,7 @@ use image::RgbImage;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// What mpv reported since the last look.
 #[derive(Clone, PartialEq, Debug)]
@@ -16,7 +17,7 @@ pub enum Event {
     },
     /// The file could not be opened or played: mpv's reason.
     Failed(String),
-    /// A new frame is due (`Mpv::render`, or `Mpv::skip`); the first one can come before the first `Shape` or after it.
+    /// A new frame is due (`Mpv::render`, or `Mpv::skip`); the first one can come before the first `Shape` or after it. Also reported when `events` comes later than mpv waits for a frame to be taken: a render then shows the frame mpv holds.
     Frame,
     Pause(bool),
     /// Position in seconds.
@@ -53,10 +54,14 @@ pub struct Mpv {
     at_end: bool,
     ended: bool,
     stepped: bool,
-    /// `pause` requests mpv has not confirmed yet: its reports of `pause` until then can be older than them.
+    /// Requests to pause or play that mpv has not confirmed yet: its reports of `pause` until then can be older than them.
     pausing: u32,
+    /// A `seek_and_play` waits for mpv to take its seek; a `pause` meanwhile cancels the play.
+    seek_plays: bool,
     /// The frame of a grab whose time mpv has not given yet.
     taken: Option<Option<RgbImage>>,
+    /// When `events` last returned.
+    looked: Instant,
     /// What mpv renders into, 63 bytes longer than the picture: it starts at a multiple of 64.
     surface: Vec<u8>,
     /// mpv's `volume-max`, read when a file opened.
@@ -149,6 +154,8 @@ const UPDATE_FRAME: u64 = 1;
 const GRAB: u64 = 1;
 /// `reply_userdata` of the `pause` set behind `pause`.
 const PAUSE: u64 = 2;
+/// `reply_userdata` of the seek behind `seek_and_play`.
+const PLAY: u64 = 3;
 
 type Callback = extern "C" fn(*mut c_void);
 
@@ -333,7 +340,9 @@ impl Mpv {
             ended: false,
             stepped: false,
             pausing: 0,
+            seek_plays: false,
             taken: None,
+            looked: Instant::now(),
             surface: Vec::new(),
             volume_max: 130.0,
         };
@@ -448,18 +457,32 @@ impl Mpv {
 
     /// An mpv command, not waited for (`["seek", "5", "relative+exact"]`).
     pub fn command(&self, args: &[&str]) {
-        let args: std::result::Result<Vec<CString>, _> =
-            args.iter().map(|arg| CString::new(*arg)).collect();
-        if let Ok(args) = args {
-            self.send(0, &args);
-        }
+        self.order(0, args);
     }
 
-    fn send(&self, userdata: u64, args: &[CString]) {
+    /// `command` with mpv's `reply_userdata`; whether mpv took the request.
+    fn order(&self, userdata: u64, args: &[&str]) -> bool {
+        let args: std::result::Result<Vec<CString>, _> =
+            args.iter().map(|arg| CString::new(*arg)).collect();
+        args.is_ok_and(|args| self.send(userdata, &args))
+    }
+
+    fn send(&self, userdata: u64, args: &[CString]) -> bool {
         let mut pointers: Vec<*const c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
         pointers.push(std::ptr::null());
         // SAFETY: a null-terminated list of strings that live through the call.
-        unsafe { mpv_command_async(self.handle, userdata, pointers.as_ptr()) };
+        unsafe { mpv_command_async(self.handle, userdata, pointers.as_ptr()) >= 0 }
+    }
+
+    /// A seek (`command`'s arguments), then play once mpv has taken it. Asked at once, mpv plays before it seeks: a frame due when it paused shows first, and a relative seek counts from that frame.
+    pub fn seek_and_play(&mut self, args: &[&str]) {
+        self.reported
+            .retain(|event| !matches!(event, Event::Pause(_)));
+        if self.order(PLAY, args) {
+            (self.pausing, self.seek_plays) = (self.pausing + 1, true);
+        } else {
+            self.pause(false);
+        }
     }
 
     /// One frame forward or back, then paused. A step forward that ends the file has played the sound out, the position is the sound's end, and a step back from there finds the last frame again: `events` then seeks past the end, which holds the last frame at its own time.
@@ -479,6 +502,7 @@ impl Mpv {
 
     /// Pause or play, not waited for. Reports of `pause` that `open` heard, and those mpv makes before it confirms this request, are not handed on: they can be older than it, and mpv reports only a value that differs from the last it reported.
     pub fn pause(&mut self, paused: bool) {
+        self.seek_plays = false;
         self.reported
             .retain(|event| !matches!(event, Event::Pause(_)));
         if self.put(PAUSE, "pause", if paused { "yes" } else { "no" }) {
@@ -499,6 +523,8 @@ impl Mpv {
 
     /// Everything mpv reported since the last call; never blocks.
     pub fn events(&mut self) -> Vec<Event> {
+        // mpv waits 200 ms at most for a frame it hands over to be taken, then holds it as shown and says no more of it
+        let late = !self.render.is_null() && self.looked.elapsed() > Duration::from_millis(200);
         let mut events = std::mem::take(&mut self.reported);
         loop {
             // SAFETY: mpv keeps the event until the next wait.
@@ -524,7 +550,8 @@ impl Mpv {
         // SAFETY: the context is valid while not null.
         let due = !self.render.is_null()
             && unsafe { mpv_render_context_update(self.render) } & UPDATE_FRAME != 0;
-        events.extend(due.then_some(Event::Frame));
+        events.extend((due || late).then_some(Event::Frame));
+        self.looked = Instant::now();
         events
     }
 
@@ -567,6 +594,13 @@ impl Mpv {
             }
             SET_PROPERTY_REPLY if event.userdata == PAUSE => {
                 self.pausing = self.pausing.saturating_sub(1);
+                None
+            }
+            COMMAND_REPLY if event.userdata == PLAY => {
+                self.pausing = self.pausing.saturating_sub(1);
+                if std::mem::take(&mut self.seek_plays) {
+                    self.pause(false);
+                }
                 None
             }
             // SAFETY: the data of this event is an `mpv_event_property`.
@@ -1333,6 +1367,71 @@ pub(crate) mod tests {
         stage.mpv.pause(false);
         let events = stage.pump(0.5, |_| false);
         assert!(!events.contains(&Event::Pause(true)), "{events:?}");
+    }
+
+    #[test]
+    fn a_seek_that_plays_counts_from_the_frame_on_screen() {
+        // rows P8a, P9: a client that draws slower than the clip (70 ms a frame against 40) leaves mpv a frame due when it pauses; play asked with the seek showed that frame first and counted the seek from it (seen in this test before `seek_and_play`: from frame 35, frame 36 first, then 61)
+        for offset in [0, 10, 20, 30] {
+            let mut stage = Stage::new();
+            stage.clip(4.0, 4.0);
+            stage.settle();
+            stage.mpv.pause(false);
+            stage.pump(5.0, |e| matches!(e, Event::Time(t) if *t >= 1.0));
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(400 + offset) {
+                if stage.mpv.events().contains(&Event::Frame) {
+                    stage.draw();
+                    std::thread::sleep(Duration::from_millis(70));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            stage.mpv.pause(true);
+            stage.settle();
+            let (held, drawn) = (*stage.shown.last().unwrap(), stage.shown.len());
+            stage.mpv.seek_and_play(&["seek", "1", "relative+exact"]);
+            stage.pump(0.3, |_| false);
+            let after = &stage.shown[drawn..];
+            assert_eq!(
+                after.first(),
+                Some(&(held + 25)),
+                "{offset} ms on: from frame {held}: {after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_caller_slower_than_mpv_waits_draws_the_frame_mpv_holds() {
+        // rows N5, P9: mpv waits 200 ms at most for a frame it hands over to be taken; a caller that draws a frame in 450 ms, busy as well while its pause goes out (as the viewer writing its screen under load), missed what mpv then held as shown and stayed paused on frame 36 while mpv held 47, the frame it grabs and counts seeks from (seen in this test without the late `Frame`; a grab hands the held frame over again, so the drawn one is read before it)
+        let slow = |stage: &mut Stage, run: Duration| {
+            let start = Instant::now();
+            while start.elapsed() < run {
+                if stage.mpv.events().contains(&Event::Frame) {
+                    stage.draw();
+                    std::thread::sleep(Duration::from_millis(450));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        for offset in [0, 100] {
+            let mut stage = Stage::new();
+            stage.clip(4.0, 4.0);
+            stage.settle();
+            stage.mpv.pause(false);
+            stage.pump(5.0, |e| matches!(e, Event::Time(t) if *t >= 1.0));
+            slow(&mut stage, Duration::from_millis(600 + offset));
+            stage.mpv.pause(true);
+            std::thread::sleep(Duration::from_millis(450));
+            slow(&mut stage, Duration::from_millis(1500));
+            let drawn = stage.shown.last().copied();
+            stage.mpv.grab();
+            let events = stage.pump(2.0, |e| matches!(e, Event::Grabbed(..)));
+            let Some(Event::Grabbed(Some(held), _)) = events.last() else {
+                panic!("{events:?}")
+            };
+            let held = number(held.as_raw(), 160, 120);
+            assert_eq!(drawn, Some(held), "{offset} ms on");
+        }
     }
 
     #[test]

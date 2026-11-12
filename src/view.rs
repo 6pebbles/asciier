@@ -173,6 +173,12 @@ impl Playback {
         self.mpv.pause(paused);
         self.paused = paused;
     }
+
+    /// Leave the stopped state: `seek` (mpv's arguments), playing from there.
+    fn play_from(&mut self, seek: &[&str]) {
+        (self.stopped, self.playing, self.paused) = (false, true, false);
+        self.mpv.seek_and_play(seek);
+    }
 }
 
 enum Grab {
@@ -565,21 +571,22 @@ impl Viewer {
     fn toggle(&mut self) {
         let Some(p) = self.playback() else { return };
         if p.stopped {
-            p.mpv.command(&["seek", "0", "absolute+exact"]);
+            return p.play_from(&["seek", "0", "absolute+exact"]);
         }
-        let play = p.stopped || p.paused;
-        (p.stopped, p.playing) = (false, play);
+        let play = p.paused;
+        p.playing = play;
         p.pause(!play);
     }
 
     /// Seek by `delta` seconds, exactly; from the stopped state playback starts there.
     fn seek(&mut self, delta: f64) {
         let Some(p) = self.playback() else { return };
-        p.mpv
-            .command(&["seek", &format!("{delta}"), "relative+exact"]);
+        let delta = format!("{delta}");
+        let seek = ["seek", &delta, "relative+exact"];
         if p.stopped {
-            (p.stopped, p.playing) = (false, true);
-            p.pause(false);
+            p.play_from(&seek);
+        } else {
+            p.mpv.command(&seek);
         }
     }
 
