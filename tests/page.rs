@@ -1265,7 +1265,7 @@ fn r_right_after_s_on_a_video_opens_the_page() {
 
 #[test]
 fn f1_right_after_r_on_a_video_leaves_the_resume_to_the_page() {
-    // rows P22, H3, R7: open_page and open_help of bin/ascii-viewer:2048 and :2061 at tag python-final: r pauses and opens the page before the batch's next key, F1 then shows the page's keys and leaves playback to the page (help_resume: not playing), which plays on when it closes; run in this harness the old viewer played on after both closed; seen before the fix: paused after both, the keys having paused playback before mpv's frame came and the page finding nothing to resume
+    // rows P22, H3, R7: open_page and open_help of bin/ascii-viewer:2048 and :2061 at tag python-final: r pauses and opens the page before the batch's next key, F1 then shows the page's keys and leaves playback to the page (help_resume: not playing), which plays on when it closes; run in this harness the old viewer played on after both closed; seen before the fixes: paused after both, the keys having paused playback before mpv's frame came and the page finding nothing to resume; either fix holds it: it passes without enter_page's `resume |=` (6 of 6 under load 19-22), keys typed after r waiting for the page, so F1 comes once the page has paused, and fails without both (3 of 3)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
