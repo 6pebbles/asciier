@@ -1221,9 +1221,8 @@ fn r_on_a_video_pauses_it_under_the_page_until_it_closes() {
 }
 
 #[test]
-#[ignore = "defect: keys typed right after r on a video act on the player, not on the page"]
 fn keys_right_after_r_on_a_video_act_on_the_page() {
-    // rows P22, R4, V11: open_page of bin/ascii-viewer:2048 at tag python-final opens the page before the batch's next key: r then j moves the page's cursor; run in this harness the old viewer opened the page on Contrast; seen here: the page on Level, the clip sought 60 s back under it
+    // rows P22, R4, V11: open_page of bin/ascii-viewer:2048 at tag python-final opens the page before the batch's next key: r then j moves the page's cursor; run in this harness the old viewer opened the page on Contrast; seen before the fix: the page on Level, the clip sought 60 s back under it (the page opens on mpv's answer, and keys before it went to the player)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();

@@ -196,6 +196,8 @@ struct Viewer {
     ui: Ui,
     mode: Mode,
     page: Option<Page>,
+    /// Keys typed while the frame for the render page is on its way: the page's once it opens.
+    held: Vec<Key>,
     /// The first line shown of the keys, while they show.
     help: Option<usize>,
     /// Playback to resume when the help or the page closes.
@@ -319,6 +321,7 @@ fn run(file: &Path) -> Result<()> {
         ui,
         mode,
         page: None,
+        held: Vec::new(),
         help: None,
         resume: false,
         mpris,
@@ -598,6 +601,10 @@ impl Viewer {
                 self.quit = true;
                 return;
             }
+            if self.opening() {
+                self.held.push(key.to_vec());
+                continue;
+            }
             let seeks =
                 !matches!(self.mode, Mode::Still(_)) && self.help.is_none() && self.page.is_none();
             if let Some(step) = seek_step(key).filter(|_| seeks) {
@@ -829,9 +836,8 @@ impl Viewer {
         match &mut self.mode {
             Mode::Audio(..) => {}
             Mode::Video(p) => {
-                if p.shape.is_some() && p.grab.is_none() {
+                if p.shape.is_some() && p.grab.is_none() && p.mpv.grab() {
                     p.grab = Some(Grab::Shot);
-                    p.mpv.grab();
                     self.ui.say("screenshot ...");
                 }
             }
@@ -859,7 +865,7 @@ impl Viewer {
         });
     }
 
-    /// The frame asked of mpv arrived, with its time: the screenshot's, or the render page's.
+    /// The frame asked of mpv arrived, with its time: the screenshot's, or the render page's, which then takes the keys held for it.
     fn grabbed(&mut self, picture: Option<RgbImage>, time: Option<f64>) {
         let Mode::Video(p) = &mut self.mode else {
             return;
@@ -867,6 +873,7 @@ impl Viewer {
         let time = time.unwrap_or(p.time);
         let (grab, time) = (p.grab.take(), (time * 10.0).round_ties_even() / 10.0);
         let out = convert::out_name(&self.file, Some(time), false);
+        let page = matches!(grab, Some(Grab::Page));
         match (grab, picture) {
             (Some(Grab::Shot), Some(picture)) => self.save(&picture, &out, true),
             (Some(Grab::Shot), None) => self.ui.say("screenshot failed"),
@@ -874,6 +881,18 @@ impl Viewer {
             (Some(Grab::Page), None) => self.ui.say("no frame"),
             (None, _) => {}
         }
+        if page {
+            // typed for the page: with no page they go nowhere
+            let held = std::mem::take(&mut self.held);
+            if self.page.is_some() {
+                self.keys(&held);
+            }
+        }
+    }
+
+    /// The frame for the render page is on its way: keys wait for the page.
+    fn opening(&self) -> bool {
+        matches!(&self.mode, Mode::Video(p) if matches!(p.grab, Some(Grab::Page)))
     }
 
     /// `r`: the render page for the picture on screen; playback pauses meanwhile.
@@ -881,9 +900,8 @@ impl Viewer {
         match &mut self.mode {
             Mode::Audio(..) => {}
             Mode::Video(p) => {
-                if p.shape.is_some() && p.grab.is_none() {
+                if p.shape.is_some() && p.grab.is_none() && p.mpv.grab() {
                     p.grab = Some(Grab::Page);
-                    p.mpv.grab();
                 }
             }
             Mode::Still(gallery) => {

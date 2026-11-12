@@ -858,11 +858,12 @@ impl Mpv {
         unsafe { mpv_render_context_render(self.render, params.as_mut_ptr()) };
     }
 
-    /// Ask for the frame mpv holds, at source size, and its time; they arrive as `Event::Grabbed`. mpv takes both requests in order on its own thread, the time right after the frame, before it plays on; a `time-pos` report read later is a later frame's.
-    pub fn grab(&self) {
-        self.send(GRAB, &[c"screenshot-raw".into(), c"video".into()]);
-        // SAFETY: the name lives through the call.
-        unsafe { mpv_get_property_async(self.handle, GRAB, c"time-pos".as_ptr(), DOUBLE) };
+    /// Ask for the frame mpv holds, at source size, and its time; they arrive as `Event::Grabbed`, unless mpv refused the requests (false). mpv takes both requests in order on its own thread, the time right after the frame, before it plays on; a `time-pos` report read later is a later frame's.
+    pub fn grab(&self) -> bool {
+        self.send(GRAB, &[c"screenshot-raw".into(), c"video".into()])
+            // SAFETY: the name lives through the call.
+            && unsafe { mpv_get_property_async(self.handle, GRAB, c"time-pos".as_ptr(), DOUBLE) }
+                >= 0
     }
 
     /// The picture in the reply to `screenshot-raw`: a map of `w`, `h`, `stride`, `format` (bgr0) and `data`.

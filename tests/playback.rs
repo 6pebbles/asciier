@@ -1153,12 +1153,19 @@ fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
 
 #[test]
 fn a_frame_taken_while_playing_is_named_by_its_time() {
-    // rows N5, P22: the name's time is that of the frame mpv holds, to 0.1 s (open_page of bin/ascii-viewer:2048 at tag python-final named it by the frame on screen); keys right after `r` keep the viewer busy while mpv answers and plays on (each `c` draws the frame again; 10 leave the colour as it was, and under load 40 outlasted an 8 s clip, whose end quit the viewer before the page came); seen before the fix, named by the clock when the answer was read: 5.1 to 5.4 s for frames at 1.1 and 1.2 s, and in a full parallel run without the keys `clip-ascii-1.8s.png` holding frame 41 (1.64 s)
+    // rows N5, P21, P22: the name's time is that of the frame mpv holds, to 0.1 s, for `s` and `r` alike (screenshot and open_page of bin/ascii-viewer:1621 and :2048 at tag python-final named it by the frame on screen); keys right after `s` keep the viewer busy while mpv answers and plays on (each `c` draws the frame again; 10 leave the colour as it was, and under load 40 outlasted an 8 s clip), keys right after `r` wait for the page; seen before the fix, named by the clock when the answer was read: with `r` and the keys 5.1 to 5.4 s for frames at 1.1 and 1.2 s, and in a full parallel run without them `clip-ascii-1.8s.png` holding frame 41 (1.64 s); with `s` and the keys, the clock put back in place of the frame's time: 1.3 and 1.4 s for frame 25 (1 s), 3 of 3
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
-    tty.send(&[&b"r"[..], &[b'c'; 10]].concat());
+    let at = tty.send(&[&b"s"[..], &[b'c'; 10]].concat());
+    let start = tty.expect(at, b"\x1b[7m saved ");
+    let end = tty.expect(start, b" \x1b[0m") - 5;
+    let shot = String::from_utf8(tty.out()[start..end].to_vec()).unwrap();
+    let taken = saved(&sandbox.path(&shot)).0;
+    // the page's export would take the same name within the same tenth
+    std::fs::remove_file(sandbox.path(&shot)).unwrap();
+    tty.send(b"r");
     tty.until("the page", |screen| screen.row(1).starts_with(" Render"));
     let name = page_name(&mut tty);
     let (grabbed, _) = exported(&mut tty, &sandbox, &name);
@@ -1166,6 +1173,7 @@ fn a_frame_taken_while_playing_is_named_by_its_time() {
     tty.until("the player", |screen| screen.row(24).starts_with("> "));
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
+    assert_eq!(shot, format!("clip-ascii-{}s.png", tenths(taken * 4)));
     assert_eq!(name, format!("clip-ascii-{}s.png", tenths(grabbed * 4)));
 }
 
