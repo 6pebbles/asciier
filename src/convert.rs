@@ -564,36 +564,59 @@ fn ffmpeg(args: &[&str]) -> Result<std::process::Output> {
     }
 }
 
-/// The source's frame at `seconds`, at full size, upright; at 0 s its first frame, taken without a seek, after which ffmpeg's webp_anim demuxer gives no frame at all.
+/// The source's frame at `seconds`, at full size, upright: ffmpeg seeks there before it reads the source, a seek after which ffmpeg n9.0.2 finds no frame of an animated WebP or a raw H.264 stream, not even at 0 s; at 0 s the first frame, taken without a seek; where the seek finds none though the source may run on past `seconds` (ffprobe tells no length, or a longer one) the source is decoded from its start to there.
 fn frame_at(source: &Path, seconds: f64) -> Result<RgbImage> {
     let (at, path) = (format!("{seconds:?}"), source.to_string_lossy());
-    let mut args = vec!["-v", "error", "-nostdin"];
-    if seconds > 0.0 {
-        args.extend(["-ss", &at]);
+    let seek = ["-ss", at.as_str()];
+    let grab = |before: &[&str], after: &[&str]| -> Result<(Option<RgbImage>, String)> {
+        let output = ffmpeg(
+            &[
+                &["-v", "error", "-nostdin"][..],
+                before,
+                &["-i", &*path],
+                after,
+                &["-frames:v", "1", "-f", "image2pipe", "-c:v", "ppm", "-"],
+            ]
+            .concat(),
+        )?;
+        let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Ok((ppm_frame(&mut BufReader::new(&output.stdout[..])), said))
+    };
+    let first: &[&str] = if seconds > 0.0 { &seek } else { &[] };
+    let (mut frame, mut said) = grab(first, &[])?;
+    if frame.is_none()
+        && said.is_empty()
+        && seconds > 0.0
+        && length(source).is_none_or(|length| seconds < length)
+    {
+        (frame, said) = grab(&[], &seek)?;
     }
-    args.extend([
-        "-i",
-        &path,
-        "-frames:v",
-        "1",
-        "-f",
-        "image2pipe",
-        "-c:v",
-        "ppm",
-        "-",
-    ]);
-    let output = ffmpeg(&args)?;
-    match ppm_frame(&mut BufReader::new(&output.stdout[..])) {
-        Some(frame) => Ok(frame),
-        None => {
-            let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(Error(if said.is_empty() {
-                format!("no frame at {at} s in {path}")
-            } else {
-                said
-            }))
-        }
-    }
+    frame.ok_or_else(|| {
+        Error(if said.is_empty() {
+            format!("no frame at {at} s in {path}")
+        } else {
+            said
+        })
+    })
+}
+
+/// The source's length in seconds, if ffprobe tells it.
+fn length(source: &Path) -> Option<f64> {
+    let probe = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(source)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&probe.stdout).trim().parse().ok()
 }
 
 /// Whether the GPU encodes H.264 at this size here: a render node, and a one-frame trial on it that works; libx264 otherwise.

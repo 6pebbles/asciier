@@ -50,7 +50,7 @@ const VIVID: &str =
 const HELD: &str =
     r#"n=0; while [ ! -e "$DUMP/go" ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n + 1)); done"#;
 
-/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw and its arguments in $DUMP/encode.args; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $END_STATUS: the encoder ends with that status, whatever the real one's; $CHATTER: the decoder says that line on stderr again and again while it decodes; $DECODE_BYTES: the decoder fails after that many bytes; $STALL: the decoder gives that many bytes, then nothing, its pipe open, until $DUMP/go, `$DUMP/held` said first; $GRAB: a frame grab ignores Ctrl-C and waits for $DUMP/go, `$DUMP/held` said first.
+/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw and its arguments in $DUMP/encode.args; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $END_STATUS: the encoder ends with that status, whatever the real one's; $CHATTER: the decoder says that line on stderr again and again while it decodes; $DECODE_BYTES: the decoder fails after that many bytes; $STALL: the decoder gives that many bytes, then nothing, its pipe open, until $DUMP/go, `$DUMP/held` said first; each frame grab's arguments a line in $DUMP/grabs; $GRAB: a frame grab ignores Ctrl-C and waits for $DUMP/go, `$DUMP/held` said first.
 const FFMPEG: &str = r#"#!/bin/sh
 held() { HELD; }
 case " $* " in
@@ -75,6 +75,7 @@ case " $* " in
     if [ -n "$STALL" ]; then "$REAL" "$@" 2> /dev/null | head -c "$STALL" | tee "$DUMP/decode.ppm"; touch "$DUMP/held"; held; exit 0; fi
     "$REAL" "$@" | tee "$DUMP/decode.ppm" ;;
 *" -frames:v "*)
+    printf '%s\n' "$*" >> "$DUMP/grabs"
     if [ -n "$GRAB" ]; then trap '' INT; touch "$DUMP/held"; held; fi
     exec "$REAL" "$@" ;;
 *) exec "$REAL" "$@" ;;
@@ -1477,6 +1478,81 @@ fn input_ffmpeg_cannot_read_is_exit_1_with_its_words() {
         .collect();
     made.sort();
     assert_eq!(made, Vec::<String>::new());
+}
+
+#[test]
+fn a_frame_is_found_at_its_time_where_ffmpeg_cannot_seek() {
+    // rows C11, C12: frame_at of bin/ascii-convert:350 at tag python-final seeked before ffmpeg read the source: an animation or anything else ffmpeg decodes is a video (C11), whose `--at` frame is the one at that time, and a time without one is `no frame at <s> s in <path>` (C12); with ffmpeg n9.0.2 that seek finds no frame in an animated WebP or a raw H.264 stream, whose length ffprobe cannot tell, so the old converter ended `no frame at 0.1 s in spin.webp`, exit 1 (seen here): the frame is now decoded from the start, a second grab, and is the one a twin of the same frames that ffmpeg can seek gives at that time (a lossless MKV; the MP4 the stream came out of), not the first; a time past the end of a source whose length ffprobe tells fails at once, one grab, never decoded from the start
+    let mut sandbox = Sandbox::new();
+    let moving = "testsrc2=s=80x44:r=10:d=0.3,format=rgb24";
+    for (out, codec) in [
+        (
+            "spin.webp",
+            &["-c:v", "libwebp_anim", "-lossless", "1", "-loop", "0"][..],
+        ),
+        ("spin.mkv", &["-c:v", "ffv1"][..]),
+    ] {
+        let path = sandbox.path(out);
+        ffmpeg(
+            &sandbox,
+            &[
+                &["-f", "lavfi", "-i", moving][..],
+                codec,
+                &[path.to_str().unwrap()],
+            ]
+            .concat(),
+        );
+    }
+    let mp4 = silent_clip(&sandbox, "clip.mp4", 2.0, "160x90", 25);
+    let raw = sandbox.path("clip.264");
+    ffmpeg(
+        &sandbox,
+        &[
+            "-i",
+            mp4.to_str().unwrap(),
+            "-c:v",
+            "copy",
+            "-f",
+            "h264",
+            raw.to_str().unwrap(),
+        ],
+    );
+    wrap_ffmpeg(&mut sandbox);
+    let grabbed = |args: &[&str]| {
+        let _ = std::fs::remove_file(sandbox.path("grabs"));
+        let ran = convert(&sandbox, args);
+        let grabs = std::fs::read_to_string(sandbox.path("grabs")).unwrap_or_default();
+        (ran, grabs.lines().count())
+    };
+    for (source, twin, at) in [
+        ("spin.webp", "spin.mkv", "0.1"),
+        ("clip.264", "clip.mp4", "1.2"),
+    ] {
+        let (ran, grabs) = grabbed(&["--at", at, "-W", "320", "-o", "seek.png", source]);
+        assert_eq!((ran.code, grabs), (Some(0), 2), "{source}: {ran:?}");
+        let twin = converted(&sandbox, &["--at", at, "-W", "320", "-o", "twin.png", twin]);
+        let first = converted(
+            &sandbox,
+            &["--at", "0", "-W", "320", "-o", "first.png", source],
+        );
+        let drawn = pixels(&sandbox.path("seek.png"));
+        assert!(
+            drawn == pixels(&twin) && drawn != pixels(&first),
+            "{source}"
+        );
+    }
+    for (source, at, grabs) in [("clip.mp4", "99", 1), ("clip.264", "9", 2)] {
+        let (ran, made) = grabbed(&["--at", at, source]);
+        assert_eq!(
+            (ran.code, ran.stdout.as_str(), ran.stderr, made),
+            (
+                Some(1),
+                "",
+                format!("asciier: no frame at {at}.0 s in {source}\n"),
+                grabs
+            )
+        );
+    }
 }
 
 #[test]
