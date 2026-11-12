@@ -139,7 +139,7 @@ fn keys_drawn(tty: &Tty) -> usize {
 
 #[test]
 fn the_scope_owns_the_screen_until_the_viewer_ends() {
-    // rows A1, N1: run and main of bin/ascii-viewer:2396 and :2465 at tag python-final (tests/test_viewer.py:629): `scope` from PATH with SCOPE_SPARE_ROWS=1 and SCOPE_TARGET the player's stream, stdin /dev/null, stdout and stderr the terminal, a child in the viewer's session, ended by SIGTERM and waited for before the viewer ends; PIPEWIRE_PROPS not handed on (the old viewer set it for its mpv alone); N1: the stream `asciier-<pid>`
+    // rows A1, V6, N1: run and main of bin/ascii-viewer:2396 and :2465 at tag python-final (tests/test_viewer.py:629): `scope` from PATH with SCOPE_SPARE_ROWS=1 and SCOPE_TARGET the player's stream, stdin /dev/null, stdout and stderr the terminal, a child in the viewer's session, ended by SIGTERM and waited for before the viewer ends (V6: the child goes with the viewer, here at `q`); PIPEWIRE_PROPS not handed on (the old viewer set it for its mpv alone); N1: the stream `asciier-<pid>`
     let sandbox = Sandbox::new();
     let tone = tone(&sandbox, "tone.m4a", 10.0);
     let mut tty = sandbox.launch().arg(&tone).size(SMALL).start();
@@ -326,7 +326,7 @@ fn picture_keys_do_nothing() {
 
 #[test]
 fn playback_keys_act() {
-    // rows A4, P9, P10, P11, P12, P13: AUDIO_KEYS of bin/ascii-viewer:136 at tag python-final: `space` and `p`, the seeks with `h j k l` (SEEKS), the speeds with `\` (SPEEDS), the volumes (VOLUMES), `m`, `L`, `f`, `Q`, with the steps, limits and toasts of video
+    // rows A4, P9, P10, P11, P12, P13: AUDIO_KEYS of bin/ascii-viewer:136 at tag python-final: `space` and `p`, the seeks with `h j k l` (SEEKS), the speeds with `\` (SPEEDS), the volumes (VOLUMES), `m`, `L`, `f`, `Q`, with the steps, limits and toasts of video; of P9 the steps to the second, the clamp at the start and a paused seek staying paused, not its exactness: with ao=null a paused seek of audio alone lands 0.19 s short of its target (through PipeWire it landed on it, efdfcd2), which a clock of whole seconds shows as the step or a second less; tests/playback.rs seeks_move_by_their_steps_and_stop_at_both_ends pins exactness on a video
     let sandbox = Sandbox::new();
     let clients = format!(
         r#"[{{"pid": {}, "address": "0x5ca1ab1e"}}]"#,
@@ -340,7 +340,7 @@ fn playback_keys_act() {
     tty.await_status("| ");
     tty.send(DOWN);
     tty.await_status("| 00:00 / 01:10");
-    // from the start forward by the step, the second shown the step's or, mpv a little short of it (the ignored test below), the one before; back to the start, held there
+    // from the start forward by the step, the second shown the step's or, mpv a little short of it, the one before; back to the start, held there
     let seeks: [(&[u8], &[u8], u32); 6] = [
         (b"l", b"h", 5),
         (RIGHT, LEFT, 5),
@@ -492,7 +492,7 @@ fn help_stops_the_scope_and_pauses_until_it_closes() {
 
 #[test]
 fn quitting_under_help_does_not_wait_on_the_stopped_scope() {
-    // rows N14, A6, V5: SIGTERM or Ctrl-C while the keys show and the scope is stopped: it is continued and ended, exit 0, the terminal given back; the old viewer waited on the stopped scope for ever (A6a)
+    // rows N14, A6, V5, V6: SIGTERM or Ctrl-C while the keys show and the scope is stopped: it is continued and ended, exit 0, the terminal given back (V6: the child goes with the viewer, by a signal too); the old viewer waited on the stopped scope for ever (A6a)
     let sandbox = Sandbox::new();
     let tone = tone(&sandbox, "tone.m4a", 30.0);
     for (what, key) in [("SIGTERM", None), ("Ctrl-C", Some(b"\x03"))] {
