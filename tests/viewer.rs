@@ -493,7 +493,7 @@ fn kitty_ligatures_are_off_while_it_runs() {
 
 #[test]
 fn keys_without_a_use_on_a_video_do_nothing() {
-    // row V26: `d D u y v + = - H J K`, Esc, Enter (tests/test_viewer.py:1827 at tag python-final)
+    // rows V26, V15: `d D u y v + = - H J K`, Esc, Enter (tests/test_viewer.py:1827 at tag python-final); the toast goes out in a frame's synchronized update, with the picture and the erased bottom row (bin/ascii-viewer:2188 and :2209)
     let sandbox = Sandbox::new();
     let video = clip(&sandbox, "clip.mp4", 20.0, "160x90", 25);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
@@ -506,6 +506,23 @@ fn keys_without_a_use_on_a_video_do_nothing() {
         find(&tty.out(), b"\x1b[7m", at),
         Some(end - sentinel.len()),
         "no toast of their own"
+    );
+    let update = update_at(&tty, end - sentinel.len());
+    assert!(
+        update.starts_with(b"\x1b[?2026h\x1b[0m"),
+        "{}",
+        shown(&update)
+    );
+    let (erased, toasted) = (
+        find(&update, b"\x1b[24;1H\x1b[2K", 0),
+        find(&update, b"\x1b[24;1H\x1b[7m muted ", 0),
+    );
+    assert!(erased.is_some_and(|erased| toasted.is_some_and(|toasted| erased < toasted)));
+    let rows = picture_rows(&update);
+    assert!(
+        rows.iter().any(|&(row, _)| row < 24),
+        "no picture row: {}",
+        shown(&update)
     );
     tty.until("still playing", |screen| {
         screen.row(24).starts_with("> 00:")
