@@ -686,6 +686,27 @@ fn decoder_group() -> MutexGuard<'static, libc::pid_t> {
     DECODER.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// A video's decoder and encoder, each in a session of its own; a decoder whose encoder cannot start is killed and reaped.
+fn start(
+    decoder: &mut Command,
+    encoder: &mut Command,
+) -> std::result::Result<(Child, Child), Stop> {
+    let spawn = |command: &mut Command| {
+        own_session(command)
+            .spawn()
+            .map_err(|e| Stop::Failed(format!("cannot run ffmpeg: {e}")))
+    };
+    let mut decode = spawn(decoder)?;
+    match spawn(encoder) {
+        Ok(encode) => Ok((decode, encode)),
+        Err(stop) => {
+            kill(decode.id() as libc::pid_t);
+            let _ = decode.wait();
+            Err(stop)
+        }
+    }
+}
+
 /// `source` to `out`: ffmpeg decodes at the output's detail, each frame is drawn, ffmpeg encodes; `first` is the frame at 0 s, uncropped.
 fn video(
     options: &Options,
@@ -742,12 +763,7 @@ fn video(
     if INTERRUPTED.load(Ordering::SeqCst) {
         return Err(Stop::Interrupted(None));
     }
-    let spawn = |command: &mut Command| {
-        command
-            .spawn()
-            .map_err(|e| Stop::Failed(format!("cannot run ffmpeg: {e}")))
-    };
-    let mut decode = spawn(own_session(
+    let (mut decode, mut encode) = start(
         Command::new("ffmpeg")
             .args(["-v", "error", "-nostdin", "-i"])
             .arg(source)
@@ -764,8 +780,6 @@ fn video(
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped()),
-    ))?;
-    let mut encode = spawn(own_session(
         Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
             .args(device)
@@ -778,7 +792,7 @@ fn video(
             .args(["-c:a", "aac", "-af", &pad, "-shortest"])
             .arg(out)
             .stdin(Stdio::piped()),
-    ))?;
+    )?;
     let shown = if total > 0 {
         total.to_string()
     } else {
@@ -1118,6 +1132,25 @@ mod tests {
             .map(|e| e.0);
         assert_eq!(refused.as_deref(), Some("crop over 179 megapixels"));
         assert!(crop(&white, [0.0, 0.0, 1e300, 1.0]).is_err());
+    }
+
+    #[test]
+    fn a_decoder_whose_encoder_cannot_start_is_killed_and_reaped() {
+        // a black-box run cannot fail the encoder's spawn alone: both resolve the same ffmpeg on PATH within microseconds
+        let children = || std::fs::read_to_string("/proc/thread-self/children").unwrap();
+        let before = children();
+        let said = match start(
+            Command::new("sleep").arg("30"),
+            &mut Command::new("/nonexistent/ffmpeg"),
+        ) {
+            Err(Stop::Failed(said)) => said,
+            _ => panic!("no failure"),
+        };
+        assert_eq!(
+            said,
+            "cannot run ffmpeg: No such file or directory (os error 2)"
+        );
+        assert_eq!(children(), before, "the decoder left as a child");
     }
 
     #[test]
