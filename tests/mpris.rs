@@ -605,24 +605,48 @@ fn a_seek_from_the_stopped_state_counts_from_the_frame_on_screen() {
 
 #[test]
 fn a_step_back_right_after_a_seek_from_the_stopped_state_ends_paused() {
-    // rows P8a, P15: `l,` in one batch after MPRIS Stop: the seek leaves the stopped state, `,` pauses on a frame and the clip stays there; the play that waited for mpv to run the seek came after `,` and played on, and the viewer, which believed it paused, did not quit at the end (seen before a step dropped the play: `> 00:01`, `> 00:02`, `> 00:07` after the window, 3 of 3)
+    // rows P8a, P15: `l,` in one batch after MPRIS Stop: the seek leaves the stopped state and `,` pauses on the frame before its target, never drawn playing, as the old viewer did (seek_to and frame_step of bin/ascii-viewer:1423 and :1441 at tag python-final; run in this harness: stopped on frame 25, `l,` 149); seen before a step dropped the play: `> 00:01`, `> 00:02`, `> 00:07` after the window (3 of 3), and before the requests went one at a time on the frame before the held one (24 for 25); a wait for `| ` alone passed without the fix (2 of 9): it found the pause at the clip's end
+    steps_from_the_stopped_state(b"l,", 124);
+}
+
+#[test]
+fn a_step_right_after_a_seek_from_the_stopped_state_shows_the_target() {
+    // rows P8a, P15: `l.` in one batch after MPRIS Stop: the seek plays from its target and `.` pauses there: the old viewer started playing at the target and its step showed the target's frame, the first it read (seek_to and frame_step of bin/ascii-viewer:1423 and :1441 at tag python-final; run in this harness: stopped on frame 25, `l.` 150); seen before the fix: played on to the clip's end, the mark `|` and the run going on there
+    steps_from_the_stopped_state(b"l.", 125);
+}
+
+/// `keys` in one write after MPRIS Stop: they end paused `on` frames after the held one, never drawn playing, and stay there; the held frame is the one `s` takes (N5: mpv's; the old viewer's `s` took another, P21a, so the old values come from a run that read the screen).
+fn steps_from_the_stopped_state(keys: &[u8], on: u32) {
     let mut sandbox = Sandbox::new();
     let bus = Bus::new(&mut sandbox);
-    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     let remote = Remote::new(&sandbox, &bus, tty.pid);
     tty.await_playing();
     remote.send("Stop", &[]);
     tty.await_status(". ");
-    tty.send(b"l,");
-    tty.await_status("| ");
+    // the screen can lag mpv under load: the frame `s` takes is the one held
+    let held = taken(&mut tty, &sandbox);
+    tty.until("the frame taken", |screen| frame(screen) == held);
+    tty.await_status(". ");
+    let at = tty.send(keys);
+    let (target, clock) = (held + on, format!("| 00:{:02}", (held + on) / 25));
+    tty.until(&format!("frame {target} and {clock:?}"), |screen| {
+        frame(screen) == target % 256 && screen.row(24).starts_with(&clock)
+    });
     // a window for what must not happen: playing on
-    std::thread::sleep(Duration::from_millis(1500));
-    let (status, on) = (tty.screen().row(24), frame(tty.screen()));
     std::thread::sleep(Duration::from_millis(500));
-    let later = (tty.screen().row(24), frame(tty.screen()));
-    assert!(status.starts_with("| "), "{status:?} on frame {on}");
-    assert_eq!(later, (status, on));
+    let screen = tty.screen();
+    let (status, now) = (screen.row(24), frame(screen));
+    assert!(
+        status.starts_with(&clock) && now == target % 256,
+        "{status:?} on frame {now}"
+    );
+    let marks = replay(&tty.out()[at..], SMALL, |screen| screen.row(24));
+    assert!(
+        !marks.iter().any(|row| row.starts_with("> ")),
+        "drawn playing: {marks:?}"
+    );
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }
