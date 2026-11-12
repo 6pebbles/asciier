@@ -378,17 +378,20 @@ fn seek_keys_in_one_batch_add_up_to_one_seek() {
 
 #[test]
 fn a_toast_shows_on_the_bottom_row_for_a_while() {
-    // row V16: reverse video on the bottom row, 1.2 s (bin/ascii-viewer:118), cut to cols - 2
+    // row V16: reverse video on the bottom row, 1.2 s (TOAST, bin/ascii-viewer:118 at tag python-final), cut to cols - 2
     let sandbox = Sandbox::new();
     let mut tty = shown_still(&sandbox);
     let at = tty.send(b"3");
-    let shown_at = Instant::now();
+    let sent = Instant::now();
     tty.expect(at, b"\x1b[60;1H\x1b[7m level 5% darker \x1b[0m");
+    let seen = Instant::now();
     tty.until("the bottom row without the toast", |screen| {
         screen.row(60).is_empty()
     });
-    let lasted = shown_at.elapsed();
+    // its time runs from the key: at least 1.2 s after it; seen, it lasts at most 1.2 s and what the end's draw is late by
+    let (lasted, visible) = (sent.elapsed(), seen.elapsed());
     assert!(lasted >= Duration::from_millis(1100), "{lasted:?}");
+    assert!(visible < Duration::from_millis(2500), "{visible:?}");
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
     // a narrow window: 12 columns, the text cut to 10
