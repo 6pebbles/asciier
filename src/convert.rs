@@ -174,6 +174,12 @@ pub fn main(args: impl Iterator<Item = OsString>) -> u8 {
 /// Ctrl-C's end once its cleanup and messages are done: death by SIGINT, which a shell shows as 130 and which stops a script that ran the converter, where an exit 130 lets the script go on (N25); 130 only should the signal return.
 fn die_by_sigint() -> u8 {
     let _ = std::io::stdout().flush();
+    raise_sigint();
+    130
+}
+
+/// SIGINT at its default, raised in the calling thread: the process ends by it.
+fn raise_sigint() {
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
         let mut none = std::mem::zeroed();
@@ -181,7 +187,6 @@ fn die_by_sigint() -> u8 {
         libc::pthread_sigmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
         libc::raise(libc::SIGINT);
     }
-    130
 }
 
 /// SIGINT's handler: Ctrl-C noted, the Ctrl-C thread woken; errno kept for the code it interrupted.
@@ -195,7 +200,7 @@ extern "C" fn on_ctrl_c(_: libc::c_int) {
     }
 }
 
-/// Ctrl-C for the whole run: a handler notes it and wakes a thread of its own, which, before a video's encoding, kills every child of the main thread: a child may outlive the terminal's SIGINT, or get none when it was sent to the converter alone; while a video's frames are read it kills the decoder's group, whose pipe the reader still holds open. A child starts with SIGINT as usual: exec resets a handler, and no signal is blocked. A SIGINT the parent left ignored stays so: a shell without job control starts a background job so, and the terminal's Ctrl-C is not that job's.
+/// Ctrl-C for the whole run: a handler notes it and wakes a thread of its own, which, before a video's encoding, kills every child of the main thread and ends the run at once, whatever the main thread is doing (drawing, writing): nothing made then counts (row C10), and a child may outlive the terminal's SIGINT, or get none when it was sent to the converter alone; while a video's frames are read it kills the decoder's group, whose pipe the reader still holds open. A child starts with SIGINT as usual: exec resets a handler, and no signal is blocked. A SIGINT the parent left ignored stays so: a shell without job control starts a background job so, and the terminal's Ctrl-C is not that job's.
 fn catch_ctrl_c() {
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     let mut ends = [0; 2];
@@ -232,6 +237,7 @@ fn catch_ctrl_c() {
             {
                 unsafe { libc::kill(child, libc::SIGKILL) };
             }
+            raise_sigint();
         }
     });
     // SA_RESTART: a read, write or wait that SIGINT lands in goes on, in libchafa's threads too

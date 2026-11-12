@@ -1178,7 +1178,7 @@ fn ctrl_c_while_the_encoder_finishes_ends_it_quietly_too() {
 
 #[test]
 fn ctrl_c_while_a_picture_is_written_prints_no_path() {
-    // rows C10, C4, N25: main of bin/ascii-convert:561 at tag python-final: Ctrl-C while the PNG is written: no message, the file as far as it got (C10), no path, which goes with a done run (C4), then death by SIGINT; `-o` names a FIFO whose pipe of one page is full, so the write waits, then SIGINT, then the FIFO read to its end: the whole PNG went through it; seen at 6154efe (reviewer's probe): the path printed, exit 130
+    // rows C10, C4, N25: main of bin/ascii-convert:561 at tag python-final: Ctrl-C ends a still at once, whatever its run is doing, here waiting in the write of its PNG: no message, the file as far as it got (C10), no path, which goes with a done run (C4), then death by SIGINT (N25); `-o` names a FIFO whose pipe of one page is full, so the write waits, then SIGINT: the run ends with the pipe still full, whose page is then all that went through, a PNG cut short; the old converter, which could not open a FIFO (Pillow opens its output `w+b`), ended at once on a regular file: SIGINT during its save gave exit 130 and the PNG as far as it got (983253 of 1286502 bytes, seen here); seen at 6154efe (reviewer's probe): the path printed, exit 130; at d189788: the run ended only once the FIFO was read, the whole PNG written
     let sandbox = Sandbox::new();
     save(&gradient(80, 40), &sandbox.path("pic.png"));
     let fifo = sandbox.path("out.png");
@@ -1207,19 +1207,20 @@ fn ctrl_c_while_a_picture_is_written_prints_no_path() {
         std::thread::sleep(Duration::from_millis(10));
     }
     run.interrupt();
-    // SAFETY: fcntl on a descriptor this test owns: reads wait again.
-    unsafe { libc::fcntl(fd, libc::F_SETFL, 0) };
-    let mut bytes = Vec::new();
-    png.read_to_end(&mut bytes).unwrap();
+    // the end comes with the pipe still full: nothing here reads it before
     let (status, out, err) = run.finish();
     assert_eq!(
         (status.signal(), out.as_str(), err.as_str()),
         (Some(libc::SIGINT), "", "")
     );
+    // SAFETY: fcntl on a descriptor this test owns: reads wait again.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, 0) };
+    let mut bytes = Vec::new();
+    png.read_to_end(&mut bytes).unwrap();
     assert!(
-        bytes.len() > 4096
+        bytes.len() == 4096
             && bytes.starts_with(b"\x89PNG\r\n\x1a\n")
-            && bytes.ends_with(b"IEND\xae\x42\x60\x82"),
+            && !bytes.ends_with(b"IEND\xae\x42\x60\x82"),
         "{} bytes",
         bytes.len()
     );
