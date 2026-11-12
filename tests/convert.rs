@@ -2627,7 +2627,7 @@ fn ctrl_c_before_the_first_frame_ends_as_before_the_encoding() {
 
 #[test]
 fn an_encoder_that_quits_is_exit_1_not_a_hang() {
-    // row X10: tests/test_convert.py:335 at tag python-final: the encoder quits after reading three frames, or at once: exit 1, on stderr the progress then `asciier: ffmpeg could not encode the video` and nothing else (no traceback, no complaint of a broken pipe from the decoder, killed before its pipe closes), nothing printed, no hang, nothing left running
+    // rows X10, N1: tests/test_convert.py:335 at tag python-final: the encoder quits after reading three frames, or at once: exit 1, on stderr the progress then `asciier: ffmpeg could not encode the video` (N1; the old converter's `ascii-convert: `) and nothing else (no traceback, no complaint of a broken pipe from the decoder), nothing printed, no hang, nothing left running; the decoder here is a process group, the wrapper's shell and the ffmpeg it pipes through tee, killed whole before its pipe closes; the old converter killed the decoder's process alone (bin/ascii-convert:484), so in this harness that ffmpeg ran on and complained of the broken pipe after the message, and did not where it was the decoder itself (seen here, 3 of 3 each)
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "quit.mp4", 2.0, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
