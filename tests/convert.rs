@@ -1348,10 +1348,14 @@ fn children_start_with_no_signal_blocked() {
 
 #[test]
 fn animations_and_pictures_only_ffmpeg_reads_convert_as_video() {
-    // rows C11, N7, C3: bin/ascii-convert:527 and :538 at tag python-final: an animation is no still: a GIF or an APNG converts as a video, `<stem>-ascii.mp4`, at its own rate, every frame; N7: so does a picture the built-in decoders do not take (PCX, which the old converter opened as a still and wrote as `pic-ascii.png`)
+    // rows C11, N7, C3: bin/ascii-convert:527 and :538 at tag python-final: an animation is no still: a GIF, an animated WebP or an APNG converts as a video, `<stem>-ascii.mp4`, at its own rate, every frame; N7: so does a picture the built-in decoders do not take (PCX, which the old converter opened as a still and wrote as `pic-ascii.png`); the WebP's first frame taken without a seek, after which ffmpeg's webp_anim demuxer gives no frame (with ffmpeg n9.0.2 the old converter, seeking to 0 s, ended `no frame at 0 s in spin.webp`, exit 1)
     let sandbox = Sandbox::new();
     let moving = "testsrc2=s=80x44:r=10:d=0.3";
-    for (out, extra) in [("anim.gif", &[][..]), ("moving.png", &["-f", "apng"][..])] {
+    for (out, extra) in [
+        ("anim.gif", &[][..]),
+        ("spin.webp", &["-c:v", "libwebp_anim", "-loop", "0"][..]),
+        ("moving.png", &["-f", "apng"][..]),
+    ] {
         let path = sandbox.path(out);
         ffmpeg(
             &sandbox,
@@ -1378,14 +1382,20 @@ fn animations_and_pictures_only_ffmpeg_reads_convert_as_video() {
     );
     let runs = [
         vec!["-W", "320", "anim.gif"],
+        vec!["-W", "320", "spin.webp"],
         vec!["-W", "320", "moving.png"],
         vec!["-W", "320", "pic.pcx"],
     ];
     let made = converts(&sandbox, &runs);
     for ((ran, out), frames) in made
         .iter()
-        .zip(["anim-ascii.mp4", "moving-ascii.mp4", "pic-ascii.mp4"])
-        .zip([3, 3, 1])
+        .zip([
+            "anim-ascii.mp4",
+            "spin-ascii.mp4",
+            "moving-ascii.mp4",
+            "pic-ascii.mp4",
+        ])
+        .zip([3, 3, 3, 1])
     {
         assert_eq!(
             (ran.code, ran.stdout.clone()),
@@ -1396,15 +1406,13 @@ fn animations_and_pictures_only_ffmpeg_reads_convert_as_video() {
         assert_eq!(streams(&sandbox, &out), ["video h264 320x190"]);
         assert_eq!(frames_in(&sandbox, &out), frames);
     }
-    assert_eq!(
-        entry(
-            &sandbox,
-            &sandbox.path("anim-ascii.mp4"),
-            "v:0",
-            "avg_frame_rate"
-        ),
-        "10/1"
-    );
+    for out in ["anim-ascii.mp4", "spin-ascii.mp4"] {
+        assert_eq!(
+            entry(&sandbox, &sandbox.path(out), "v:0", "avg_frame_rate"),
+            "10/1",
+            "{out}"
+        );
+    }
     assert!(!sandbox.path("pic-ascii.png").exists());
 }
 

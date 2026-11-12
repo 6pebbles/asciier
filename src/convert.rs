@@ -564,15 +564,14 @@ fn ffmpeg(args: &[&str]) -> Result<std::process::Output> {
     }
 }
 
-/// The source's frame at `seconds`, at full size, upright.
+/// The source's frame at `seconds`, at full size, upright; at 0 s its first frame, taken without a seek, after which ffmpeg's webp_anim demuxer gives no frame at all.
 fn frame_at(source: &Path, seconds: f64) -> Result<RgbImage> {
     let (at, path) = (format!("{seconds:?}"), source.to_string_lossy());
-    let output = ffmpeg(&[
-        "-v",
-        "error",
-        "-nostdin",
-        "-ss",
-        &at,
+    let mut args = vec!["-v", "error", "-nostdin"];
+    if seconds > 0.0 {
+        args.extend(["-ss", &at]);
+    }
+    args.extend([
         "-i",
         &path,
         "-frames:v",
@@ -582,7 +581,8 @@ fn frame_at(source: &Path, seconds: f64) -> Result<RgbImage> {
         "-c:v",
         "ppm",
         "-",
-    ])?;
+    ]);
+    let output = ffmpeg(&args)?;
     match ppm_frame(&mut BufReader::new(&output.stdout[..])) {
         Some(frame) => Ok(frame),
         None => {
