@@ -124,14 +124,13 @@ enum Busy {
         anchor: bool,
         from: Option<f64>,
     },
-    /// A step forward: done once mpv has reported its mark and is paused again. `from`: the position it left, paused there when `rested`; `drops`: mpv's count of frames let go then.
+    /// A step forward: done once mpv has reported its mark and is paused again. `from`: the position it left, paused there when `rested`.
     Step {
         mark: i64,
         marked: bool,
         settling: bool,
         from: f64,
         rested: bool,
-        drops: i64,
     },
 }
 
@@ -725,7 +724,6 @@ impl Mpv {
                     settling: false,
                     from: self.time,
                     rested,
-                    drops: self.drops,
                 });
                 if !self.order(OP, &["frame-step"]) {
                     self.busy = None;
@@ -861,17 +859,12 @@ impl Mpv {
                 self.base = Some((landed, self.drops));
                 self.back = from.filter(|_| !self.tail);
             }
-            Some(Busy::Step {
-                from,
-                rested,
-                drops,
-                ..
-            }) => {
+            Some(Busy::Step { from, rested, .. }) => {
                 // a step that played the sound out (mpv reports the end later) leaves the position at its end
                 let out = self.at_end || self.length.is_some_and(|length| landed > length - 0.001);
-                // a frame mpv handed over, or let go untaken, or the position of the next frame: a step that moved
+                // a frame mpv handed over, or the position of the next frame: a step that moved; mpv's count of frames let go untaken tells nothing here, as it reports one let go before the step during it (seen under load: a step on the last frame taken for one that moved)
                 let next = !out && (landed - from).abs() >= 0.75 * self.frame;
-                if self.fresh || self.drops > drops || next {
+                if self.fresh || next {
                     self.back = rested.then_some(from);
                     (self.seen, self.prev) = (Some((landed, self.drops)), None);
                     self.base = Some((landed, self.drops));
