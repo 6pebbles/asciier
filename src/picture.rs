@@ -332,7 +332,12 @@ pub fn resize_box(picture: &RgbImage, w: u32, h: u32) -> RgbImage {
     RgbImage::from_raw(w, h, pixels).expect("sized buffer")
 }
 
-/// Packed RGB of `w` x `h` reduced or enlarged to `ow` x `oh` by a box filter, bit for bit as Pillow's BOX: along x, then along y, each pass in 22-bit fixed point rounded to 8 bits; a pass whose size does not change is skipped.
+/// Whether Pillow 13 resizes `w` x `h` to `ow` x `oh` along y first, as the Python tools ran it: when the height shrinks by more than twice what the width does (libImaging/Resample.c, ImagingResampleInner; Pillow 12 always went along x first). Each pass rounds, so the order shows in the result.
+pub fn vertical_first(w: usize, h: usize, ow: usize, oh: usize) -> bool {
+    h > oh && (h - oh) as i64 > (w as i64 - ow as i64) * 2
+}
+
+/// Packed RGB of `w` x `h` reduced or enlarged to `ow` x `oh` by a box filter, bit for bit as Pillow's BOX: along one axis, then the other (`vertical_first`), each pass in 22-bit fixed point rounded to 8 bits; a pass whose size does not change is skipped.
 pub fn box_filter(rgb: &[u8], w: usize, h: usize, ow: usize, oh: usize) -> Vec<u8> {
     const BITS: u32 = 22;
     // per output sample: the first source sample it covers, how many, and the weight of each
@@ -355,11 +360,10 @@ pub fn box_filter(rgb: &[u8], w: usize, h: usize, ow: usize, oh: usize) -> Vec<u
         (0..out).map(covered).collect()
     }
     let mean = |sum: i32, weight: i32| ((sum * weight + (1 << (BITS - 1))) >> BITS).min(255) as u8;
-    let (mut pixels, mut width) = (std::borrow::Cow::Borrowed(rgb), w);
-    if ow != w {
-        let (across, mut out) = (spans(w, ow), Vec::with_capacity(ow * h * 3));
+    let across = |pixels: &[u8]| {
+        let (columns, mut out) = (spans(w, ow), Vec::with_capacity(pixels.len() / w * ow));
         for row in pixels.chunks_exact(w * 3) {
-            for &(first, count, weight) in &across {
+            for &(first, count, weight) in &columns {
                 let covered = row[first * 3..(first + count) * 3].as_chunks::<3>().0;
                 let sums = covered
                     .iter()
@@ -367,9 +371,9 @@ pub fn box_filter(rgb: &[u8], w: usize, h: usize, ow: usize, oh: usize) -> Vec<u
                 out.extend(sums.map(|sum| mean(sum, weight)));
             }
         }
-        (pixels, width) = (out.into(), ow);
-    }
-    if oh != h {
+        out
+    };
+    let down = |pixels: &[u8], width: usize| {
         let (line, mut out) = (width * 3, Vec::with_capacity(width * oh * 3));
         let mut sums = vec![0; line];
         for (first, count, weight) in spans(h, oh) {
@@ -381,9 +385,15 @@ pub fn box_filter(rgb: &[u8], w: usize, h: usize, ow: usize, oh: usize) -> Vec<u
             }
             out.extend(sums.iter().map(|&sum| mean(sum, weight)));
         }
-        pixels = out.into();
+        out
+    };
+    match (ow != w, oh != h) {
+        (false, false) => rgb.to_vec(),
+        (true, false) => across(rgb),
+        (false, true) => down(rgb, w),
+        _ if vertical_first(w, h, ow, oh) => across(&down(rgb, w)),
+        _ => down(&across(rgb), ow),
     }
-    pixels.into_owned()
 }
 
 /// The width to rasterize an SVG of `size` at for `want` px across: `want`, as long as its long side stays within `SVG_MAX`.
@@ -1580,6 +1590,9 @@ mod tests {
             ((1920, 1080), (1280, 720), 0x043a_2ef8_b3e4_638e),
             ((640, 360), (640, 90), 0x0cde_5960_9eaf_63c4),
             ((333, 211), (100, 211), 0xba04_cc7a_e414_f4ad),
+            // Pillow 13 goes along y first here, and the other order rounds some bytes apart
+            ((90, 160), (64, 51), 0x0f3d_6031_f3f2_fd7a),
+            ((900, 1600), (640, 508), 0xbdd2_58ba_1235_99df),
         ] {
             assert_eq!(
                 fnv(&box_filter(&pattern(w, h), w, h, ow, oh)),
@@ -1587,6 +1600,26 @@ mod tests {
                 "{w} x {h} to {ow} x {oh}"
             );
         }
+    }
+
+    #[test]
+    fn the_pass_order_is_pillow_13s() {
+        // rows L6, G7: libImaging/Resample.c of Pillow 13, ImagingResampleInner: along y first when the height shrinks by more than twice what the width does
+        assert!(vertical_first(900, 1600, 640, 508));
+        assert!(
+            !vertical_first(100, 160, 70, 100),
+            "a tie goes along x first"
+        );
+        assert!(vertical_first(100, 161, 70, 100));
+        assert!(
+            vertical_first(50, 160, 60, 51),
+            "a widened width counts below zero"
+        );
+        assert!(
+            !vertical_first(1280, 720, 640, 808),
+            "a taller output goes along x first"
+        );
+        assert!(!vertical_first(640, 360, 320, 360));
     }
 
     #[test]

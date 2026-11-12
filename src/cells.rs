@@ -274,32 +274,35 @@ fn light(rgb: &[u8], w: usize, h: usize, cols: usize, rows: usize) -> Vec<(Rgb, 
     let light: Vec<f32> = light
         .map(|p| shares[0][p[0] as usize] + shares[1][p[1] as usize] + shares[2][p[2] as usize])
         .collect();
-    // a 4 x 4 block mean as Pillow's box filter makes it on floats: along x, then along y, each sum in double precision stored single
+    // a 4 x 4 block mean of the samples and of their squares as Pillow's box filter makes it on floats: along one axis, then the other (picture::vertical_first), each sum in double precision stored single
     let quarter = |four: [f32; 4]| {
         (four[0] as f64 * 0.25
             + four[1] as f64 * 0.25
             + four[2] as f64 * 0.25
             + four[3] as f64 * 0.25) as f32
     };
-    let mut across = vec![[0f32; 2]; fh * cols];
-    for (i, out) in across.iter_mut().enumerate() {
-        let four: [f32; 4] = light[i * 4..i * 4 + 4].try_into().expect("four samples");
-        *out = [quarter(four), quarter(four.map(|v| v * v))];
-    }
-    let mut cells = Vec::with_capacity(cols * rows);
-    for i in 0..cols * rows {
-        let column = |k: usize| across[(i / cols * 4 + k) * cols + i % cols];
-        let (mean, squares) = (
-            quarter([0, 1, 2, 3].map(|k| column(k)[0])),
-            quarter([0, 1, 2, 3].map(|k| column(k)[1])),
-        );
-        cells.push((
-            [colours[i * 3], colours[i * 3 + 1], colours[i * 3 + 2]],
-            mean,
-            (squares - mean * mean).max(0.0).sqrt(),
-        ));
-    }
-    cells
+    let first = |four: [f32; 4]| [quarter(four), quarter(four.map(|v| v * v))];
+    let then = |four: [[f32; 2]; 4]| [0, 1].map(|m| quarter(four.map(|pair| pair[m])));
+    let means: Vec<[f32; 2]> = if picture::vertical_first(fw, fh, cols, rows) {
+        let down: Vec<[f32; 2]> = (0..rows * fw)
+            .map(|i| first([0, 1, 2, 3].map(|k| light[(i / fw * 4 + k) * fw + i % fw])))
+            .collect();
+        (0..rows * cols)
+            .map(|i| then([0, 1, 2, 3].map(|k| down[i / cols * fw + i % cols * 4 + k])))
+            .collect()
+    } else {
+        let across: Vec<[f32; 2]> = (0..fh * cols)
+            .map(|i| first(light[i * 4..i * 4 + 4].try_into().expect("four samples")))
+            .collect();
+        (0..rows * cols)
+            .map(|i| then([0, 1, 2, 3].map(|k| across[(i / cols * 4 + k) * cols + i % cols])))
+            .collect()
+    };
+    let colours = colours.as_chunks::<3>().0;
+    let cell = |(&[mean, squares], &colour): (&[f32; 2], &Rgb)| {
+        (colour, mean, (squares - mean * mean).max(0.0).sqrt())
+    };
+    means.iter().zip(colours).map(cell).collect()
 }
 
 /// The ramp glyph for coverage `want` (0..1) in the cell at `row`, `col`: of its two ramp neighbours the denser when the fraction between them exceeds the cell's Bayer threshold.
@@ -787,6 +790,29 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn cell_statistics_are_the_python_tools_bit_for_bit() {
+        // rows G7, L6: lib/ascii_density.py cell_light under Pillow 13, as the Python tools ran: FNV-1a over each cell's colour and the bits of its mean and deviation; the tall grids go along y first at both box filters (picture::vertical_first), the wide one along x
+        let fnv = |bytes: &[u8]| {
+            bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, &byte| {
+                (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3)
+            })
+        };
+        for ((w, h, cols, rows), hash) in [
+            ((48, 400, 6, 40), 0x055b_29d3_f2d7_efee),
+            ((30, 333, 5, 41), 0x8457_d139_fedb_1bac),
+            ((480, 270, 37, 11), 0x7dd8_2a4d_cd6e_ace1),
+        ] {
+            let bytes: Vec<u8> = light(&noise(w, h), w, h, cols, rows)
+                .iter()
+                .flat_map(|(colour, mean, deviation)| {
+                    [&colour[..], &mean.to_le_bytes(), &deviation.to_le_bytes()].concat()
+                })
+                .collect();
+            assert_eq!(fnv(&bytes), hash, "{w} x {h} in {cols} x {rows}");
         }
     }
 
