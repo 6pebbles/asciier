@@ -1581,14 +1581,18 @@ fn columns_with_a_size_scale_the_font_to_fit() {
 
 #[test]
 fn video_and_frames_get_1920_px_on_the_long_side() {
-    // rows L5, L4, C3, C4: web_size and main of bin/ascii-convert:514 and :523 at tag python-final (tests/test_convert.py:224 and :233): without a size a video or an `--at` frame is 1920 px on its long side in the frame's shape after `--crop`, the short side round(1920 x short / long / 2) x 2: 16:9 1920 x 1080, 9:16 1080 x 1920, 4:3 1920 x 1440, the left half of 16:9 (80 x 90) 1706 x 1920; a video's size rounded up to even numbers: `-W 1001 -H 501` 1002 x 502; names `<stem>-ascii.mp4` and `<stem>-ascii-<%g of the time>s.png`
+    // rows L5, L4, C3, C4: web_size and main of bin/ascii-convert:514 and :523 at tag python-final (tests/test_convert.py:224 and :233): without a size a video or an `--at` frame is 1920 px on its long side in the frame's shape after `--crop`, the short side round(1920 x short / long / 2) x 2: 16:9 1920 x 1080, 9:16 1080 x 1920, 4:3 1920 x 1440, the left half of 16:9 (80 x 90) 1706 x 1920, as a frame and as a video (bin/ascii-convert:542); a video's size rounded up to even numbers: `-W 1001 -H 501` 1002 x 502; names `<stem>-ascii.mp4` and `<stem>-ascii-<%g of the time>s.png`; a file in the way of either replaced (the encoder's -y, bin/ascii-convert:425, and the PNG's save)
     let sandbox = Sandbox::new();
     clip(&sandbox, "clip.mp4", 0.08, "160x90", 25);
     silent_clip(&sandbox, "tall.mp4", 0.08, "90x160", 25);
     silent_clip(&sandbox, "four.mp4", 0.08, "160x120", 25);
+    for name in ["clip-ascii.mp4", "clip-ascii-0.04s.png"] {
+        std::fs::write(sandbox.path(name), "in the way").unwrap();
+    }
     let runs = [
         vec!["clip.mp4"],
         vec!["-W", "1001", "-H", "501", "-o", "odd.mp4", "clip.mp4"],
+        vec!["--crop", "0,0,50,100", "-o", "halfclip.mp4", "clip.mp4"],
         vec!["--at", "0.040", "clip.mp4"],
         vec!["--at", "0.01234567", "-W", "160", "clip.mp4"],
         vec!["--at", "0", "tall.mp4"],
@@ -1606,6 +1610,7 @@ fn video_and_frames_get_1920_px_on_the_long_side() {
     let printed = [
         "clip-ascii.mp4",
         "odd.mp4",
+        "halfclip.mp4",
         "clip-ascii-0.04s.png",
         "clip-ascii-0.0123457s.png",
         "tall-ascii-0s.png",
@@ -1626,6 +1631,10 @@ fn video_and_frames_get_1920_px_on_the_long_side() {
     assert_eq!(
         streams(&sandbox, &sandbox.path("odd.mp4")),
         ["video h264 1002x502", "audio aac"]
+    );
+    assert_eq!(
+        streams(&sandbox, &sandbox.path("halfclip.mp4")),
+        ["video h264 1706x1920", "audio aac"]
     );
     for (name, w, h) in [
         ("clip-ascii-0.04s.png", 1920, 1080),
