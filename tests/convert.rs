@@ -7,6 +7,9 @@ use image::RgbImage;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io::Read;
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Output, Stdio};
@@ -1171,6 +1174,55 @@ fn ctrl_c_while_the_encoder_finishes_ends_it_quietly_too() {
     assert!(err.ends_with("\r10/10 frames\n"), "{err:?}");
     assert_eq!(frames_in(&sandbox, &sandbox.path("clip-out.mp4")), 10);
     await_gone(&sandbox);
+}
+
+#[test]
+fn ctrl_c_while_a_picture_is_written_prints_no_path() {
+    // rows C10, C4, N25: main of bin/ascii-convert:561 at tag python-final: Ctrl-C while the PNG is written: no message, the file as far as it got (C10), no path, which goes with a done run (C4), then death by SIGINT; `-o` names a FIFO whose pipe of one page is full, so the write waits, then SIGINT, then the FIFO read to its end: the whole PNG went through it; seen at 6154efe (reviewer's probe): the path printed, exit 130
+    let sandbox = Sandbox::new();
+    save(&gradient(80, 40), &sandbox.path("pic.png"));
+    let fifo = sandbox.path("out.png");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a C string that outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    // the reading end opened first, so that the converter's opening goes through
+    let mut png = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .unwrap();
+    let fd = png.as_raw_fd();
+    // SAFETY: fcntl on a descriptor this test owns.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, 4096) }, 4096);
+    let run = Running::start(&sandbox, &["-c", "40", "-o", "out.png", "pic.png"]);
+    let end = Instant::now() + PATIENCE;
+    loop {
+        let mut held: libc::c_int = 0;
+        // SAFETY: FIONREAD into an int.
+        unsafe { libc::ioctl(fd, libc::FIONREAD, &mut held) };
+        if held == 4096 {
+            break;
+        }
+        assert!(Instant::now() < end, "{held} bytes: {:?}", run.err());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    run.interrupt();
+    // SAFETY: fcntl on a descriptor this test owns: reads wait again.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, 0) };
+    let mut bytes = Vec::new();
+    png.read_to_end(&mut bytes).unwrap();
+    let (status, out, err) = run.finish();
+    assert_eq!(
+        (status.signal(), out.as_str(), err.as_str()),
+        (Some(libc::SIGINT), "", "")
+    );
+    assert!(
+        bytes.len() > 4096
+            && bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+            && bytes.ends_with(b"IEND\xae\x42\x60\x82"),
+        "{} bytes",
+        bytes.len()
+    );
 }
 
 #[test]

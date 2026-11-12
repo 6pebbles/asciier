@@ -134,11 +134,16 @@ pub fn main(args: impl Iterator<Item = OsString>) -> u8 {
         }
     };
     catch_ctrl_c();
-    let ended = run(&options).map(|out| {
+    let ended = run(&options).and_then(|out| {
+        // the path goes with a done run (row C4); a Ctrl-C while the file was written leaves it as it got (row C10)
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return Err(Stop::Interrupted(None));
+        }
         println!("{}", out.display());
         if options.at.is_some() && std::io::stdout().is_terminal() && term::kitty::named() {
             desktop::icat(&out);
         }
+        Ok(())
     });
     let ended = match ended {
         // what Ctrl-C killed leaves nothing to report
