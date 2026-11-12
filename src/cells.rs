@@ -964,6 +964,41 @@ mod tests {
     }
 
     #[test]
+    fn a_slot_under_a_thousandth_counts_as_a_thousandth() {
+        // rows G6: lib/ascii_term.py grid() on eight flat cells of grey 0 to 7 (linear luminance 0 to 0.0021), the same ramp, bl1nk with color0 #000000, #010101, #020202 or #030303 (luminance 0 to 0.00091), work 0.2, run 2026-11-12: the greys take slot 0 and coverage min(Y / 0.001, 1) whatever slot 0's luminance under 0.001 (lib/ascii_density.py:81)
+        let picture: Vec<u8> = (0..64 * 8)
+            .flat_map(|at| [(at % 64 / 8) as u8; 3])
+            .collect();
+        for black in 0..4 {
+            let mut theme = bl1nk();
+            theme.colors[0] = [black; 3];
+            let mut inks = Inks::new(&theme, 100, Skin::Grey);
+            assert!(inks.luma[0] < 1e-3, "{black}");
+            for glyphs in [Glyphs::Density, Glyphs::Mixed] {
+                let art = grid(
+                    &picture,
+                    64,
+                    8,
+                    8,
+                    None,
+                    1.0,
+                    glyphs,
+                    false,
+                    &mut inks,
+                    &ramp(),
+                    0.2,
+                )
+                .unwrap();
+                assert_eq!(
+                    (String::from_utf8_lossy(&art.chars), art.slots.as_slice()),
+                    (" =Yu~~~~".into(), [0; 8].as_slice()),
+                    "color0 {black}, {glyphs:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ramp_glyphs_dither_between_neighbours() {
         // Row G6: the denser of two ramp neighbours when the fraction between them exceeds the Bayer threshold.
         let ramp = ramp();
