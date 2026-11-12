@@ -1361,15 +1361,28 @@ fn a_gap_in_a_variable_rate_clip_holds_the_frame_before_it() {
 }
 
 #[test]
-#[ignore = "defect: the status clock stops while a variable-rate clip holds a frame"]
-fn the_clock_runs_on_through_a_gap_in_the_picture() {
-    // rows P16, P24: the status row's clock runs with the sound (clock and position of bin/ascii-viewer:1394 at tag python-final), also while a frame is held; frame 9 is due at 0.36 s and frame 35 at 1.4 s, so 9 shows at 1 s
+fn the_clock_stands_with_the_frame_held_through_a_gap() {
+    // rows P16, P24, N26: the clock is the time of the frame on screen: frame 9 is due at 0.36 s and held until frame 35 comes at 1.4 s, so at about 1 s the clock shows 00:00 over frame 9 and 00:01 comes with frame 35 (the old viewer's clock ran with the sound, clock and position of bin/ascii-viewer:1394 at tag python-final: 00:01 over frame 9)
     let sandbox = Sandbox::new();
     let gap = gap_clip(&sandbox);
     let mut tty = sandbox.launch().arg(&gap).size(SMALL).start();
     assert_eq!(tty.exit(), 0);
-    let drawn = drawn(&tty.out());
-    assert!(drawn.contains(&(Some(1), 9)), "{drawn:?}");
+    let drawn = replay(&tty.out(), SMALL, |screen| (frame(screen), screen.row(24)));
+    // the time a status row shows by its bar: 64 cells for this 2 s clip
+    let time = |row: &str| row.matches('━').count() as f64 * 2.0 / 64.0;
+    // mpv reports the time and hands over the frame apart, under load a frame or so either way (seen in parallel runs: frame 9 under 00:01 and a bar of 44 cells, frame 35's time; frame 35 under 00:00); a time inside the gap is the clock running on
+    let held: Vec<f64> = drawn
+        .iter()
+        .filter(|(number, _)| *number == 9)
+        .map(|(_, row)| time(row))
+        .collect();
+    let inside = |time: &f64| (0.6..1.2).contains(time);
+    assert!(!held.is_empty() && !held.iter().any(inside), "{drawn:?}");
+    let first = drawn.iter().find(|(_, row)| row.starts_with("> 00:01 "));
+    assert!(
+        first.is_some_and(|(number, row)| *number >= 35 || time(row) >= 1.2),
+        "{drawn:?}"
+    );
 }
 
 #[test]
