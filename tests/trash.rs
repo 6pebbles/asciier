@@ -292,7 +292,7 @@ exit 0
 
 #[test]
 fn the_question_shows_instead_of_any_toast() {
-    // rows T9, S14: status of bin/ascii-viewer:2143 at tag python-final: the question shows instead of a toast, one set with it (`3D`, one batch: its end draws the question again) and one set while it waits (a copy that ends then: `copied WxH` of copy_image, bin/ascii-viewer:1657)
+    // row T9: status of bin/ascii-viewer:2143 at tag python-final: the question shows instead of a toast, one set with it (`3D`, one batch: its end draws the question again) and one set while it waits (a copy that ends then: `copied WxH` of copy_image, bin/ascii-viewer:1657)
     let sandbox = kitty_sandbox();
     sandbox.program("wl-copy", GATED_COPY);
     let folder = pics(&sandbox, &[("a.png", 80, 40), ("b.png", 40, 80)]);

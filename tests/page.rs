@@ -282,7 +282,7 @@ fn exported(path: &Path) -> RgbImage {
 
 #[test]
 fn the_menu_and_its_preview_in_a_frame() {
-    // rows R1, R2, R3, R15, R18, K5: RenderPage.draw and frame of bin/ascii-viewer:1096 and :1208 at tag python-final, as the old viewer drew this still in this harness: every row of the column written and padded to 46 cells, the cursor's row in reverse video, the name, the rule and the hints in SGR 90; the frame in SGR 90 from column 47 to 99 titled with the output's size and columns; the preview centred inside it, from a cleared screen with kitty's images deleted, and sent again only for a new window; no frame in a window that leaves it 10 cells or less (the old viewer sent the preview as f=32, RGBX; f=24, RGB, is on the session's change list)
+    // rows R1, R2, R3, R15, R18, K5, V10, V15, N29: RenderPage.draw and frame of bin/ascii-viewer:1096 and :1208 at tag python-final, as the old viewer drew this still in this harness: every row of the column written and padded to 46 cells, the cursor's row in reverse video, the name, the rule and the hints in SGR 90; the frame in SGR 90 from column 47 to 99 titled with the output's size and columns; the preview centred inside it, from a cleared screen with kitty's images deleted, menu and preview in one synchronized update, sent again only for a new window; a new window size draws the page at once, without a frame where it leaves 10 cells or less (N29: the old viewer sent the preview as f=32, RGBX)
     let mut sandbox = Sandbox::new();
     let picture = save(&gradient(800, 400), &sandbox.path("pic.png"));
     let mut tty = in_kitty(&mut sandbox, &picture, PAGE);
@@ -304,6 +304,10 @@ fn the_menu_and_its_preview_in_a_frame() {
         out[update..].starts_with(b"\x1b[?2026h\x1b_Ga=d,d=A,q=2\x1b\\\x1b[2J\x1b[0m"),
         "{}",
         shown(&out[update..update + 60])
+    );
+    assert!(
+        find(&out[..preview.start], b"\x1b[1;1H Render", update).is_some(),
+        "the menu outside the preview's update"
     );
     let screen = tty.screen();
     assert_eq!(column(screen)[..27], MENU);
@@ -1222,7 +1226,7 @@ fn r_on_a_video_pauses_it_under_the_page_until_it_closes() {
 
 #[test]
 fn keys_right_after_r_on_a_video_act_on_the_page() {
-    // rows P22, R4, V11: open_page of bin/ascii-viewer:2048 at tag python-final opens the page before the batch's next key: r then j moves the page's cursor; run in this harness the old viewer opened the page on Contrast; seen before the fix: the page on Level, the clip sought 60 s back under it (the page opens on mpv's answer, and keys before it went to the player)
+    // rows P22, R4: open_page of bin/ascii-viewer:2048 at tag python-final opens the page before the batch's next key: r then j moves the page's cursor; run in this harness the old viewer opened the page on Contrast; seen before the fix: the page on Level, the clip sought 60 s back under it (the page opens on mpv's answer, and keys before it went to the player)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
@@ -1239,7 +1243,7 @@ fn keys_right_after_r_on_a_video_act_on_the_page() {
 
 #[test]
 fn r_right_after_s_on_a_video_opens_the_page() {
-    // rows P22, P21, V14: screenshot of bin/ascii-viewer:1621 at tag python-final runs in the background, each press its own run, and r opens the page meanwhile; run in this harness the old viewer opened it and saved the screenshot; seen before the fix: the screenshot saved, no page (r was dropped while the screenshot's frame was on its way)
+    // rows P22, P21: screenshot of bin/ascii-viewer:1621 at tag python-final runs in the background, each press its own run, and r opens the page meanwhile; run in this harness the old viewer opened it and saved the screenshot; seen before the fix: the screenshot saved, no page (r was dropped while the screenshot's frame was on its way)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();

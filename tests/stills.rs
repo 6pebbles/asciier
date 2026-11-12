@@ -568,7 +568,7 @@ fn the_probe_offers_kitty_a_file_and_ok_gives_the_image() {
 
 #[test]
 fn without_kittys_ok_the_still_is_ascii_and_v_says_so() {
-    // rows S4, S5, N13: tests/test_viewer_tty.py:158 at tag python-final: an error for an answer, or none within 1 s, gives the ASCII picture; an empty KITTY_WINDOW_ID asks nothing (kitty_terminal of lib/ascii_term.py:51); a key typed while the probe waits is lost (kitty_reads_files of bin/ascii-viewer:234); N13: then `v` toasts `no kitty graphics` and the ASCII stays, drawn again without a clear (the old viewer turned to image mode and showed nothing, S6)
+    // rows S4, N13: tests/test_viewer_tty.py:158 at tag python-final: an error for an answer, or none within 1 s, gives the ASCII picture; an empty KITTY_WINDOW_ID asks nothing (kitty_terminal of lib/ascii_term.py:51); a key typed while the probe waits is lost (kitty_reads_files of bin/ascii-viewer:234); N13: then `v` toasts `no kitty graphics` and the ASCII stays, drawn again without a clear (the old viewer turned to image mode and showed nothing, S6)
     let picture = gradient(800, 400);
     let (error, silent, mut empty) = (kitty_sandbox(), kitty_sandbox(), Sandbox::new());
     empty.set("KITTY_WINDOW_ID", "");
@@ -1043,7 +1043,7 @@ fn backspace_goes_back_to_the_fit_and_the_middle() {
 
 #[test]
 fn a_zoom_kept_from_a_smaller_window_is_held_to_the_new_limit() {
-    // row Z1: steps of bin/ascii-viewer:1739 at tag python-final (tests/test_viewer.py:1123): 3600 x 2400 in 900 x 600 px fits at 25 %, 10 steps to 800 %; in 1800 x 1200 px the fit is 50 % and the limit 8 steps: the 10 count as 8, so `-` gives 7 (`zoom 566%`, not 9's 1131 %) and `+` stops at 800 %
+    // rows Z1, V10: steps of bin/ascii-viewer:1739 at tag python-final (tests/test_viewer.py:1123): 3600 x 2400 in 900 x 600 px fits at 25 %, 10 steps to 800 %; the window grown to 1800 x 1200 px, the picture is drawn at once at the new size from a cleared screen (poll of bin/ascii-viewer:2340); there the fit is 50 % and the limit 8 steps: the 10 count as 8, so `-` gives 7 (`zoom 566%`, not 9's 1131 %) and `+` stops at 800 %
     let sandbox = kitty_sandbox();
     let big = sandbox.path("big.png");
     ffmpeg(
@@ -1063,7 +1063,13 @@ fn a_zoom_kept_from_a_smaller_window_is_held_to_the_new_limit() {
     says(&mut tty, &[b'+'; 12], "zoom 800%");
     let before = tty.len();
     tty.resize(WIDE);
-    assert_eq!(placed(&tty, before).size(), (1800, 1200));
+    let resized = placed(&tty, before);
+    assert_eq!(resized.size(), (1800, 1200));
+    assert!(
+        find(&resized.before, b"\x1b[2J", 0).is_some(),
+        "not from a cleared screen: {}",
+        shown(&resized.before)
+    );
     for (keys, text) in [
         (b"-", "zoom 566%"),
         (b"+", "zoom 800%"),
@@ -1182,7 +1188,7 @@ fn the_placement_names_a_file_of_raw_rgb_in_the_middle_of_the_window() {
 
 #[test]
 fn a_redraw_of_the_bottom_row_leaves_the_image_where_it_is() {
-    // rows K4, S11: screen and status of bin/ascii-viewer:2192 and :2143 at tag python-final (tests/test_viewer.py:344): with the image on screen, a toast and its end write the bottom row alone (`y` here: a copy changes nothing on screen); a still has no status row: between toasts the bottom row is blank
+    // rows K4, S11, V15, V16a: screen and status of bin/ascii-viewer:2192 and :2143 at tag python-final (tests/test_viewer.py:344): with the image on screen, a toast and its end write the bottom row alone, each in a synchronized update of its own, no screen cleared (`y` here: a copy changes nothing on screen); a still has no status row: between toasts the bottom row is blank
     let sandbox = kitty_sandbox();
     let file = save(&gradient(800, 400), &sandbox.path("pic.png"));
     let mut tty = kitty_view(&sandbox, &file, WIDE);
@@ -1321,7 +1327,7 @@ fn picture_at(file: &Path) -> RgbImage {
 
 #[test]
 fn s_saves_the_whole_picture_as_turned_beside_the_file() {
-    // rows S12, P21: screenshot of bin/ascii-viewer:1621 at tag python-final (tests/test_viewer_tty.py:101): toasts `screenshot ...` and `saved <stem>-ascii.png`, beside the file, one there before replaced; the whole picture as turned, whatever the zoom, which the old viewer handed ascii-convert as a PNG of its own (turned, or a transparent one over #808080): the file is what `asciier convert` makes of that PNG
+    // row S12: screenshot of bin/ascii-viewer:1621 at tag python-final (tests/test_viewer_tty.py:101): toasts `screenshot ...` and `saved <stem>-ascii.png`, beside the file, one there before replaced; the whole picture as turned, whatever the zoom, which the old viewer handed ascii-convert as a PNG of its own (turned, or a transparent one over #808080): the file is what `asciier convert` makes of that PNG
     let sandbox = Sandbox::new();
     let marked = marked(800, 400);
     let pic = save(&marked, &sandbox.path("pic.png"));

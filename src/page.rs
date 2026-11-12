@@ -1595,7 +1595,7 @@ mod tests {
 
     #[test]
     fn the_size_list() {
-        // rows R9, R10; SIZES_LIST
+        // rows R9, R4; SIZES_LIST
         let mut stage = Stage::new();
         stage.on(Row::Size).keys(&[ENTER, b"j"]);
         let rows = stage.column(30);
@@ -2092,7 +2092,7 @@ echo '[{"width": 2560, "height": 1440, "focused": true}]'
 
     #[test]
     fn the_crop_editor_s_screen() {
-        // RenderPageDrawTest.test_crop_editor of tests/test_viewer.py:320; CROP; rows R13, R15, K5
+        // RenderPageDrawTest.test_crop_editor of tests/test_viewer.py:320; CROP; rows R13, R15, K5, V15: the screen is one synchronized update
         let mut stage = Stage::new();
         stage.draw(100, 30);
         stage.on(Row::Crop).keys(&[ENTER]);
