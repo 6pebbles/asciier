@@ -78,6 +78,8 @@ pub struct Mpv {
     pausing: u32,
     /// mpv restarts playback, after the file's load or a seek, until `MPV_EVENT_PLAYBACK_RESTART`: meanwhile it holds back a seek asked within 0.3 s of the last one's start (player/playloop.c, execute_queued_seek), whose mark then comes before it runs.
     restarting: bool,
+    /// As `pausing`, for the properties of `HOLDS`: sets of each that mpv has not confirmed yet.
+    setting: [u32; 4],
     /// The frame of a grab whose time mpv has not given yet.
     taken: Option<Option<RgbImage>>,
     /// A new position comes with a new frame, but past the picture's end, where the sound plays on: `seen`, the position given with the last new frame (`None` while it is to come), and mpv's count of frames let go untaken then; `prev`, the same of the frame before; `base`, that position, or the position at the last look in which mpv had let frames go, and the count then; `first`, the first position of the look under way.
@@ -253,6 +255,9 @@ const OP: u64 = 3;
 const SETTLED: u64 = 4;
 /// `reply_userdata` of the `pause` read once a step's mark is reported.
 const STEPPED: u64 = 5;
+/// The properties `set` holds the reports of, and the `reply_userdata` of each one's set: `HELD + n` for the nth.
+const HOLDS: [&str; 4] = ["speed", "volume", "mute", "loop-file"];
+const HELD: u64 = 6;
 
 type Callback = extern "C" fn(*mut c_void);
 
@@ -487,6 +492,7 @@ impl Mpv {
             end: None,
             pausing: 0,
             restarting: true,
+            setting: [0; 4],
             taken: None,
             seen: None,
             prev: None,
@@ -655,9 +661,25 @@ impl Mpv {
         self.request(if forward { Op::Step } else { Op::Back });
     }
 
-    /// Set a property, not waited for.
-    pub fn set(&self, name: &str, value: &str) {
-        self.put(0, name, value);
+    /// Set a property, not waited for. For speed, volume, mute and loop-file, as `pause` does for its own: reports of the property that `open` heard, and those mpv makes before it confirms this request, are not handed on.
+    pub fn set(&mut self, name: &str, value: &str) {
+        let Some(held) = HOLDS.iter().position(|hold| *hold == name) else {
+            self.put(0, name, value);
+            return;
+        };
+        self.reported.retain(|event| {
+            let kind = match event {
+                Event::Speed(_) => 0,
+                Event::Volume(_) => 1,
+                Event::Mute(_) => 2,
+                Event::Loop(_) => 3,
+                _ => return true,
+            };
+            kind != held
+        });
+        if self.put(HELD + held as u64, name, value) {
+            self.setting[held] += 1;
+        }
     }
 
     /// Pause or play, once mpv has done the requests before. Reports of `pause` that `open` heard, and those mpv makes before it confirms this request, are not handed on: they can be older than it, and mpv reports only a value that differs from the last it reported.
@@ -1096,6 +1118,11 @@ impl Mpv {
                 self.pausing = self.pausing.saturating_sub(1);
                 None
             }
+            SET_PROPERTY_REPLY if (HELD..HELD + HOLDS.len() as u64).contains(&event.userdata) => {
+                let held = &mut self.setting[(event.userdata - HELD) as usize];
+                *held = held.saturating_sub(1);
+                None
+            }
             // mpv refused the seek or the step under way
             COMMAND_REPLY if event.userdata == OP && event.error < 0 => {
                 self.busy = None;
@@ -1184,7 +1211,7 @@ impl Mpv {
                 self.at_end = flag.unwrap_or(false);
                 None
             }
-            b"mute" => flag.map(Event::Mute),
+            b"mute" => flag.filter(|_| self.setting[2] == 0).map(Event::Mute),
             b"time-pos" => {
                 let time = number?;
                 (self.time, self.first) = (time, self.first.or(Some(time)));
@@ -1242,9 +1269,11 @@ impl Mpv {
                 self.length = number.filter(|length| *length > 0.0);
                 Some(Event::Length(self.length))
             }
-            b"speed" => number.map(Event::Speed),
-            b"volume" => number.map(Event::Volume),
-            b"loop-file" => text.map(|loops| Event::Loop(loops == b"inf")),
+            b"speed" => number.filter(|_| self.setting[0] == 0).map(Event::Speed),
+            b"volume" => number.filter(|_| self.setting[1] == 0).map(Event::Volume),
+            b"loop-file" => text
+                .filter(|_| self.setting[3] == 0)
+                .map(|loops| Event::Loop(loops == b"inf")),
             _ => {
                 let shape: [&[u8]; 3] = [b"dwidth", b"dheight", b"video-dec-params/rotate"];
                 self.shape[shape.iter().position(|part| *part == name)?] = whole.unwrap_or(0);
@@ -2295,6 +2324,43 @@ pub(crate) mod tests {
                 .any(|e| matches!(e, Event::Volume(_) | Event::Mute(_) | Event::Speed(_))),
             "{events:?}"
         );
+    }
+
+    #[test]
+    fn no_older_report_undoes_a_speed_volume_mute_or_loop_asked_for() {
+        // rows P10, P11, P12, P13: mpv reads an observed property's value once it has run a request that changed it, and hands that value on at the next look, also after a newer request it has not run yet; the viewer took it for the newer one's, and a key stepped from a speed it had left (tests/playback.rs speed_keys_step_it_between_25_and_400_percent once gave no `speed 226%` under load: by inference the report of 274 % after `[` asked for 249 %); here the older request runs and its reply is read, then a busy core holds the newer one back while the reports are read (seen without the hold in 3 runs of 3 rounds each: the older value reported after the newer was asked for in 4, 7, 5 and 7 of the 9 rounds of speed, volume, mute and loop-file, each run failing)
+        let mut stage = Stage::new();
+        stage.clip(2.0, 2.0);
+        stage.settle();
+        let asks = [
+            ("speed", ["3", "4"], Event::Speed(4.0)),
+            ("volume", ["40", "60"], Event::Volume(60.0)),
+            ("mute", ["yes", "no"], Event::Mute(false)),
+            ("loop-file", ["inf", "no"], Event::Loop(false)),
+        ];
+        for (name, [older, newer], last) in asks {
+            for round in 0..3 {
+                stage.mpv.set(name, older);
+                loop {
+                    // SAFETY: mpv keeps the event until the next wait.
+                    let event = unsafe { &*mpv_wait_event(stage.mpv.handle, 5.0) };
+                    assert_ne!(event.id, EVENT_NONE, "{name}={older} not answered");
+                    let reported = stage.mpv.report(event);
+                    stage.waiting.extend(reported);
+                    if event.id == SET_PROPERTY_REPLY {
+                        break;
+                    }
+                }
+                keep_busy(&stage.mpv, 300);
+                stage.mpv.set(name, newer);
+                let events = stage.settle();
+                // without an older report heard mpv has nothing new to say: the value it last said is the newer one
+                assert!(
+                    events.iter().all(|event| *event == last),
+                    "{name}={older}, then {name}={newer}, round {round}: {events:?}"
+                );
+            }
+        }
     }
 
     #[test]
