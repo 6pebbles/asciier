@@ -1266,6 +1266,16 @@ mod tests {
                         eprintln!("dropped {}", flags(mode()));
                         std::process::exit(0);
                     }
+                    b"T" => {
+                        // keys typed while the program ends: leave once they are there, then count what the terminal holds
+                        eprintln!("waiting");
+                        ready(STDIN, PATIENCE.as_millis() as i32);
+                        term.leave();
+                        let mut held: libc::c_int = 0;
+                        unsafe { libc::ioctl(STDIN, libc::FIONREAD, &mut held) };
+                        eprintln!("held {held}");
+                        std::process::exit(0);
+                    }
                     _ => {}
                 }
             }
@@ -1320,6 +1330,20 @@ mod tests {
         assert_eq!((count(&seen, ENTER), count(&seen, RESTORE)), (1, 1));
         let entered = find(&seen, ENTER).unwrap();
         assert!(find(&seen[entered..], b"written").is_some() && seen.ends_with(RESTORE));
+        assert_eq!(status.code(), Some(0));
+    }
+
+    #[test]
+    fn keys_typed_while_it_ends_are_left_to_the_shell() {
+        // row V2: the mode goes back by TCSADRAIN, which keeps the input not read yet (bin/ascii-viewer:2469 at tag python-final); a flush would drop what was typed while the viewer ended
+        let mut pty = Pty::start(SIZE, b"", false);
+        pty.says(&format!("geometry {AT_START}"));
+        pty.type_keys(b"T");
+        pty.says("waiting");
+        pty.type_keys(b"ls -l");
+        pty.says("held 5");
+        let (status, seen, _) = pty.end();
+        assert!(count(&seen, RESTORE) == 1 && seen.ends_with(RESTORE));
         assert_eq!(status.code(), Some(0));
     }
 
