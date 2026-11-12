@@ -813,7 +813,7 @@ fn bad_values_are_usage_errors() {
 
 #[test]
 fn look_options_draw_as_the_old_converter_drew_them() {
-    // row C1: each look option in its spellings: `--opt value`, `--opt=value`, a short flag's value attached, a negative value without `=`, short flags combined; the pixels (CRC-32 of the RGB) as bin/ascii-convert at tag python-final drew the sampler at 40 columns in this harness, each option its own
+    // rows C1, G1, G6, G8, G9: each look option in its spellings: `--opt value`, `--opt=value`, a short flag's value attached, a negative value without `=`, short flags combined; the pixels (CRC-32 of the RGB) as bin/ascii-convert at tag python-final drew the sampler at 40 columns in this harness, each option its own: G1 libchafa set as the old converter set it for what it draws (ASCII and space, foreground only, truecolour, mono's two colours, work factor 0.5, its geometry: 40 x 11 cells), `-g shape` its glyphs alone; G6 the installed face's ramp and its dither on flat cells (`-g density`, mixed); G8 the ramp and the glyphs of the bold face (`-b`, `-mb`); G9 the level and contrast table (`-l 30`, `--level -30`, `--contrast` 50 and -50)
     let sandbox = Sandbox::new();
     save(&sampler(), &sandbox.path("sampler.png"));
     let drawn: [(&[&str], u32); 22] = [
@@ -1473,7 +1473,7 @@ fn input_ffmpeg_cannot_read_is_exit_1_with_its_words() {
 
 #[test]
 fn failures_are_messages_with_exit_1() {
-    // rows C13, N12: exit 1 with `asciier: <why>` on stderr and nothing on stdout where bin/ascii-convert at tag python-final ended with a traceback (bin/ascii-convert:126, :355 and :555): the current theme missing even with a complete `--theme`, a colour missing from it, no font from fc-match, no ffmpeg
+    // rows C13, N12, G10: exit 1 with `asciier: <why>` on stderr and nothing on stdout where bin/ascii-convert at tag python-final ended with a traceback (bin/ascii-convert:126, :355 and :555): the current theme missing even with a complete `--theme`, a colour missing from it, no font from fc-match, no ffmpeg; G10: the font is the file `fc-match -f %{file} 'JetBrainsMono Nerd Font Mono'` names, as font_path of lib/ascii_term.py:21 asked
     let mut sandbox = Sandbox::new();
     save(&gradient(80, 40), &sandbox.path("pic.png"));
     silent_clip(&sandbox, "mute.mp4", 0.2, "160x90", 25);
@@ -1504,11 +1504,18 @@ fn failures_are_messages_with_exit_1() {
         format!("no color5 in the kitty theme {}", theme.display()),
     );
     std::fs::write(&theme, &bl1nk).unwrap();
-    sandbox.program("fc-match", "#!/bin/sh\nexit 1\n");
+    sandbox.program(
+        "fc-match",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nexit 1\n",
+    );
     said(
         &sandbox,
         &["-c", "20", "pic.png"],
         "no font file from fc-match for JetBrainsMono Nerd Font Mono".into(),
+    );
+    assert_eq!(
+        sandbox.noted("fc-match.args"),
+        "-f\n%{file}\nJetBrainsMono Nerd Font Mono\n"
     );
     sandbox.remove_program("fc-match");
     // the stubs alone on PATH: no ffmpeg
@@ -1524,7 +1531,7 @@ fn failures_are_messages_with_exit_1() {
 
 #[test]
 fn the_grid_is_160_columns_of_12_by_27_px_unless_a_size_says_otherwise() {
-    // rows L1, L2, L4: tests/test_convert.py:105 and :117 at tag python-final, the pixels as bin/ascii-convert drew them in this harness: 400 x 300 at the defaults is 160 x 54 cells of 12 x 27 px, 1920 x 1458, in ExtraBold too; a width or a height takes the columns that cover it, not held to 8..2000: `-W 16` 2 columns and 1 row, 16 x 27; `-H 16` 2 columns, 24 x 16; `-W 1000` 84 columns, 1000 x 783; a still's size is exact, odd numbers too: 1001 x 501
+    // rows L1, L2, L4, G8: tests/test_convert.py:105 and :117 at tag python-final, the pixels as bin/ascii-convert drew them in this harness: 400 x 300 at the defaults is 160 x 54 cells of 12 x 27 px, 1920 x 1458, in ExtraBold too (G8: `-b` draws the bold face's glyphs in its cells); a width or a height takes the columns that cover it, not held to 8..2000: `-W 16` 2 columns and 1 row, 16 x 27; `-H 16` 2 columns, 24 x 16; `-W 1000` 84 columns, 1000 x 783; a still's size is exact, odd numbers too: 1001 x 501
     let sandbox = Sandbox::new();
     save(&gradient(400, 300), &sandbox.path("pic.png"));
     let drawn: [(&[&str], (u32, u32), u32); 6] = [
@@ -1678,7 +1685,7 @@ fn video_and_frames_get_1920_px_on_the_long_side() {
 
 #[test]
 fn the_picture_is_reduced_before_the_tone_map() {
-    // row L6: Style.art of bin/ascii-convert:195 at tag python-final: a picture wider than 8 px a column is box-reduced to that first, then the tone table, then chafa: a 1 px checkerboard of black and white 640 px wide at 40 columns is mid grey before `-l 50` takes it to black: nothing drawn; at 320 px (8 a column, no reduction) the level keeps black and white, and glyphs are drawn
+    // rows L6, G9: Style.art of bin/ascii-convert:195 at tag python-final: a picture wider than 8 px a column is box-reduced to that first, then the tone table (G9: before the cell stage, on the picture's pixels), then chafa: a 1 px checkerboard of black and white 640 px wide at 40 columns is mid grey before `-l 50` takes it to black: nothing drawn; at 320 px (8 a column, no reduction) the level keeps black and white, and glyphs are drawn
     let sandbox = Sandbox::new();
     let checker = |w: u32, h: u32| {
         RgbImage::from_fn(w, h, |x, y| {
@@ -1790,7 +1797,7 @@ fn transparency_is_drawn_over_the_theme_background() {
 
 #[test]
 fn an_svg_is_drawn_again_at_the_detail_the_columns_take() {
-    // rows L11, C11: main of bin/ascii-convert:546 at tag python-final with raster_width of lib/ascii_image.py:30 (tests/test_convert.py:170): an SVG is a still, its first raster 1600 px wide; drawn again at ceil(columns x 8 x 100 / crop W) px when that is more, at most 8192 px on the long side: 100 columns of a quarter of a ring take 3200 px; 160 columns of a tenth of a 100:1 strip of bars want 12800 and get 8192; the pixels as the old converter drew them in this harness
+    // row L11: main of bin/ascii-convert:546 at tag python-final with raster_width of lib/ascii_image.py:30 (tests/test_convert.py:170): an SVG is a still, its first raster 1600 px wide; drawn again at ceil(columns x 8 x 100 / crop W) px when that is more, at most 8192 px on the long side: 100 columns of a quarter of a ring take 3200 px; 160 columns of a tenth of a 100:1 strip of bars want 12800 and get 8192; the pixels as the old converter drew them in this harness
     let sandbox = Sandbox::new();
     std::fs::write(
         sandbox.path("ring.svg"),
