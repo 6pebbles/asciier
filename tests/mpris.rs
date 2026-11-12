@@ -542,7 +542,7 @@ fn taken(tty: &mut Tty, sandbox: &Sandbox) -> u32 {
 
 #[test]
 fn a_seek_from_the_stopped_state_counts_from_the_frame_on_screen() {
-    // rows P8a, P9, N5: a seek after MPRIS Stop, by key or by MPRIS, plays from its target counted from the held frame, the one `s` takes, and the target is the first frame drawn after it; the debug build draws a 200 x 60 window slower than the clip's 25 frames a second, so mpv has a frame due when it stops, which play asked with the seek showed first and counted the seek from (seen before the fix: 35, 36, 61; under load at 80 x 24 also 29, 30, 55 and 28, 54)
+    // rows P8a, P9, N5: a seek after MPRIS Stop, by key or by MPRIS, plays from its target counted from the held frame, the one `s` takes, and the target is the first frame drawn after it; the debug build draws a 200 x 60 window slower than the clip's 25 frames a second, so mpv has a frame due when it stops, which play asked with the seek showed first and counted the seek from (seen before the fix: 35, 36, 61; under load at 80 x 24 also 29, 30, 55 and 28, 54; in this form, with the play sent beside the seek: 64, 65, 90, 3 of 3); after the stop the window is 80 x 24 and the clip at 25 %: mpv holds a frame not taken within 200 ms as shown and plays on, and under load the 200 x 60 viewer missed the target (mpv's log, three test binaries at once: the seek counted from the held frame, the first frame drawn 1 to 10 past the target, 4 of 4)
     let mut sandbox = Sandbox::new();
     let bus = Bus::new(&mut sandbox);
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
@@ -550,7 +550,7 @@ fn a_seek_from_the_stopped_state_counts_from_the_frame_on_screen() {
     let remote = Remote::new(&sandbox, &bus, tty.pid);
     tty.await_playing();
     // the picture covers rows 5 to 55 of the window
-    let frame = |screen: &Screen| counted(screen, 30, 1, 200);
+    let wide = |screen: &Screen| counted(screen, 30, 1, 200);
     let seeks: [(&[u8], &[&str]); 3] = [
         (SHIFT_RIGHT, &[]),
         (b"", &["int64:1000000"]),
@@ -559,6 +559,8 @@ fn a_seek_from_the_stopped_state_counts_from_the_frame_on_screen() {
     for (keys, seek) in seeks {
         remote.send("Stop", &[]);
         tty.await_status(". ");
+        tty.resize(SMALL);
+        says(&mut tty, b"{{", "speed 25%");
         // the screen can lag mpv under load: the frame `s` takes is the reference, and the screen must come to it
         let held = taken(&mut tty, &sandbox);
         tty.until("the frame taken", |screen| frame(screen) == held);
@@ -567,16 +569,19 @@ fn a_seek_from_the_stopped_state_counts_from_the_frame_on_screen() {
             remote.send("Seek", seek);
         }
         tty.until("frames after the target", |screen| {
-            screen.row(60).starts_with("> ") && frame(screen) > held + 30
+            screen.row(24).starts_with("> ") && frame(screen) > held + 27
         });
-        let mut after = replay(&tty.out()[from..], WIDE, frame);
+        let mut after = replay(&tty.out()[from..], SMALL, frame);
         after.dedup();
         let first = after.iter().find(|&&number| number != held);
         assert_eq!(first, Some(&(held + 25)), "from frame {held}: {after:?}");
-        // on from the start: the screen's lag under load would otherwise run the clip out
+        // on from the start at full speed and size: the screen's lag under load would otherwise run the clip out
+        says(&mut tty, b"\\", "speed 100%");
+        tty.resize(WIDE);
+        tty.await_status("> ");
         tty.send(DOWN);
         tty.until("playing from the start", |screen| {
-            screen.row(60).starts_with("> ") && frame(screen) < 25
+            screen.row(60).starts_with("> ") && wide(screen) < 25
         });
     }
     tty.send(b"q");

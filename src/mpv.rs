@@ -56,7 +56,9 @@ pub struct Mpv {
     stepped: bool,
     /// Requests to pause or play that mpv has not confirmed yet: its reports of `pause` until then can be older than them.
     pausing: u32,
-    /// A `seek_and_play` waits for mpv to take its seek; a `pause` meanwhile cancels the play.
+    /// Seeks of `seek_and_play` mpv has not answered; `seek_due`: all answered, the last not run yet; `seek_plays`: the play still wanted, which a pause cancels.
+    play_seeks: u32,
+    seek_due: bool,
     seek_plays: bool,
     /// The frame of a grab whose time mpv has not given yet.
     taken: Option<Option<RgbImage>>,
@@ -131,6 +133,7 @@ const SET_PROPERTY_REPLY: c_int = 4;
 const COMMAND_REPLY: c_int = 5;
 const END_FILE: c_int = 7;
 const FILE_LOADED: c_int = 8;
+const SEEK: c_int = 20;
 const PROPERTY_CHANGE: c_int = 22;
 const END_ERROR: c_int = 4;
 const END_REDIRECT: c_int = 5;
@@ -340,6 +343,8 @@ impl Mpv {
             ended: false,
             stepped: false,
             pausing: 0,
+            play_seeks: 0,
+            seek_due: false,
             seek_plays: false,
             taken: None,
             looked: Instant::now(),
@@ -474,13 +479,24 @@ impl Mpv {
         unsafe { mpv_command_async(self.handle, userdata, pointers.as_ptr()) >= 0 }
     }
 
-    /// A seek (`command`'s arguments), then play once mpv has taken it. Asked at once, mpv plays before it seeks: a frame due when it paused shows first, and a relative seek counts from that frame.
+    /// A seek (`command`'s arguments), then play once mpv has run it (`MPV_EVENT_SEEK`). Played sooner, at once or on mpv's answer (given when it queues the seek, before the requests that reach it meanwhile, a play among them), mpv shows the frame due since it paused and counts a relative seek from that frame.
     pub fn seek_and_play(&mut self, args: &[&str]) {
         self.reported
             .retain(|event| !matches!(event, Event::Pause(_)));
-        if self.order(PLAY, args) {
-            (self.pausing, self.seek_plays) = (self.pausing + 1, true);
-        } else {
+        if !self.order(PLAY, args) {
+            return self.pause(false);
+        }
+        if self.play_seeks == 0 && !self.seek_due {
+            self.pausing += 1;
+        }
+        (self.play_seeks, self.seek_due, self.seek_plays) = (self.play_seeks + 1, false, true);
+    }
+
+    /// The seek of `seek_and_play` ran, or mpv refused it: play, unless a pause came since.
+    fn seek_ran(&mut self) {
+        self.seek_due = false;
+        self.pausing = self.pausing.saturating_sub(1);
+        if std::mem::take(&mut self.seek_plays) {
             self.pause(false);
         }
     }
@@ -597,10 +613,16 @@ impl Mpv {
                 None
             }
             COMMAND_REPLY if event.userdata == PLAY => {
-                self.pausing = self.pausing.saturating_sub(1);
-                if std::mem::take(&mut self.seek_plays) {
-                    self.pause(false);
+                self.play_seeks = self.play_seeks.saturating_sub(1);
+                match (self.play_seeks, event.error < 0) {
+                    (0, true) => self.seek_ran(),
+                    (0, false) => self.seek_due = true,
+                    _ => {}
                 }
+                None
+            }
+            SEEK if self.seek_due => {
+                self.seek_ran();
                 None
             }
             // SAFETY: the data of this event is an `mpv_event_property`.
@@ -1369,10 +1391,18 @@ pub(crate) mod tests {
         assert!(!events.contains(&Event::Pause(true)), "{events:?}");
     }
 
+    /// Requests mpv's core answers one by one before it plays on, as a loaded machine delays it.
+    fn keep_busy(mpv: &Mpv, requests: usize) {
+        for _ in 0..requests {
+            // SAFETY: the name lives through the call.
+            unsafe { mpv_get_property_async(mpv.handle, 0, c"time-pos".as_ptr(), DOUBLE) };
+        }
+    }
+
     #[test]
     fn a_seek_that_plays_counts_from_the_frame_on_screen() {
-        // rows P8a, P9: a client that draws slower than the clip (70 ms a frame against 40) leaves mpv a frame due when it pauses; play asked with the seek showed that frame first and counted the seek from it (seen in this test before `seek_and_play`: from frame 35, frame 36 first, then 61)
-        for offset in [0, 10, 20, 30] {
+        // rows P8a, P9: a client that draws slower than the clip (70 ms a frame against 40) leaves mpv a frame due when it pauses; play asked with the seek showed that frame first and counted the seek from it (seen in this test before `seek_and_play`: from frame 35, frame 36 first, then 61); played on mpv's answer to the seek, given before mpv runs it, a core still busy with requests took the play first (seen with `keep_busy` before the play waited for the seek to run: the same, 3 of 3)
+        for (offset, busy) in [(0, 0), (10, 300), (20, 0), (30, 300)] {
             let mut stage = Stage::new();
             stage.clip(4.0, 4.0);
             stage.settle();
@@ -1390,6 +1420,7 @@ pub(crate) mod tests {
             stage.settle();
             let (held, drawn) = (*stage.shown.last().unwrap(), stage.shown.len());
             stage.mpv.seek_and_play(&["seek", "1", "relative+exact"]);
+            keep_busy(&stage.mpv, busy);
             stage.pump(0.3, |_| false);
             let after = &stage.shown[drawn..];
             assert_eq!(
