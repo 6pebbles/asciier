@@ -56,7 +56,7 @@ pub struct Mpv {
     stepped: bool,
     /// Requests to pause or play that mpv has not confirmed yet: its reports of `pause` until then can be older than them.
     pausing: u32,
-    /// Seeks of `seek_and_play` mpv has not answered; `seek_due`: all answered, the last not run yet; `seek_plays`: the play still wanted, which a pause cancels.
+    /// Seeks of `seek_and_play` mpv has not answered; `seek_due`: all answered, the last not run yet; `seek_plays`: the play still wanted, which a pause or a step cancels.
     play_seeks: u32,
     seek_due: bool,
     seek_plays: bool,
@@ -492,7 +492,7 @@ impl Mpv {
         (self.play_seeks, self.seek_due, self.seek_plays) = (self.play_seeks + 1, false, true);
     }
 
-    /// The seek of `seek_and_play` ran, or mpv refused it: play, unless a pause came since.
+    /// The seek of `seek_and_play` ran, or mpv refused it: play, unless a pause or a step came since.
     fn seek_ran(&mut self) {
         self.seek_due = false;
         self.pausing = self.pausing.saturating_sub(1);
@@ -501,8 +501,9 @@ impl Mpv {
         }
     }
 
-    /// One frame forward or back, then paused. A step forward that ends the file has played the sound out, the position is the sound's end, and a step back from there finds the last frame again: `events` then seeks past the end, which holds the last frame at its own time.
+    /// One frame forward or back, then paused; a play that waits for a seek is dropped. A step forward that ends the file has played the sound out, the position is the sound's end, and a step back from there finds the last frame again: `events` then seeks past the end, which holds the last frame at its own time.
     pub fn step(&mut self, forward: bool) {
+        self.seek_plays = false;
         self.command(&[if forward {
             "frame-step"
         } else {
@@ -1429,6 +1430,23 @@ pub(crate) mod tests {
                 "{offset} ms on: from frame {held}: {after:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_step_back_after_a_seek_that_plays_ends_paused() {
+        // rows P8a, P15: `,` right after a seek that plays (`l,` after MPRIS Stop) ends paused, the step taking the place of the seek mpv had not run; the play that waited for the seek came after it (seen in this test before a step dropped the play: at 1.92 s on frame 48 a second later, 3 of 3)
+        let mut stage = Stage::new();
+        stage.clip(4.0, 4.0);
+        stage.until_at(&["seek", "1", "absolute+exact"], 25, 1.0);
+        stage.mpv.seek_and_play(&["seek", "5", "relative+exact"]);
+        stage.mpv.step(false);
+        let events = stage.pump(1.0, |_| false);
+        assert!(
+            stage.mpv.paused && stage.time < 1.0,
+            "at {} on frame {:?}: {events:?}",
+            stage.time,
+            stage.shown.last()
+        );
     }
 
     #[test]

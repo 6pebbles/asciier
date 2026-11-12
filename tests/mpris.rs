@@ -589,6 +589,30 @@ fn a_seek_from_the_stopped_state_counts_from_the_frame_on_screen() {
 }
 
 #[test]
+fn a_step_back_right_after_a_seek_from_the_stopped_state_ends_paused() {
+    // rows P8a, P15: `l,` in one batch after MPRIS Stop: the seek leaves the stopped state, `,` pauses on a frame and the clip stays there; the play that waited for mpv to run the seek came after `,` and played on, and the viewer, which believed it paused, did not quit at the end (seen before a step dropped the play: `> 00:01`, `> 00:02`, `> 00:07` after the window, 3 of 3)
+    let mut sandbox = Sandbox::new();
+    let bus = Bus::new(&mut sandbox);
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    let remote = Remote::new(&sandbox, &bus, tty.pid);
+    tty.await_playing();
+    remote.send("Stop", &[]);
+    tty.await_status(". ");
+    tty.send(b"l,");
+    tty.await_status("| ");
+    // a window for what must not happen: playing on
+    std::thread::sleep(Duration::from_millis(1500));
+    let (status, on) = (tty.screen().row(24), frame(tty.screen()));
+    std::thread::sleep(Duration::from_millis(500));
+    let later = (tty.screen().row(24), frame(tty.screen()));
+    assert!(status.starts_with("| "), "{status:?} on frame {on}");
+    assert_eq!(later, (status, on));
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
 fn requests_are_dropped_on_the_page_and_served_under_the_keys() {
     // row M5: remote of bin/ascii-viewer:1573 at tag python-final: on the render page every request is answered and dropped (PlayPause, Seek, Quit change nothing); under F1's keys they are served: PlayPause plays under them, Quit ends it
     let mut sandbox = Sandbox::new();
