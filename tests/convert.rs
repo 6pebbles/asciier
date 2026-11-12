@@ -43,10 +43,11 @@ const PPM_FRAME: usize = "P6\n160 90\n255\n".len() + 160 * 90 * 3;
 /// A theme whose lightest colour is a vivid yellow and whose darkest is not the background.
 const VIVID: &str =
     "background #303030\ncolor0 #000000\ncolor7 #F0F0F0\ncolor11 #FFFF00\ncolor15 #E0E0E0\n";
-/// Shell lines that wait for `$DUMP/go`, 60 s at most: a test that fails before it lets go leaves nothing waiting for long. The trap ends the wait on Ctrl-C: without it bash, whose `sleep` may just have ended well when SIGINT comes, takes the signal as handled by its child and waits on.
-const HELD: &str = r#"trap 'exit 130' INT; n=0; while [ ! -e "$DUMP/go" ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n + 1)); done"#;
+/// Shell lines that wait for `$DUMP/go`, 60 s at most: a test that fails before it lets go leaves nothing waiting for long.
+const HELD: &str =
+    r#"n=0; while [ ! -e "$DUMP/go" ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n + 1)); done"#;
 
-/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $DECODE_BYTES: the decoder fails after that many bytes; $GRAB: a frame grab waits for $DUMP/go, `$DUMP/held` said first.
+/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $DECODE_BYTES: the decoder fails after that many bytes; $GRAB: a frame grab ignores Ctrl-C and waits for $DUMP/go, `$DUMP/held` said first.
 const FFMPEG: &str = r#"#!/bin/sh
 held() { HELD; }
 case " $* " in
@@ -65,7 +66,7 @@ case " $* " in
     if [ -n "$DECODE_BYTES" ]; then "$REAL" "$@" | head -c "$DECODE_BYTES" | tee "$DUMP/decode.ppm"; exit 1; fi
     "$REAL" "$@" | tee "$DUMP/decode.ppm" ;;
 *" -frames:v "*)
-    if [ -n "$GRAB" ]; then touch "$DUMP/held"; held; fi
+    if [ -n "$GRAB" ]; then trap '' INT; touch "$DUMP/held"; held; fi
     exec "$REAL" "$@" ;;
 *) exec "$REAL" "$@" ;;
 esac
@@ -1054,7 +1055,7 @@ fn a_still_over_the_pixel_limit_is_refused() {
 
 #[test]
 fn ctrl_c_on_a_still_or_a_frame_ends_it_quietly() {
-    // row C10: bin/ascii-convert:561 at tag python-final: Ctrl-C on a still, on an `--at` frame, or in a video run before its read loop: status 130, no message, a file in the way as it was; each run held where it waits for fc-match or for the first frame, then SIGINT to its process group; 130 as a shell reports it: the old converter exited 130, the new one ends by the signal itself (seen)
+    // row C10: bin/ascii-convert:561 at tag python-final: Ctrl-C on a still, on an `--at` frame, or in a video run before its read loop: exit 130, no message, a file in the way as it was, nothing left running; each run held where it waits for fc-match or for the first frame by a child that ignores Ctrl-C, then SIGINT to its process group: the old converter killed the child it waited on (subprocess.run) and exited 130
     let mut sandbox = Sandbox::new();
     save(&gradient(400, 300), &sandbox.path("pic.png"));
     clip(&sandbox, "clip.mp4", 0.4, "160x90", 25);
@@ -1063,7 +1064,7 @@ fn ctrl_c_on_a_still_or_a_frame_ends_it_quietly() {
     sandbox.set("GRAB", "1");
     sandbox.program(
         "fc-match",
-        &format!("#!/bin/sh\ntouch \"$DUMP/held\"\n{HELD}\nexec {fc_match} \"$@\"\n"),
+        &format!("#!/bin/sh\ntrap '' INT\ntouch \"$DUMP/held\"\n{HELD}\nexec {fc_match} \"$@\"\n"),
     );
     std::fs::write(sandbox.path("pic-ascii.png"), "in the way").unwrap();
     // what each would make; the still's is in the way and checked last
@@ -1078,10 +1079,7 @@ fn ctrl_c_on_a_still_or_a_frame_ends_it_quietly() {
         await_file(&sandbox.path("held"));
         run.interrupt();
         let (status, out, err) = run.finish();
-        assert!(
-            status.code() == Some(130) || status.signal() == Some(libc::SIGINT),
-            "{args:?}: {status:?}"
-        );
+        assert_eq!(status.code(), Some(130), "{args:?}: {status:?}");
         assert_eq!((out.as_str(), err.as_str()), ("", ""), "{args:?}");
         assert!(
             made.is_none_or(|made| !sandbox.path(made).exists()),

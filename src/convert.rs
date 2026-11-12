@@ -93,8 +93,10 @@ output:
   -a, --at SECONDS                  a video's frame at that time, as a PNG
   -h, --help                        this text";
 
-/// Set by SIGINT while a video converts: stop reading frames, finish the file.
+/// Ctrl-C, noted for the whole run: while a video's frames are read it stops the reading and the file is finished (row X9); before a video's encoding what runs is killed and nothing made counts (row C10).
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+/// Set once a video's decoder and encoder are to start: from then on Ctrl-C kills nothing.
+static ENCODING: AtomicBool = AtomicBool::new(false);
 
 /// How a run ended without its output path.
 enum Stop {
@@ -102,8 +104,8 @@ enum Stop {
     Usage(String),
     /// A failure: exit 1.
     Failed(String),
-    /// Ctrl-C while a video converted: the file holds the part converted; exit 130.
-    Interrupted(PathBuf),
+    /// Ctrl-C: exit 130; the path of a file that holds the part converted (row X9), else nothing printed (row C10).
+    Interrupted(Option<PathBuf>),
 }
 
 impl From<Error> for Stop {
@@ -125,14 +127,22 @@ pub fn main(args: impl Iterator<Item = OsString>) -> u8 {
             return code;
         }
     };
-    match run(&options) {
-        Ok(out) => {
-            println!("{}", out.display());
-            if options.at.is_some() && std::io::stdout().is_terminal() && term::kitty::named() {
-                desktop::icat(&out);
-            }
-            0
+    catch_ctrl_c();
+    let ended = run(&options).map(|out| {
+        println!("{}", out.display());
+        if options.at.is_some() && std::io::stdout().is_terminal() && term::kitty::named() {
+            desktop::icat(&out);
         }
+    });
+    let ended = match ended {
+        // what Ctrl-C killed leaves nothing to report
+        _ if INTERRUPTED.load(Ordering::SeqCst) && !ENCODING.load(Ordering::SeqCst) => {
+            Err(Stop::Interrupted(None))
+        }
+        ended => ended,
+    };
+    match ended {
+        Ok(()) => 0,
         Err(Stop::Usage(text)) => {
             eprintln!("{USAGE}\nasciier convert: error: {text}");
             2
@@ -142,10 +152,42 @@ pub fn main(args: impl Iterator<Item = OsString>) -> u8 {
             1
         }
         Err(Stop::Interrupted(out)) => {
-            println!("{}", out.display());
+            if let Some(out) = out {
+                println!("{}", out.display());
+            }
             130
         }
     }
+}
+
+/// Ctrl-C for the whole run: SIGINT blocked in every thread (threads inherit the mask, std starts a child unblocked) and taken by a thread of its own, which notes it and, before a video's encoding, kills every child of the main thread: a child may outlive the terminal's SIGINT, or get none when it was sent to the converter alone.
+fn catch_ctrl_c() {
+    let set = unsafe {
+        let mut set = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        set
+    };
+    let main = std::process::id();
+    std::thread::spawn(move || {
+        loop {
+            let mut signal = 0;
+            unsafe { libc::sigwait(&set, &mut signal) };
+            INTERRUPTED.store(true, Ordering::SeqCst);
+            if !ENCODING.load(Ordering::SeqCst) {
+                let children =
+                    std::fs::read_to_string(format!("/proc/{main}/task/{main}/children"))
+                        .unwrap_or_default();
+                for child in children
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse().ok())
+                {
+                    unsafe { libc::kill(child, libc::SIGKILL) };
+                }
+            }
+        }
+    });
 }
 
 fn number<T: std::str::FromStr + PartialOrd + std::fmt::Display>(
@@ -582,10 +624,6 @@ fn own_session(command: &mut Command) -> &mut Command {
     }
 }
 
-extern "C" fn interrupted(_: libc::c_int) {
-    INTERRUPTED.store(true, Ordering::Relaxed);
-}
-
 /// `source` to `out`: ffmpeg decodes at the output's detail, each frame is drawn, ffmpeg encodes; `first` is the frame at 0 s, uncropped.
 fn video(
     options: &Options,
@@ -609,29 +647,6 @@ fn video(
         DENOISE.2,
         DENOISE.3
     );
-    let spawn = |command: &mut Command| {
-        command
-            .spawn()
-            .map_err(|e| Stop::Failed(format!("cannot run ffmpeg: {e}")))
-    };
-    let mut decode = spawn(own_session(
-        Command::new("ffmpeg")
-            .args(["-v", "error", "-nostdin", "-i"])
-            .arg(source)
-            .args([
-                "-an",
-                "-sn",
-                "-vf",
-                &filters,
-                "-f",
-                "image2pipe",
-                "-c:v",
-                "ppm",
-                "-",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped()),
-    ))?;
     // VAAPI: about a fifth of libx264's CPU; qp 24 matches libx264 -crf 20 on ASCII frames
     let (device, codec): (&[&str], &[&str]) = if vaapi(w, h) {
         (
@@ -661,6 +676,33 @@ fn video(
         "apad".into()
     };
     let (size, rate) = (format!("{w}x{h}"), format!("{num}/{den}"));
+    ENCODING.store(true, Ordering::SeqCst);
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        return Err(Stop::Interrupted(None));
+    }
+    let spawn = |command: &mut Command| {
+        command
+            .spawn()
+            .map_err(|e| Stop::Failed(format!("cannot run ffmpeg: {e}")))
+    };
+    let mut decode = spawn(own_session(
+        Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-i"])
+            .arg(source)
+            .args([
+                "-an",
+                "-sn",
+                "-vf",
+                &filters,
+                "-f",
+                "image2pipe",
+                "-c:v",
+                "ppm",
+                "-",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped()),
+    ))?;
     let mut encode = spawn(own_session(
         Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
@@ -675,12 +717,6 @@ fn video(
             .arg(out)
             .stdin(Stdio::piped()),
     ))?;
-    unsafe {
-        libc::signal(
-            libc::SIGINT,
-            interrupted as extern "C" fn(libc::c_int) as libc::sighandler_t,
-        )
-    };
     let shown = if total > 0 {
         total.to_string()
     } else {
@@ -736,7 +772,7 @@ fn video(
             "stopped at frame {done}: {} holds the part converted",
             out.display()
         );
-        return Err(Stop::Interrupted(out.to_path_buf()));
+        return Err(Stop::Interrupted(Some(out.to_path_buf())));
     }
     if !decoded {
         return Err(Stop::Failed(format!(
@@ -764,6 +800,9 @@ fn png_only(out: &Path) -> std::result::Result<(), Stop> {
 
 fn save(picture: &RgbImage, out: &Path) -> std::result::Result<(), Stop> {
     let bytes = picture::png(picture)?;
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        return Err(Stop::Interrupted(None)); // a file in the way stays as it was
+    }
     std::fs::write(out, bytes)
         .map_err(|e| Stop::Failed(format!("cannot write {}: {e}", out.display())))
 }
