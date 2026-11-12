@@ -144,6 +144,7 @@ pub fn reverse_row(geometry: Geometry, text: &str) -> Vec<u8> {
 struct Playback {
     mpv: Mpv,
     audio: bool,
+    /// What the viewer asked for last, or mpv reported since.
     paused: bool,
     time: f64,
     length: Option<f64>,
@@ -165,6 +166,13 @@ struct Playback {
     rows: Vec<u8>,
     /// What a frame grab is for, while one is under way.
     grab: Option<Grab>,
+}
+
+impl Playback {
+    fn pause(&mut self, paused: bool) {
+        self.mpv.pause(paused);
+        self.paused = paused;
+    }
 }
 
 enum Grab {
@@ -271,7 +279,7 @@ fn run(file: &Path) -> Result<()> {
             if !video {
                 mpv.no_video();
             }
-            let playback = Playback {
+            let mut playback = Playback {
                 mpv,
                 audio,
                 paused: false,
@@ -289,7 +297,7 @@ fn run(file: &Path) -> Result<()> {
                 rows: Vec::new(),
                 grab: None,
             };
-            playback.mpv.set("pause", "no");
+            playback.pause(false);
             if video {
                 Mode::Video(playback)
             } else {
@@ -544,7 +552,7 @@ impl Viewer {
                 Request::Stop => {
                     if let Some(p) = self.playback() {
                         (p.stopped, p.playing) = (true, false);
-                        p.mpv.set("pause", "yes");
+                        p.pause(true);
                     }
                 }
                 Request::Quit => self.quit = true,
@@ -561,7 +569,7 @@ impl Viewer {
         }
         let play = p.stopped || p.paused;
         (p.stopped, p.playing) = (false, play);
-        p.mpv.set("pause", if play { "no" } else { "yes" });
+        p.pause(!play);
     }
 
     /// Seek by `delta` seconds, exactly; from the stopped state playback starts there.
@@ -571,7 +579,7 @@ impl Viewer {
             .command(&["seek", &format!("{delta}"), "relative+exact"]);
         if p.stopped {
             (p.stopped, p.playing) = (false, true);
-            p.mpv.set("pause", "no");
+            p.pause(false);
         }
     }
 
@@ -748,7 +756,7 @@ impl Viewer {
         if p.stopped {
             return;
         }
-        p.playing = false;
+        (p.playing, p.paused) = (false, true); // a step ends paused, reported or not
         p.mpv.command(&[if forward {
             "frame-step"
         } else {
@@ -903,7 +911,7 @@ impl Viewer {
     fn pause_for_layer(&mut self) -> bool {
         match self.playback() {
             Some(p) if !p.paused => {
-                p.mpv.set("pause", "yes");
+                p.pause(true);
                 true
             }
             _ => false,
@@ -917,7 +925,7 @@ impl Viewer {
         if self.resume && self.help.is_none() && self.page.is_none() {
             self.resume = false;
             if let Some(p) = self.playback() {
-                p.mpv.set("pause", "no");
+                p.pause(false);
             }
         }
         self.ui.clear();

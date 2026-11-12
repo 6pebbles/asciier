@@ -244,7 +244,6 @@ fn space_and_p_pause_and_play_on() {
 }
 
 #[test]
-#[ignore = "defect: space within about 0.1 s of the start does not pause"]
 fn space_right_after_the_start_pauses_too() {
     // row P8: at its first status row the clip plays; `space` then must pause it as later; run in this harness the old viewer showed `| 00:00 / 00:30` 1.5 s after it (6 of 6 runs)
     let sandbox = Sandbox::new();
@@ -256,6 +255,30 @@ fn space_right_after_the_start_pauses_too() {
     std::thread::sleep(Duration::from_secs(2));
     let status = tty.screen().row(24);
     assert!(status.starts_with("| 00:00"), "{status:?}");
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
+fn two_spaces_in_one_batch_leave_it_as_it_was() {
+    // rows P8, V14: each `space` toggles what the one before asked for, as bin/ascii-viewer:2270 at tag python-final flips its own flag; mpv may report neither of two requests so close
+    let sandbox = Sandbox::new();
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_playing();
+    let from = frame(tty.screen());
+    tty.send(b"  ");
+    tty.until("playing on", |screen| {
+        screen.row(24).starts_with("> ") && frame(screen) > from + 25
+    });
+    pause(&mut tty);
+    lands(&mut tty, DOWN, 0, "| 00:00");
+    tty.send(b"  ");
+    // a window for what must not happen: the clock or the picture moving on
+    std::thread::sleep(Duration::from_millis(600));
+    let status = tty.screen().row(24);
+    assert!(status.starts_with("| 00:00"), "{status:?}");
+    assert_eq!(frame(tty.screen()), 0);
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }

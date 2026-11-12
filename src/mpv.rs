@@ -52,6 +52,8 @@ pub struct Mpv {
     paused: bool,
     at_end: bool,
     ended: bool,
+    /// `pause` requests mpv has not confirmed yet: its reports of `pause` until then can be older than them.
+    pausing: u32,
     /// What mpv renders into, 63 bytes longer than the picture: it starts at a multiple of 64.
     surface: Vec<u8>,
     /// mpv's `volume-max`, read when a file opened.
@@ -116,6 +118,7 @@ struct Param {
 }
 
 const EVENT_NONE: c_int = 0;
+const SET_PROPERTY_REPLY: c_int = 4;
 const COMMAND_REPLY: c_int = 5;
 const END_FILE: c_int = 7;
 const FILE_LOADED: c_int = 8;
@@ -140,6 +143,8 @@ const SW_POINTER: c_int = 20;
 const UPDATE_FRAME: u64 = 1;
 /// `reply_userdata` of the `screenshot-raw` behind `grab`.
 const GRAB: u64 = 1;
+/// `reply_userdata` of the `pause` set behind `pause`.
+const PAUSE: u64 = 2;
 
 type Callback = extern "C" fn(*mut c_void);
 
@@ -316,6 +321,7 @@ impl Mpv {
             paused: false,
             at_end: false,
             ended: false,
+            pausing: 0,
             surface: Vec::new(),
             volume_max: 130.0,
         };
@@ -384,7 +390,7 @@ impl Mpv {
     pub fn open(&mut self, file: &Path, seconds: f64) -> Result<(bool, bool)> {
         // mpv reads a relative name as it likes: `-` is standard input
         let file = std::path::absolute(file)?;
-        self.set("pause", "yes");
+        self.pause(true);
         self.send(
             0,
             &[
@@ -446,13 +452,27 @@ impl Mpv {
 
     /// Set a property, not waited for.
     pub fn set(&self, name: &str, value: &str) {
+        self.put(0, name, value);
+    }
+
+    /// Pause or play, not waited for. Reports of `pause` that `open` heard, and those mpv makes before it confirms this request, are not handed on: they can be older than it, and mpv reports only a value that differs from the last it reported.
+    pub fn pause(&mut self, paused: bool) {
+        self.reported
+            .retain(|event| !matches!(event, Event::Pause(_)));
+        if self.put(PAUSE, "pause", if paused { "yes" } else { "no" }) {
+            self.pausing += 1;
+        }
+    }
+
+    /// `set` with mpv's `reply_userdata`; whether mpv took the request.
+    fn put(&self, userdata: u64, name: &str, value: &str) -> bool {
         let (Ok(name), Ok(value)) = (CString::new(name), CString::new(value)) else {
-            return;
+            return false;
         };
         let mut text = value.as_ptr();
         let text = &mut text as *mut *const c_char as *mut c_void;
         // SAFETY: mpv copies the value before the call returns.
-        unsafe { mpv_set_property_async(self.handle, 0, name.as_ptr(), STRING, text) };
+        unsafe { mpv_set_property_async(self.handle, userdata, name.as_ptr(), STRING, text) >= 0 }
     }
 
     /// Everything mpv reported since the last call; never blocks.
@@ -511,6 +531,10 @@ impl Mpv {
                 })
             }
             COMMAND_REPLY if event.userdata == GRAB => Some(Event::Grabbed(self.grabbed(event))),
+            SET_PROPERTY_REPLY if event.userdata == PAUSE => {
+                self.pausing = self.pausing.saturating_sub(1);
+                None
+            }
             // SAFETY: the data of this event is an `mpv_event_property`.
             PROPERTY_CHANGE => self.changed(unsafe { &*(event.data as *const Property) }),
             _ => None,
@@ -533,7 +557,7 @@ impl Mpv {
         match name {
             b"pause" => {
                 self.paused = flag.unwrap_or(self.paused);
-                flag.map(Event::Pause)
+                flag.filter(|_| self.pausing == 0).map(Event::Pause)
             }
             b"eof-reached" => {
                 self.at_end = flag.unwrap_or(false);
@@ -1257,6 +1281,22 @@ pub(crate) mod tests {
         let rate = *shown.last().unwrap() as f64 / wall;
         assert!(near(rate, 25.0, 4.0), "{rate} frames a second: {shown:?}");
         assert!(shown.len() >= 18, "few frames lost: {shown:?}");
+    }
+
+    #[test]
+    fn no_older_report_undoes_a_pause_asked_for() {
+        // rows P8, H3: the open's `pause=yes`, heard while it waited, reached the viewer after its own `pause=no`: F1 and space did nothing for the first 0.1 s
+        let mut stage = Stage::new();
+        stage.clip(2.0, 2.0);
+        stage.mpv.pause(false);
+        let events = stage.pump(3.0, |e| matches!(e, Event::Time(t) if *t > 0.3));
+        assert!(stage.time > 0.3, "it plays: {events:?}");
+        assert!(!events.contains(&Event::Pause(true)), "{events:?}");
+        // asked for and taken back at once: mpv may report the first, never after the second
+        stage.mpv.pause(true);
+        stage.mpv.pause(false);
+        let events = stage.pump(0.5, |_| false);
+        assert!(!events.contains(&Event::Pause(true)), "{events:?}");
     }
 
     #[test]

@@ -593,7 +593,6 @@ fn help_pauses_playing_media_until_it_closes() {
 }
 
 #[test]
-#[ignore = "defect: F1 within about 0.1 s of the start leaves the video playing under the keys"]
 fn help_right_after_the_start_pauses_too() {
     // row H3: at its first draw the video plays (the status row says `>`); the keys asked for then must pause it as later
     let sandbox = Sandbox::new();
