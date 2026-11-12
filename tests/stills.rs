@@ -1856,7 +1856,7 @@ fn green_columns(sent: &Placed) -> usize {
         .count()
 }
 
-/// Wait until `test` holds for the number of what draws SVG parts for the viewer in the background: its threads named `svg part`, and its child processes (the Python tools ran resvg for a part); fails the test after `PATIENCE`. None left: each part asked for has been handed over and the loop woken, so the loop takes it before a key sent after.
+/// Wait until `test` holds for the number of what draws SVG parts for the viewer in the background: its threads named `svg part`, each ending once its part is handed over and the loop woken, so the loop takes the part before a key sent after; and its child processes (the Python tools ran resvg for a part, one at a time in the order asked); fails the test after `PATIENCE`.
 fn await_parts(tty: &Tty, what: &str, test: impl Fn(usize) -> bool) {
     let read = |path: PathBuf| std::fs::read_to_string(path).unwrap_or_default();
     let listed = |dir: String| {
