@@ -93,7 +93,7 @@ output:
   -a, --at SECONDS                  a video's frame at that time, as a PNG
   -h, --help                        this text";
 
-/// Ctrl-C, noted for the whole run: while a video's frames are read it stops the reading and the file is finished (row X9); before a video's encoding what runs is killed and nothing made counts (row C10).
+/// Ctrl-C, noted for the whole run: before a video's encoding what runs is killed and nothing made counts; while its frames are read the reading stops and the file is finished (row X9); after the reading the file is finished and nothing said (row C10).
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 /// Set once a video's decoder and encoder are to start: from then on Ctrl-C kills nothing.
 static ENCODING: AtomicBool = AtomicBool::new(false);
@@ -733,21 +733,22 @@ fn video(
     eprint!("\r0/{shown} frames");
     // two stages side by side, frames in order: reading and cells on a thread, painting and writing here; the decoder is killed before its pipe closes, of which it would complain on stderr
     let (grids, painted) = std::sync::mpsc::sync_channel::<Grid>(8);
-    let failure = std::thread::scope(|scope| {
-        let reader = scope.spawn(move || -> Result<()> {
+    // Ok(true): Ctrl-C stopped the reading
+    let read = std::thread::scope(|scope| {
+        let reader = scope.spawn(move || -> Result<bool> {
             let ended = loop {
                 if INTERRUPTED.load(Ordering::Relaxed) {
-                    break Ok(());
+                    break Ok(true);
                 }
                 let Some(frame) = ppm_frame(&mut frames) else {
-                    return Ok(()); // the stream's end: the decoder ends by itself
+                    return Ok(false); // the stream's end: the decoder ends by itself
                 };
                 let grid = match art.cells(&frame) {
                     Ok(grid) => grid,
                     Err(e) => break Err(e),
                 };
                 if grids.send(grid).is_err() {
-                    break Ok(()); // the writer stopped
+                    break Ok(false); // the writer stopped
                 }
             };
             kill(decoder);
@@ -761,17 +762,14 @@ fn video(
             done += 1;
             eprint!("\r{done}/{shown} frames");
         }
-        reader.join().expect("the reader").err().map(|e| e.0)
+        reader.join().expect("the reader")
     });
     eprintln!("\r{done}/{shown} frames");
-    let stopped = INTERRUPTED.load(Ordering::Relaxed);
     let finish = |child: &mut Child| child.wait().map(|status| status.success()).unwrap_or(false);
     let decoded = finish(&mut decode);
     drop(sink);
     let encoded = finish(&mut encode);
-    if let Some(failure) = failure {
-        return Err(Stop::Failed(failure));
-    }
+    let stopped = read?;
     if !encoded {
         return Err(Stop::Failed("ffmpeg could not encode the video".into()));
     }
@@ -781,6 +779,9 @@ fn video(
             out.display()
         );
         return Err(Stop::Interrupted(Some(out.to_path_buf())));
+    }
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        return Err(Stop::Interrupted(None));
     }
     if !decoded {
         return Err(Stop::Failed(format!(

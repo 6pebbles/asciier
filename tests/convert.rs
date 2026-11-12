@@ -7,7 +7,7 @@ use image::RgbImage;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io::Read;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -1094,9 +1094,8 @@ fn ctrl_c_on_a_still_or_a_frame_ends_it_quietly() {
 }
 
 #[test]
-#[ignore = "defect: Ctrl-C while the encoder finishes the file is dropped: exit 0, the path printed"]
 fn ctrl_c_while_the_encoder_finishes_is_130_too() {
-    // row C10: main of bin/ascii-convert:561 at tag python-final: Ctrl-C in a video run after its read loop, while it waits for the encoder (held through the wrapper once the file is written): status 130 as a shell reports it, no message; run in this harness the old converter exited 130 with nothing printed (3 of 3); the file the encoder wrote stays; seen: exit 0 and `clip-out.mp4` printed (5 of 5)
+    // row C10: main of bin/ascii-convert:561 at tag python-final: Ctrl-C in a video run after its read loop, while it waits for the encoder (held through the wrapper once the file is written): exit 130, no message; run in this harness the old converter exited 130 with nothing printed (3 of 3); the file the encoder wrote stays
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "clip.mp4", 0.4, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
@@ -1109,10 +1108,7 @@ fn ctrl_c_while_the_encoder_finishes_is_130_too() {
     run.interrupt();
     std::fs::write(sandbox.path("go"), "").unwrap();
     let (status, out, err) = run.finish();
-    assert!(
-        status.code() == Some(130) || status.signal() == Some(libc::SIGINT),
-        "{status:?}: {out:?} {err:?}"
-    );
+    assert_eq!((status.code(), out.as_str()), (Some(130), ""), "{err:?}");
     assert!(err.ends_with("\r10/10 frames\n"), "{err:?}");
     assert_eq!(frames_in(&sandbox, &sandbox.path("clip-out.mp4")), 10);
     await_gone(&sandbox);
