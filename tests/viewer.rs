@@ -214,7 +214,7 @@ fn a_missing_theme_is_a_message() {
 
 #[test]
 fn the_terminal_is_taken_and_given_back() {
-    // rows V2, V2a, V3, V15: bin/ascii-viewer:2445 and 2470 at tag python-final; N1: the title is `asciier`
+    // rows V2, V3, V15: bin/ascii-viewer:2445 and 2470 at tag python-final; N1: the title is `asciier` (whether Hyprland's close bind matches it, V2a, is the deployment's)
     let sandbox = Sandbox::new();
     let mut tty = shown_still(&sandbox);
     let out = tty.out();
@@ -958,7 +958,7 @@ fn help_right_after_the_start_pauses_too() {
 
 #[test]
 fn closing_the_keys_sends_the_image_again() {
-    // rows H5, K5: in image mode the image goes and comes back
+    // rows H5, K5: in image mode the keys' draw deletes kitty's images first, and closing them places the image again after a delete (bin/ascii-viewer:2089-2098 and :2105 at tag python-final)
     let mut sandbox = Sandbox::new();
     sandbox.set("KITTY_WINDOW_ID", "1");
     let picture = save(&gradient(800, 400), &sandbox.path("pic.png"));
@@ -967,11 +967,22 @@ fn closing_the_keys_sends_the_image_again() {
         .arg(&picture)
         .kitty(KITTY_OK, Duration::ZERO)
         .start();
-    tty.expect(0, b"a=T,f=24,t=t,s=800,v=400");
+    let placement: &[u8] = b"a=T,f=24,t=t,s=800,v=400";
+    tty.expect(0, placement);
     let at = tty.send(F1);
-    tty.expect(at, b"any other key closes");
+    let end = tty.expect(at, b"any other key closes");
+    let keys = &tty.out()[at..end];
+    assert!(
+        keys.starts_with(b"\x1b[?2026h\x1b[0m\x1b_Ga=d,d=A,q=2\x1b\\\x1b[2J"),
+        "{}",
+        shown(&keys[..keys.len().min(60)])
+    );
     let at = tty.send(b"x");
-    tty.expect(at, b"a=T,f=24,t=t,s=800,v=400");
+    let placed = tty.expect(at, placement) - placement.len();
+    assert!(
+        find(&tty.out(), KITTY_CLEAR, at).is_some_and(|delete| delete < placed),
+        "no delete before the placement"
+    );
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }
