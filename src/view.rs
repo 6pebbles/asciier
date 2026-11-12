@@ -1277,6 +1277,51 @@ mod tests {
     };
 
     #[test]
+    fn a_still_is_rendered_anew_once_after_each_change() {
+        // row S16: a change of the look, the window or the view (zoom, pan) renders the still anew, and once: the draw after it is what a gallery that never rendered draws in that state, and the draw after that renders nothing; the rows alone and the pan keep the grid's px, so only the window and the view in the cache's key tell them
+        let colours = RgbImage::from_fn(960, 480, |x, y| {
+            image::Rgb([(x * 255 / 959) as u8, (y * 255 / 479) as u8, 96])
+        });
+        let still = || Still {
+            pic: Pic::Rgb(colours.clone()),
+            svg: None,
+        };
+        let path = PathBuf::from("colours.png");
+        let mut gallery = Gallery::new(path.clone(), still(), false);
+        let mut ui = ui(SMALL);
+        let mut shown = gallery.draw(&mut ui, false);
+        let mut keys: Vec<&[u8]> = Vec::new();
+        for (n, what) in ["look", "window", "zoom", "pan"].into_iter().enumerate() {
+            match what {
+                "look" => ui.look.level = 5,
+                "window" => ui.geometry.rows = 30,
+                _ => {
+                    let key: &[u8] = if what == "zoom" { b"+" } else { b"l" };
+                    assert!(gallery.key(key, &mut ui), "{what}: no still key");
+                    keys.push(key);
+                }
+            }
+            let drawn = gallery.draw(&mut ui, false);
+            assert!(drawn != shown, "{what}: drawn as before");
+            let mut fresh = Gallery::new(path.clone(), still(), false);
+            for key in &keys {
+                fresh.key(key, &mut ui);
+            }
+            assert!(
+                fresh.draw(&mut ui, false) == drawn,
+                "{what}: not rendered anew"
+            );
+            // other inks from here on: a draw equal to the last one rendered nothing
+            ui.inks = Inks::new(&ui.theme, if n % 2 == 0 { 0 } else { 100 }, Skin::Grey);
+            assert!(
+                gallery.draw(&mut ui, false) == drawn,
+                "{what}: rendered again"
+            );
+            shown = drawn;
+        }
+    }
+
+    #[test]
     fn a_toast_lasts_1_2_s_from_say() {
         // row V16: a toast's time is 1.2 s from the call that shows it (TOAST, bin/ascii-viewer:118 and :2129 at tag python-final); its row, reverse video cut to cols - 2, shows while that time runs and not after it
         let mut ui = ui(SMALL);
