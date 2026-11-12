@@ -50,11 +50,12 @@ const VIVID: &str =
 const HELD: &str =
     r#"n=0; while [ ! -e "$DUMP/go" ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n + 1)); done"#;
 
-/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $CHATTER: the decoder says that line on stderr again and again while it decodes; $DECODE_BYTES: the decoder fails after that many bytes; $STALL: the decoder gives that many bytes, then nothing, its pipe open, until $DUMP/go, `$DUMP/held` said first; $GRAB: a frame grab ignores Ctrl-C and waits for $DUMP/go, `$DUMP/held` said first.
+/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw and its arguments in $DUMP/encode.args; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $CHATTER: the decoder says that line on stderr again and again while it decodes; $DECODE_BYTES: the decoder fails after that many bytes; $STALL: the decoder gives that many bytes, then nothing, its pipe open, until $DUMP/go, `$DUMP/held` said first; $GRAB: a frame grab ignores Ctrl-C and waits for $DUMP/go, `$DUMP/held` said first.
 const FFMPEG: &str = r#"#!/bin/sh
 held() { HELD; }
 case " $* " in
 *" rawvideo "*)
+    printf '%s\n' "$@" > "$DUMP/encode.args"
     if [ -n "$FAIL_AFTER" ]; then head -c "$FAIL_AFTER" > /dev/null; exit 1; fi
     if [ -n "$HOLD" ]; then
         { dd bs="$FRAME" count="$HOLD" iflag=fullblock status=none; held; cat; } | tee "$DUMP/encode.raw" | "$REAL" "$@"
@@ -320,6 +321,11 @@ fn wrap_ffmpeg(sandbox: &mut Sandbox) {
     sandbox.set("REAL", ffmpeg);
     let dump = sandbox.dir.clone();
     sandbox.set("DUMP", dump);
+}
+
+/// The encoder's arguments in the ffmpeg wrapper's notes, a line each.
+fn encoder_args(sandbox: &Sandbox) -> String {
+    std::fs::read_to_string(sandbox.path("encode.args")).unwrap()
 }
 
 /// Wait until `file` exists; fails the test after `PATIENCE`.
@@ -2099,7 +2105,7 @@ fn every_frame_is_drawn_as_that_frame_alone() {
 
 #[test]
 fn h264_with_every_sound_stream_as_aac_and_nothing_else() {
-    // row X6: convert_video and vaapi of bin/ascii-convert:413 and :501 at tag python-final (tests/test_convert.py:215 and :220): H.264, by VAAPI only when a trial encode at the output size works, else by libx264 (which leaves its settings in the stream: `x264 - core`): a VAAPI that fails (LIBVA_DRIVER_NAME=bogus) falls back; every sound stream of the source as AAC, none needed, subtitles left out; whether this machine's VAAPI works is not assumed
+    // row X6: convert_video and vaapi of bin/ascii-convert:413 and :501 at tag python-final (tests/test_convert.py:215 and :220): H.264, by VAAPI only when a trial encode at the output size works, else by libx264 (which leaves its settings in the stream: `x264 - core`); whether this machine's VAAPI works is not assumed: the trial run here at 320 x 190 says which the files hold, and the encoder's arguments seen through the ffmpeg wrapper, `-vaapi_device /dev/dri/renderD128`, `-vf format=nv12,hwupload -c:v h264_vaapi -qp 24` or `-c:v libx264 -crf 20 -pix_fmt yuv420p`; a VAAPI that fails (LIBVA_DRIVER_NAME=bogus) falls back to libx264: `crf=20.0` in its settings, yuv420p; every sound stream of the source as AAC, none needed, subtitles left out
     let mut sandbox = Sandbox::new();
     std::fs::write(
         sandbox.path("words.srt"),
@@ -2154,13 +2160,64 @@ fn h264_with_every_sound_stream_as_aac_and_nothing_else() {
         streams(&sandbox, &sandbox.path("mute-ascii.mp4")),
         ["video h264 320x190"]
     );
+    let vaapi = Path::new("/dev/dri/renderD128").exists()
+        && sandbox
+            .command("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-vaapi_device",
+                "/dev/dri/renderD128",
+            ])
+            .args(["-f", "lavfi", "-i", "color=s=320x190:d=0.04"])
+            .args([
+                "-vf",
+                "format=nv12,hwupload",
+                "-c:v",
+                "h264_vaapi",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success();
+    let x264 = |out: &Path| find(&std::fs::read(out).unwrap(), b"x264 - core", 0).is_some();
+    for out in ["many-ascii.mp4", "mute-ascii.mp4"] {
+        assert_eq!(x264(&sandbox.path(out)), !vaapi, "{out}, VAAPI {vaapi}");
+    }
+    let libx264 = "-c:v\nlibx264\n-crf\n20\n-pix_fmt\nyuv420p\n-c:a\n";
+    wrap_ffmpeg(&mut sandbox);
+    converted(&sandbox, &["-W", "320", "-o", "plain.mp4", "mute.mp4"]);
+    let args = encoder_args(&sandbox);
+    if vaapi {
+        assert!(
+            args.starts_with("-v\nerror\n-y\n-vaapi_device\n/dev/dri/renderD128\n-f\nrawvideo\n")
+                && args.contains("\n-vf\nformat=nv12,hwupload\n-c:v\nh264_vaapi\n-qp\n24\n-c:a\n"),
+            "{args}"
+        );
+    } else {
+        assert!(args.contains(libx264) && !args.contains("vaapi"), "{args}");
+    }
     sandbox.set("LIBVA_DRIVER_NAME", "bogus");
     let out = converted(&sandbox, &["-W", "320", "-o", "bogus.mp4", "mute.mp4"]);
     assert_eq!(streams(&sandbox, &out), ["video h264 320x190"]);
+    let args = encoder_args(&sandbox);
     assert!(
-        find(&std::fs::read(&out).unwrap(), b"x264 - core", 0).is_some(),
-        "not libx264"
+        args.contains(libx264) && !args.contains("h264_vaapi"),
+        "{args}"
     );
+    let stream = std::fs::read(&out).unwrap();
+    let settings = find(&stream, b"x264 - core", 0).expect("not libx264");
+    let line = &stream[settings..find(&stream, b"\0", settings).unwrap()];
+    assert!(
+        String::from_utf8_lossy(line).contains(" crf=20.0 "),
+        "{}",
+        String::from_utf8_lossy(line)
+    );
+    assert_eq!(entry(&sandbox, &out, "v:0", "pix_fmt"), "yuv420p");
 }
 
 #[test]
