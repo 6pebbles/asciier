@@ -1189,7 +1189,7 @@ fn whole_frames(out: &[u8]) -> Vec<u32> {
 
 #[test]
 fn r_on_a_video_pauses_it_under_the_page_until_it_closes() {
-    // rows P22, R7, V21, H3: open_page and close_page of bin/ascii-viewer:2048 and :2112 at tag python-final: r on a playing video opens the page on its frame at full size (1920 x 1080 for 160 x 90), named by the frame's time, playback paused under it and under help over it; q and r there go back to the player, cleared, and it plays on from where it paused; q there does not quit
+    // rows P22, R7, V21, H3, N29: open_page and close_page of bin/ascii-viewer:2048 and :2112 at tag python-final: r on a playing video opens the page on its frame at full size (1920 x 1080 for 160 x 90; N29: its preview sent as f=24), named by the frame's time, playback paused under it and under help over it; q and r there go back to the player, cleared, and it plays on from where it paused; q there does not quit
     let mut sandbox = Sandbox::new();
     sandbox.set("KITTY_WINDOW_ID", "1");
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
