@@ -82,6 +82,46 @@ fn jpeg(picture: &RgbImage, orientation: Option<u8>) -> Vec<u8> {
     out
 }
 
+/// An MPO as a camera writes it: the JPEG of `first` with an APP2 `MPF` segment after its SOI, whose index (CIPA DC-007) lists it and the JPEG of `second` appended behind it; Pillow opens such a file as an MPO of two frames (JpegImagePlugin's jpeg_factory).
+fn mpo(first: &RgbImage, second: &RgbImage) -> Vec<u8> {
+    let (head, tail) = (jpeg(first, None), jpeg(second, None));
+    // the index is little-endian TIFF: its offsets count from its own start, 4 bytes into the segment's data
+    let mut index = b"II*\0\x08\0\0\0\x03\0".to_vec();
+    // MPFVersion `0100`; NumberOfImages 2; MPEntry, 2 entries of 16 bytes at offset 50, past the directory and its next-directory offset of 0
+    for (tag, kind, count, value) in [
+        (0xb000u16, 7u16, 4u32, u32::from_le_bytes(*b"0100")),
+        (0xb001, 4, 1, 2),
+        (0xb002, 7, 32, 50),
+    ] {
+        index.extend(tag.to_le_bytes());
+        index.extend(kind.to_le_bytes());
+        index.extend(count.to_le_bytes());
+        index.extend(value.to_le_bytes());
+    }
+    index.extend(0u32.to_le_bytes());
+    let segment = 2 + 4 + index.len() + 32;
+    let start = 2 + 2 + 2 + 4; // the index's start in the file: past SOI, the marker, the length and `MPF\0`
+    let second_at = (head.len() + 2 + segment - start) as u32;
+    // each entry: attributes (a representative baseline primary, then a disparity image, both JPEG), size, offset, two dependent entries
+    for (attributes, size, offset) in [
+        (0x2003_0000u32, (head.len() + 2 + segment) as u32, 0u32),
+        (0x0002_0002, tail.len() as u32, second_at),
+    ] {
+        index.extend(attributes.to_le_bytes());
+        index.extend(size.to_le_bytes());
+        index.extend(offset.to_le_bytes());
+        index.extend([0; 4]);
+    }
+    let mut out = head[..2].to_vec();
+    out.extend([0xff, 0xe2]);
+    out.extend((segment as u16).to_be_bytes());
+    out.extend(b"MPF\0");
+    out.extend(index);
+    out.extend(&head[2..]);
+    out.extend(tail);
+    out
+}
+
 /// A PNG of `picture` with an EXIF orientation (an eXIf chunk).
 fn oriented_png(picture: &RgbImage, orientation: u8) -> Vec<u8> {
     let mut out = Vec::new();
@@ -352,7 +392,7 @@ fn codes(row: &[u8]) -> Vec<String> {
 
 #[test]
 fn the_decoders_formats_and_svg_open_as_stills() {
-    // rows S1, V17, N7: the image crate's formats (AGENTS.md, 2026-11-10) and SVG by its suffix in any case (is_svg of lib/ascii_image.py:26 at tag python-final), an MPO's first picture, a multi-page TIFF's first page (N7: the old tools played the pages as an animation); each shown as ASCII, its white half inked and its black half blank, and each a still: `v` answers `no kitty graphics` (N13), which a video does not
+    // rows S1, V17, N7: the image crate's formats (AGENTS.md, 2026-11-10) and SVG by its suffix in any case (is_svg of lib/ascii_image.py:26 at tag python-final), an MPO (its MPF index lists two pictures: a still all the same, is_animation of lib/ascii_image.py:61) shown as its first picture, a multi-page TIFF's first page (N7: the old tools played the pages as an animation); each shown as ASCII, its white left half inked and its black right half blank, and each a still: `v` answers `no kitty graphics` (N13), which a video does not
     let sandbox = Sandbox::new();
     let picture = halves(160, 80);
     // the file, and whether its left half alone is white
@@ -376,8 +416,9 @@ fn the_decoders_formats_and_svg_open_as_stills() {
         std::fs::write(sandbox.path(name), svg).unwrap();
         files.push((sandbox.path(name), true));
     }
-    let mpo = [jpeg(&picture, None), jpeg(&RgbImage::new(80, 40), None)].concat();
-    std::fs::write(sandbox.path("pic.mpo"), mpo).unwrap();
+    // its second picture the other way round: white on the right
+    let mirrored = image::imageops::flip_horizontal(&picture);
+    std::fs::write(sandbox.path("pic.mpo"), mpo(&picture, &mirrored)).unwrap();
     files.push((sandbox.path("pic.mpo"), true));
     let first = DynamicImage::ImageRgb8(picture.clone())
         .into_luma8()
