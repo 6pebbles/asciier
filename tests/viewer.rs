@@ -758,7 +758,7 @@ fn player_keys() -> Vec<&'static str> {
 
 #[test]
 fn f1_shows_the_keys_and_any_key_closes_them() {
-    // rows V23, H1, H2, H4, K5, V21: F1 as kitty, xterm and rxvt send it (bin/ascii-viewer:146 at tag python-final); kitty's images deleted, then each line of src/keys.txt at its row after a space, the hint in SGR 2 on the bottom row (bin/ascii-viewer:2100); q and Q close the keys and do not quit
+    // rows V23, H1, H2, H4, K5, V21: F1 as kitty, xterm and rxvt send it (bin/ascii-viewer:146 at tag python-final); kitty's images deleted, then each line of src/keys.txt at its row after a space, the hint in SGR 2 on the bottom row (bin/ascii-viewer:2100); q and Q close the keys and do not quit; the old text differs in two lines: its `s` row reads `screenshot (ascii-convert --at)` (bin/ascii-viewer:35), and its last prose line is wrapped in the source (bin/ascii-viewer:44-45), where N27 wraps it at draw time
     let sandbox = Sandbox::new();
     let mut tty = shown_still(&sandbox);
     let lines = player_keys();
@@ -810,7 +810,7 @@ fn f1_shows_the_keys_and_any_key_closes_them() {
 
 #[test]
 fn the_keys_scroll_when_they_do_not_fit() {
-    // rows H1, H2: in 20 rows the 34 lines scroll a line by j, Down, k and Up, clamped, and the hint says so; where they fit, j and Up close them as any other key does (bin/ascii-viewer:2080-2098 at tag python-final)
+    // rows H1, H2: in 20 rows the 34 lines scroll a line by j, Down, k and Up, clamped, and the hint says so; where they fit, j and Up close them as any other key does (bin/ascii-viewer:2080-2098 at tag python-final); N27: the last line is the prose line whole, where the old docstring wrapped it in the source and ended on `image.` (bin/ascii-viewer:44-45)
     let sandbox = Sandbox::new();
     let picture = save(&gradient(800, 400), &sandbox.path("pic.png"));
     let size = Size {
