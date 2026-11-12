@@ -3149,6 +3149,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn late_frames_are_dropped_and_the_picture_keeps_the_sounds_clock() {
+        // row P4: run of bin/ascii-viewer:2413 at tag python-final shows a frame when the audio clock reaches its time and drops one more than a period late; here mpv does: a caller that draws a frame every 250 ms (a debug viewer at 200 x 60 draws about 4 a second) takes about one in six of the clip's 25 a second, mpv drops the rest as they fall late, and the picture stays on the sound's clock (seen: 62 dropped in 3 s, A-V 0.027 s; 450 ms a frame: 71, 0.037 s)
+        let mut stage = Stage::new();
+        stage.clip(6.0, 6.0);
+        stage.settle();
+        stage.mpv.set("pause", "no");
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            if stage.mpv.events().contains(&Event::Frame) {
+                stage.draw();
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let dropped = read_double(&mut stage, c"frame-drop-count").unwrap_or(0.0);
+        let behind = read_double(&mut stage, c"avsync");
+        let (picture, sound) = (
+            read_double(&mut stage, c"time-pos"),
+            read_double(&mut stage, c"audio-pts"),
+        );
+        assert!(
+            dropped > 20.0 && stage.shown.len() < 30,
+            "{dropped} dropped, {} drawn",
+            stage.shown.len()
+        );
+        assert!(
+            behind.is_some_and(|by| by.abs() < 0.1),
+            "A-V {behind:?}, picture at {picture:?}, sound at {sound:?}"
+        );
+    }
+
+    #[test]
     fn a_turned_clip_comes_upright() {
         // row P1: a display matrix of 90, 180 or 270 degrees turns the picture drawn and the frame grabbed upright, as ffmpeg turns it
         for (asked, turn) in [("90", 270), ("270", 90), ("180", 180)] {
