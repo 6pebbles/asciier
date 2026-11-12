@@ -1097,6 +1097,41 @@ fn a_stream_without_a_length_shows_its_clock_alone() {
     assert_eq!(tty.exit(), 0);
 }
 
+#[test]
+fn the_clock_never_shows_past_the_length() {
+    // row P16: status of bin/ascii-viewer:2160 at tag python-final caps the position at the length: an MKV whose Duration says 1.5 s holds 3 s of frames, which play on; no status row shows a clock past its length. The old viewer took the container's 1.5 s and capped the clock there; mpv raises a duration to the highest time it has demuxed, ahead of the frame shown (demux.c: "update duration based on highest TS demuxed"), so the new row read `> 00:00 / 00:01` at first and `> 00:02 / 00:02` at the end, and the viewer's own cap (status in src/view.rs) is held by code reading: no file brings mpv's position past its duration
+    let sandbox = Sandbox::new();
+    let video = counter(&sandbox, "clip.mkv", "160x90", 25, 3.0, 0.0, &[]);
+    let mut bytes = std::fs::read(&video).unwrap();
+    // the segment's Duration: element 0x4489, a float of 8 bytes, in milliseconds
+    let at = find(&bytes, &[0x44, 0x89, 0x88], 0).unwrap();
+    let length = f64::from_be_bytes(bytes[at + 3..at + 11].try_into().unwrap());
+    assert_eq!(length, 3000.0);
+    bytes[at + 3..at + 11].copy_from_slice(&1500.0f64.to_be_bytes());
+    std::fs::write(&video, bytes).unwrap();
+    let probed = probe(&sandbox, &video, "format=duration", None);
+    assert_eq!(probed, "duration=1.500000\n");
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    assert_eq!(tty.exit(), 0);
+    let drawn = replay(&tty.out(), SMALL, |screen| (frame(screen), screen.row(24)));
+    // the clock and the length a row shows, in seconds
+    let clocks = |row: &str| {
+        let (now, length) = row.get(2..)?.split_once(" / ")?;
+        let length = length.split(' ').next()?;
+        Some((
+            seconds(&format!("> {now}"))?,
+            seconds(&format!("> {length}"))?,
+        ))
+    };
+    assert!(drawn.iter().any(|(number, _)| *number >= 70), "{drawn:?}");
+    assert!(
+        drawn
+            .iter()
+            .all(|(_, row)| clocks(row).is_none_or(|(now, length)| now <= length)),
+        "{drawn:?}"
+    );
+}
+
 /// A window of 24 x 4 cells: each look key draws the frame again, so a long run of them stays quick in it.
 const TINY: Size = Size {
     rows: 4,
