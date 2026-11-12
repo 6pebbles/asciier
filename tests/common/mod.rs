@@ -382,8 +382,8 @@ fn winsize(size: Size) -> libc::winsize {
     }
 }
 
-/// A pseudo-terminal pair, both ends close-on-exec from the start: no other test's child inherits them.
-fn pty(size: Size) -> (OwnedFd, OwnedFd, String) {
+/// A pseudo-terminal pair of `size`, both ends close-on-exec from the start: no other test's child inherits them. The master, the slave, the slave's name.
+pub fn pty(size: Size) -> (OwnedFd, OwnedFd, String) {
     // SAFETY: plain calls on descriptors this function owns.
     unsafe {
         let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);

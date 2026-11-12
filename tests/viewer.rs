@@ -4,6 +4,8 @@ mod common;
 
 use common::*;
 use std::ffi::OsStr;
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 const KEYS: &str = include_str!("../src/keys.txt");
@@ -27,7 +29,7 @@ fn drawn_out(tty: &Tty) {
 
 #[test]
 fn usage_errors_exit_1_on_stderr() {
-    // rows V1, N1: bin/ascii-viewer:2441 at tag python-final prints `usage: ascii-viewer FILE (needs a terminal)`
+    // rows V1, N1: bin/ascii-viewer:2441 at tag python-final asks for one argument and both stdin and stdout terminals, else prints `usage: ascii-viewer FILE (needs a terminal)` (N1: `asciier`)
     let sandbox = Sandbox::new();
     let picture = save(&gradient(80, 40), &sandbox.path("pic.png"));
     for args in [vec![], vec![picture.as_os_str(), picture.as_os_str()]] {
@@ -44,6 +46,52 @@ fn usage_errors_exit_1_on_stderr() {
     let ran = sandbox.run(&[picture.as_os_str()]);
     assert_eq!(ran.code, Some(1), "{ran:?}");
     assert_eq!(ran.stderr, "usage: asciier FILE (needs a terminal)\n");
+    // one side a terminal: stdin the terminal and stdout a pipe, then stdin /dev/null and stdout the terminal
+    let (master, slave, _) = pty(SMALL);
+    for stdin_is_the_terminal in [true, false] {
+        let mut command = sandbox.command(BIN);
+        let terminal = Stdio::from(slave.try_clone().unwrap());
+        if stdin_is_the_terminal {
+            command.stdin(terminal);
+        } else {
+            command.stdout(terminal);
+        }
+        let output = command.arg(&picture).output().unwrap();
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{said}");
+        assert_eq!(said, "usage: asciier FILE (needs a terminal)\n");
+        assert!(output.stdout.is_empty());
+    }
+    // nothing reached the terminal: what the runs wrote comes out of it before this
+    put_slave(&slave, b"end");
+    assert_eq!(read_until(&master, b"end"), b"end");
+}
+
+/// Write `bytes` to a terminal's slave side, as a program on it would.
+fn put_slave(slave: &OwnedFd, bytes: &[u8]) {
+    // SAFETY: a write of that slice to a descriptor this test owns.
+    let n = unsafe { libc::write(slave.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+    assert_eq!(n, bytes.len() as isize);
+}
+
+/// What a terminal's master side gives until `end` has come, at most `PATIENCE` long.
+fn read_until(master: &OwnedFd, end: &[u8]) -> Vec<u8> {
+    let (mut got, deadline) = (Vec::new(), Instant::now() + PATIENCE);
+    while find(&got, end, 0).is_none() {
+        assert!(Instant::now() < deadline, "no {end:?} in {}", shown(&got));
+        let mut ready = libc::pollfd {
+            fd: master.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let mut buf = [0u8; 4096];
+        // SAFETY: a poll of one descriptor, then a read into a buffer of that size.
+        if unsafe { libc::poll(&mut ready, 1, 100) } > 0 {
+            let n = unsafe { libc::read(master.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            got.extend_from_slice(&buf[..n.max(0) as usize]);
+        }
+    }
+    got
 }
 
 #[test]
