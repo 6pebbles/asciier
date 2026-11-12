@@ -1214,7 +1214,6 @@ fn a_redraw_of_the_bottom_row_leaves_the_image_where_it_is() {
 }
 
 #[test]
-#[ignore = "defect: a look key in image mode clears the screen and sends the image again"]
 fn a_look_key_in_image_mode_only_toasts() {
     // rows K4, V16a: key and screen of bin/ascii-viewer:2284 and :2198 at tag python-final: a look key changes nothing of the image, so its draw is the bottom row with the toast, no image sent again, no cleared screen (tests/test_viewer.py:344 pins that draw); seen: `\e_Ga=d,d=A,q=2\e\\\e[2J` and the image placed again after each look key
     let sandbox = kitty_sandbox();

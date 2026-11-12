@@ -822,7 +822,6 @@ impl Viewer {
             }
         };
         self.ui.say(toast);
-        self.ui.epoch += 1;
         self.refresh();
     }
 
