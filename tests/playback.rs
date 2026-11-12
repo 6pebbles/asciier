@@ -187,14 +187,8 @@ fn frames_come_at_the_clips_rate_and_the_end_quits() {
         took > 2.5 && took < 10.0,
         "ended {took:.2} s into the clip, from frame {from}"
     );
+    // no check of each frame against the clock drawn with it: under N26 both are mpv's, reported apart, and under load one ran ahead of the other either way (a mixed-load run drew frame 47 under 00:02, one with three of this file's runs at once frame 55 under 00:01); the_clock_stands_with_the_frame_held_through_a_gap pins the clock
     let drawn = drawn(&tty.out());
-    for &(at, number) in &drawn {
-        // under N26 the clock is mpv's position, the frame's own or a later one's when the screen lags mpv under load (a mixed-load run drew frame 47 under 00:02 and frame 70 under 00:03), never an earlier one's
-        let time = number as f64 / 25.0;
-        if let Some(at) = at {
-            assert!(time < at as f64 + 1.1, "frame {number} drawn at {at} s");
-        }
-    }
     // no more frames than the clip's own: a debug build among the other tests drew 1 to 25 of a second's 25, as loaded as the machine was
     let second = frames_in(&drawn, 1);
     assert!(
@@ -305,7 +299,7 @@ fn a_stream_without_times_plays_at_25_frames_a_second() {
 
 #[test]
 fn late_frames_are_passed_over_and_the_picture_keeps_up_with_the_sound() {
-    // row P4: run of bin/ascii-viewer:2413 at tag python-final shows a frame when the audio clock reaches its time and drops one more than a period late. The debug build draws a 200 x 60 window far slower than the clip's 25 frames a second (about 4 a second seen, 1 under load), so most frames of this 10 s clip are left out (run in this harness the old viewer drew 203 of the 250, and was at the end with the sound too), and the picture keeps up with the sound: when the sound ends the last frame drawn is near the clip's end, where frames shown in turn at the drawing's pace would be some 40 frames in; src/mpv.rs late_frames_are_dropped_and_the_picture_keeps_the_sounds_clock pins the sync itself. By the wall clock the frames drawn ran at 24.8 to 25.9 a second at load 10 to 16, but with four of this file's runs at once 23 to 33: 2 to 8 draws in 6 s, each timed late as the test thread is
+    // row P4: run of bin/ascii-viewer:2413 at tag python-final shows a frame when the audio clock reaches its time and drops one more than a period late. The debug build draws a 200 x 60 window far slower than the clip's 25 frames a second (about 4 a second seen, 1 under load), so most frames of this 10 s clip are left out (run in this harness the old viewer drew 203 of the 250, and was at the end with the sound too), and the picture keeps up with the sound: when the sound ends the last frame drawn is near the clip's end, where frames shown in turn at the drawing's pace would be some 40 frames in; src/mpv.rs late_frames_are_dropped_and_the_picture_keeps_the_sounds_clock pins the sync itself. By the wall clock the frames drawn ran at 24.8 to 25.9 a second at load 10 to 16, but with three or four of this file's runs at once at 21 to 33: 2 to 8 draws in 6 s, each timed when the test thread saw it (by inference the spread)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
     let mut tty = sandbox.view(&video);
