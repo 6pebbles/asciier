@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn libchafa_is_set_as_the_python_tools_set_it() {
-        // Row G1: the canvas's own record of lib/ascii_chafa.py:63-68 (cells, mode, foreground only, preprocessing, work factor).
+        // rows G1, G3: the canvas's own record of lib/ascii_chafa.py:63-68 (cells, mode, foreground only, preprocessing, work factor).
         let flat = |v: u8| vec![v; 160 * 40 * 3];
         for (mono, work) in [(false, 0.2), (true, 0.5)] {
             let canvas = Canvas::draw(&flat(9), 160, 40, 20, 3, mono, work);
@@ -564,8 +564,9 @@ mod tests {
                 "{colour:?}"
             );
         }
-        // black is ink in slot 0, which the text leaves blank
+        // black is ink in slot 0, which the text leaves blank: dots, as lib/ascii_term.py grid() draws it (run 2026-11-12)
         let black = shape(&flat(0), false);
+        assert_eq!(black.chars, [b'.'; 60]);
         assert_eq!(black.slots, [0; 60]);
         assert!(
             text(&black, None)
