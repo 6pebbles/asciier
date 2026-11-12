@@ -322,6 +322,20 @@ fn a_toast_shows_on_the_bottom_row_for_a_while() {
 }
 
 #[test]
+fn columns_and_lines_leave_the_size_to_the_terminal() {
+    // rows V9, N8: the old viewer took COLUMNS and LINES over the terminal's size (shutil.get_terminal_size, bin/ascii-viewer:1714 at tag python-final) and would draw this in 40 x 10; N8: the terminal's 200 x 60 holds
+    let mut sandbox = Sandbox::new();
+    sandbox.set("COLUMNS", "40");
+    sandbox.set("LINES", "10");
+    // more than 40 x 10 cells inked
+    let mut tty = shown_still(&sandbox);
+    let at = tty.send(b"3");
+    tty.expect(at, b"\x1b[60;1H\x1b[7m level 5% darker \x1b[0m");
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
 fn q_and_capital_q_quit() {
     // row V21
     let sandbox = Sandbox::new();
