@@ -1856,26 +1856,36 @@ fn green_columns(sent: &Placed) -> usize {
         .count()
 }
 
-/// Wait until `test` holds for the number of the viewer's threads named `svg part`, the SVG parts drawing in the background; fails the test after `PATIENCE`. None left: each part asked for has been handed to the loop and its wake sent, so the loop takes it before a key sent after.
+/// Wait until `test` holds for the number of what draws SVG parts for the viewer in the background: its threads named `svg part`, and its child processes (the Python tools ran resvg for a part); fails the test after `PATIENCE`. None left: each part asked for has been handed over and the loop woken, so the loop takes it before a key sent after.
 fn await_parts(tty: &Tty, what: &str, test: impl Fn(usize) -> bool) {
-    let tasks = PathBuf::from(format!("/proc/{}/task", tty.pid));
+    let read = |path: PathBuf| std::fs::read_to_string(path).unwrap_or_default();
+    let listed = |dir: String| {
+        let entries = std::fs::read_dir(dir).into_iter().flatten().flatten();
+        entries.map(|entry| entry.path())
+    };
+    let parent = |stat: String| -> Option<u32> {
+        let (_, rest) = stat.rsplit_once(')')?;
+        rest.split_whitespace().nth(1)?.parse().ok()
+    };
     let drawing = || {
-        let named = |task: &std::fs::DirEntry| {
-            std::fs::read_to_string(task.path().join("comm")).is_ok_and(|name| name == "svg part\n")
-        };
-        std::fs::read_dir(&tasks)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(named)
-            .count()
+        let threads = listed(format!("/proc/{}/task", tty.pid))
+            .filter(|task| read(task.join("comm")) == "svg part\n")
+            .count();
+        let children = listed("/proc".into())
+            .filter(|process| {
+                let name = process.file_name().and_then(|name| name.to_str());
+                name.is_some_and(|name| name.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .filter(|process| parent(read(process.join("stat"))) == Some(tty.pid))
+            .count();
+        threads + children
     };
     let end = std::time::Instant::now() + PATIENCE;
     while !test(drawing()) {
         if std::time::Instant::now() > end {
             tty.fail(&format!("never {what}"));
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -1916,7 +1926,7 @@ fn a_zoomed_svg_is_drawn_again_from_the_svg_at_the_size_shown() {
 
 #[test]
 fn a_zoomed_svg_shows_the_part_of_the_view_on_screen_alone() {
-    // row Z8: part, render_parts and thumbnail of bin/ascii-viewer:1799, :1817 and :1836 at tag python-final: in ASCII a zoomed SVG is drawn from a part too: 200 x 60 cells at 800 %, the rows of the part differ from those of the raster, drawn with the toast, along the diagonal edge alone; in image mode a part for a view that is gone when it lands never shows: `+` six times (450 % in 900 x 600 px), and once more (636 %) before that part lands; a green bar at x 44 to 45 of the 100 units lies in the 450 % view (x 43.75 to 56.25) and not in the 636 % one (x 45.58 to 54.42): placed then, the 636 % raster enlarged and the 636 % part alone, no bar in either, nothing more by the toast of a look key sent once both parts' threads have ended
+    // row Z8: part, render_parts and thumbnail of bin/ascii-viewer:1799, :1817 and :1836 at tag python-final: in ASCII a zoomed SVG is drawn from a part too: 200 x 60 cells at 800 %, the rows of the part differ from those of the raster, drawn with the toast, along the diagonal edge alone; in image mode a part for a view that is gone when it lands never shows: `+` six times (450 % in 900 x 600 px), and once more (636 %) before that part lands; a green bar at x 44 to 45 of the 100 units lies in the 450 % view (x 43.75 to 56.25) and not in the 636 % one (x 45.58 to 54.42): placed then, the 636 % raster enlarged and the 636 % part alone, no bar in either, nothing more by the toast of a look key sent once neither part is drawing
     let plain = Sandbox::new();
     let edge = plain.path("edge.svg");
     std::fs::write(
@@ -1985,7 +1995,7 @@ fn a_zoomed_svg_shows_the_part_of_the_view_on_screen_alone() {
         1,
         "the 450 % part landed before the next key"
     );
-    // the parts draw on threads named for the wait below: without the name it would wait for nothing
+    // the parts draw on threads named `svg part` (the Python tools' in resvg children) for the waits here: without the name they would wait for nothing
     await_parts(&image, "a part drawing", |drawing| drawing > 0);
     let bars = green_columns(&first);
     assert!(
