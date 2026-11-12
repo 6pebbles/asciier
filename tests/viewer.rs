@@ -831,6 +831,60 @@ fn the_keys_scroll_when_they_do_not_fit() {
     assert_eq!(tty.exit(), 0);
 }
 
+#[test]
+fn the_keys_are_cut_to_the_window() {
+    // row H1: a line goes out after a space, cut to cols - 1, and so does the hint (bin/ascii-viewer:2107 and :2109 at tag python-final, `line[: cols - 1]`, `hint[: cols - 1]`); N27 wraps the prose to the window, which leaves the cut to the rows of the table and the hint
+    let sandbox = Sandbox::new();
+    let picture = save(&gradient(800, 400), &sandbox.path("pic.png"));
+    let row = KEYS
+        .lines()
+        .find(|line| line.starts_with("h l Left Right"))
+        .unwrap();
+    assert_eq!(row.chars().count(), 95);
+    let cut = |text: &str, cols: u16| text.chars().take(cols as usize - 1).collect::<String>();
+    // in 30 columns 29 of the hint's 33 characters
+    let hint = cut("j k scroll   any other key closes", 30);
+    assert_eq!(hint, "j k scroll   any other key cl");
+    for (size, hint) in [
+        // the keys fit 40 rows: the short hint, whole
+        (
+            Size {
+                rows: 40,
+                cols: 60,
+                xpx: 540,
+                ypx: 800,
+            },
+            "any other key closes",
+        ),
+        (
+            Size {
+                rows: 20,
+                cols: 30,
+                xpx: 270,
+                ypx: 400,
+            },
+            hint.as_str(),
+        ),
+    ] {
+        let mut tty = sandbox.launch().arg(&picture).size(size).start();
+        tty.until("the picture", |screen| screen.inked() > 0);
+        drawn_out(&tty);
+        let at = tty.send(F1);
+        let written = format!("\x1b[{};1H\x1b[2m {hint}\x1b[0m\x1b[?2026l", size.rows);
+        let end = tty.expect(at, written.as_bytes());
+        let keys = &tty.out()[at..end];
+        // the row's first cols - 1 characters, the next row's place right after them
+        let line = format!(" {}\x1b[", cut(row, size.cols));
+        assert!(
+            find(keys, line.as_bytes(), 0).is_some(),
+            "{line:?} not in {}",
+            shown(keys)
+        );
+        tty.send(b"qq");
+        assert_eq!(tty.exit(), 0);
+    }
+}
+
 /// The keys under F1 at a moment: the times they are drawn within a second once the drawing has rested 400 ms (frames decoded before the pause still land), or after 5 s without rest; playing media under them draws them with each frame's clock.
 fn drawn_keys(tty: &mut Tty) -> usize {
     let at = tty.send(F1);
