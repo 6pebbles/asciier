@@ -712,12 +712,16 @@ fn player_keys() -> Vec<&'static str> {
 
 #[test]
 fn f1_shows_the_keys_and_any_key_closes_them() {
-    // rows V23, H1, H2, H4, K5: each line at its row after a space, cut to cols - 1; the hint in SGR 2 on the bottom row (bin/ascii-viewer:2100 at tag python-final)
+    // rows V23, H1, H2, H4, K5, V21: F1 as kitty, xterm and rxvt send it (bin/ascii-viewer:146 at tag python-final); kitty's images deleted, then each line of src/keys.txt at its row after a space, the hint in SGR 2 on the bottom row (bin/ascii-viewer:2100); q and Q close the keys and do not quit
     let sandbox = Sandbox::new();
     let mut tty = shown_still(&sandbox);
     let lines = player_keys();
     assert!(lines.len() < 59, "the player's keys fit 60 rows");
-    for f1 in [&b"\x1bOP"[..], b"\x1b[11~", b"\x1b[P"] {
+    for (f1, close) in [
+        (&b"\x1bOP"[..], &b"q"[..]),
+        (b"\x1b[11~", b"q"),
+        (b"\x1b[P", b"Q"),
+    ] {
         let at = tty.send(f1);
         let end = tty.expect(
             at,
@@ -738,8 +742,8 @@ fn f1_shows_the_keys_and_any_key_closes_them() {
                 shown(screen)
             );
         }
-        // q closes the keys and does not quit; the picture comes back from a cleared screen
-        let at = tty.send(b"q");
+        // q or Q closes the keys and does not quit; the picture comes back from a cleared screen
+        let at = tty.send(close);
         tty.expect(at, b"\x1b[2J");
         tty.until("the picture again", |screen| {
             screen.inked() > 1000 && !screen.row(1).starts_with(" Keys")
