@@ -1882,3 +1882,84 @@ fn a_zoomed_svg_is_drawn_again_from_the_svg_at_the_size_shown() {
     says(&mut tty, b"+", "zoom 80%");
     quit(&mut tty);
 }
+
+#[test]
+fn a_zoomed_svg_shows_the_part_of_the_view_on_screen_alone() {
+    // row Z8: part, render_parts and thumbnail of bin/ascii-viewer:1799, :1817 and :1836 at tag python-final: in ASCII a zoomed SVG is drawn from a part too: 200 x 60 cells at 800 %, the rows of the part differ from those of the raster, drawn with the toast, along the diagonal edge alone; in image mode a part for a view that is gone when it lands never shows: `+` six times (450 % in 900 x 600 px), and once more (636 %) before that part lands: placed then, the 636 % raster enlarged and the 636 % part alone, nothing more in the 2 s after
+    let plain = Sandbox::new();
+    let edge = plain.path("edge.svg");
+    std::fs::write(
+        &edge,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="#fff"/><path d="M0 50 L100 0 L100 50 Z"/></svg>"##,
+    )
+    .unwrap();
+    let sandbox = kitty_sandbox();
+    let noisy = sandbox.path("noisy.svg");
+    // noise over every view from 450 % on: a part costs about 2 s, the next key comes in milliseconds
+    std::fs::write(
+        &noisy,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><filter id="n" x="0" y="0" width="1" height="1"><feTurbulence baseFrequency="0.5" numOctaves="2"/></filter><rect width="100" height="50" fill="#fff"/><path d="M0 50 L100 0 L100 50 Z"/><rect x="40" y="18" width="20" height="14" filter="url(#n)"/></svg>"##,
+    )
+    .unwrap();
+    let mut ascii = drawn(&plain, &edge, WIDE);
+    let mut image = kitty_view(&sandbox, &noisy, HALF);
+    // 225 x 150 px of the 1600 x 800 raster about its middle over 200 x 60 cells: the edge from (0, 800) to (1600, 0) passes column c at row 53.1 - 0.225 c
+    let cells = |screen: &common::screen::Screen| -> Vec<(char, Option<u32>)> {
+        (1..60)
+            .flat_map(|row| (1..=200).map(move |col| (row, col)))
+            .map(|(row, col)| (screen.cell(row, col).ch, screen.cell(row, col).pen.fg))
+            .collect()
+    };
+    let at = ascii.send(&[b'+'; 8]);
+    let toasted = ascii.expect(at, toast("zoom 800%"));
+    let end = ascii.expect(toasted, b"\x1b[?2026l");
+    let shown = replay(&ascii.out()[..end], WIDE, cells);
+    let enlarged = shown.last().unwrap().clone();
+    let drawn = shown.len();
+    if !ascii.wait(0, PATIENCE, |out| {
+        replay(out, WIDE, cells)[drawn..]
+            .iter()
+            .any(|s| *s != enlarged)
+    }) {
+        ascii.fail("no draw from the part");
+    }
+    let finer = replay(&ascii.out(), WIDE, cells)
+        .into_iter()
+        .skip(drawn)
+        .find(|s| *s != enlarged)
+        .unwrap();
+    let off: Vec<(usize, usize)> = (0..enlarged.len())
+        .filter(|&at| enlarged[at] != finer[at])
+        .map(|at| (at / 200 + 1, at % 200 + 1))
+        .collect();
+    assert!(off.len() > 20, "{off:?}");
+    for (row, col) in &off {
+        let edge = 53.1 - 0.225 * *col as f64;
+        assert!(
+            (*row as f64 - edge).abs() <= 2.0,
+            "row {row}, column {col}: not at the edge"
+        );
+    }
+    quit(&mut ascii);
+    placed(&image, 0);
+    let at = image.send(&[b'+'; 6]);
+    let toasted = image.expect(at, toast("zoom 450%"));
+    let first = placed(&image, at);
+    assert!(first.end > toasted && repeated_columns(&first) > 0.7);
+    let at = image.send(b"+");
+    let toasted = image.expect(at, toast("zoom 636%"));
+    let raster = placed(&image, at);
+    assert!(raster.end > toasted && repeated_columns(&raster) > 0.7);
+    assert_eq!(
+        count(&image.out()[first.end..raster.end], b"\x1b_Ga=T,"),
+        1,
+        "the 450 % part landed before the next key"
+    );
+    let part = placed(&image, raster.end);
+    assert!(repeated_columns(&part) < 0.2, "the raster again");
+    // a window for what must not come: the earlier part, asked first, lands about when this one did
+    std::thread::sleep(Duration::from_secs(2));
+    let late = count(&image.out()[part.end..], b"\x1b_Ga=T,");
+    assert_eq!(late, 0, "placed after the part of the view shown");
+    quit(&mut image);
+}
