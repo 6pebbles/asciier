@@ -55,6 +55,7 @@ One program: `asciier FILE` views video, audio and stills as ASCII art in the ki
 - 2026-11-11: libchafa's limits held in `cells::grid`: a picture over 65535 px a side is reduced first, a grid over 8191 cells a side is an error; past them libchafa 1.18 ends the process, the Python tools' too.
 - 2026-11-11: a crop window over 179 megapixels is an error: it is allocated whole.
 - 2026-11-11: Python tools removed from the tree; tag `python-final` keeps them.
+- 2026-11-12: the converter's Ctrl-C (N25): a SIGINT handler sets a flag and wakes a thread of its own, which kills the children before a video's encoding and the decoder's group while frames are read; cleanup and messages as before, then death by SIGINT: a shell shows 130, a script running it stops; a SIGINT the parent left ignored stays ignored.
 
 ## Open questions
 
