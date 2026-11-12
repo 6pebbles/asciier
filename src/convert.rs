@@ -624,6 +624,11 @@ fn own_session(command: &mut Command) -> &mut Command {
     }
 }
 
+/// Kill a child started in a session of its own, with every process of its group.
+fn kill(leader: libc::pid_t) {
+    unsafe { libc::kill(-leader, libc::SIGKILL) };
+}
+
 /// `source` to `out`: ffmpeg decodes at the output's detail, each frame is drawn, ffmpeg encodes; `first` is the frame at 0 s, uncropped.
 fn video(
     options: &Options,
@@ -724,40 +729,43 @@ fn video(
     };
     let mut frames = BufReader::with_capacity(1 << 20, decode.stdout.take().expect("piped"));
     let mut sink = encode.stdin.take().expect("piped");
-    let (mut done, mut broken, mut art) = (0u64, false, style.art.clone());
+    let (mut done, mut art, decoder) = (0u64, style.art.clone(), decode.id() as libc::pid_t);
     eprint!("\r0/{shown} frames");
-    // two stages side by side, frames in order: reading and cells on a thread, painting and writing here
+    // two stages side by side, frames in order: reading and cells on a thread, painting and writing here; the decoder is killed before its pipe closes, of which it would complain on stderr
     let (grids, painted) = std::sync::mpsc::sync_channel::<Grid>(8);
     let failure = std::thread::scope(|scope| {
         let reader = scope.spawn(move || -> Result<()> {
-            while !INTERRUPTED.load(Ordering::Relaxed)
-                && let Some(frame) = ppm_frame(&mut frames)
-            {
-                if grids.send(art.cells(&frame)?).is_err() {
-                    break; // the writer stopped
+            let ended = loop {
+                if INTERRUPTED.load(Ordering::Relaxed) {
+                    break Ok(());
                 }
-            }
-            Ok(())
+                let Some(frame) = ppm_frame(&mut frames) else {
+                    return Ok(()); // the stream's end: the decoder ends by itself
+                };
+                let grid = match art.cells(&frame) {
+                    Ok(grid) => grid,
+                    Err(e) => break Err(e),
+                };
+                if grids.send(grid).is_err() {
+                    break Ok(()); // the writer stopped
+                }
+            };
+            kill(decoder);
+            ended
         });
         for grid in painted {
             if sink.write_all(style.paint(&grid, true).as_raw()).is_err() {
-                broken = true; // the encoder quit: its exit code says why
+                kill(decoder); // the encoder quit: its exit code says why
                 break;
             }
             done += 1;
             eprint!("\r{done}/{shown} frames");
-        }
-        if broken {
-            let _ = decode.kill(); // the reader then meets the stream's end
         }
         reader.join().expect("the reader").err().map(|e| e.0)
     });
     eprintln!("\r{done}/{shown} frames");
     let stopped = INTERRUPTED.load(Ordering::Relaxed);
     let finish = |child: &mut Child| child.wait().map(|status| status.success()).unwrap_or(false);
-    if stopped || failure.is_some() {
-        let _ = decode.kill();
-    }
     let decoded = finish(&mut decode);
     drop(sink);
     let encoded = finish(&mut encode);

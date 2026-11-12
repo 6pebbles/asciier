@@ -2021,7 +2021,7 @@ fn progress_counts_the_frames_on_stderr() {
 
 #[test]
 fn ctrl_c_writes_the_frames_in_flight_and_finishes_the_file() {
-    // rows X9, X4, N24: tests/test_convert.py:305 at tag python-final: the encoder held after 10 frames until the reading stops, then Ctrl-C (SIGINT to the group): the frames read are written whole but those Ctrl-C found in the pipes (4 at most), the file is finished and plays them, `stopped at frame <n>: <out> holds the part converted`, the path printed, exit 130; nothing left running; X4 memory bounded, N24 8 in flight (AGENTS.md, 2026-11-11): at most 10 frames past the 10 held, 8 waiting and one each in the reader's and the painter's hands
+    // rows X9, X8, X4, N24: tests/test_convert.py:305 at tag python-final: the encoder held after 10 frames until the reading stops, then Ctrl-C (SIGINT to the group): the frames read are written whole but those Ctrl-C found in the pipes (4 at most), the file is finished and plays them, on stderr the progress then `stopped at frame <n>: <out> holds the part converted` and nothing else (the old converter killed the decoder at once: no complaint of a broken pipe from it), the path printed, exit 130; nothing left running; X4 memory bounded, N24 8 in flight (AGENTS.md, 2026-11-11): at most 10 frames past the 10 held, 8 waiting and one each in the reader's and the painter's hands
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "long.mp4", 10.0, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
@@ -2041,10 +2041,12 @@ fn ctrl_c_writes_the_frames_in_flight_and_finishes_the_file() {
         (Some(130), "long-out.mp4\n"),
         "{err}"
     );
-    let done: usize = err
-        .split("stopped at frame ")
-        .nth(1)
-        .and_then(|rest| rest.strip_suffix(": long-out.mp4 holds the part converted\n"))
+    let (shown, said) = err
+        .split_once("stopped at frame ")
+        .unwrap_or_else(|| panic!("{err:?}"));
+    progress(shown);
+    let done: usize = said
+        .strip_suffix(": long-out.mp4 holds the part converted\n")
         .unwrap_or_else(|| panic!("{err:?}"))
         .parse()
         .unwrap();
@@ -2061,7 +2063,7 @@ fn ctrl_c_writes_the_frames_in_flight_and_finishes_the_file() {
 
 #[test]
 fn an_encoder_that_quits_is_exit_1_not_a_hang() {
-    // row X10: tests/test_convert.py:335 at tag python-final: the encoder quits after reading three frames, or at once: exit 1, `ffmpeg could not encode the video` on stderr (the wrapped decoder's own complaints of a broken pipe may follow it), no traceback, nothing printed, no hang, nothing left running
+    // row X10: tests/test_convert.py:335 at tag python-final: the encoder quits after reading three frames, or at once: exit 1, on stderr the progress then `asciier: ffmpeg could not encode the video` and nothing else (no traceback, no complaint of a broken pipe from the decoder, killed before its pipe closes), nothing printed, no hang, nothing left running
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "quit.mp4", 2.0, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
@@ -2077,14 +2079,10 @@ fn an_encoder_that_quits_is_exit_1_not_a_hang() {
             (Some(1), ""),
             "{frames}: {err:?}"
         );
-        assert!(
-            err.contains("asciier: ffmpeg could not encode the video\n"),
-            "{frames}: {err:?}"
-        );
-        assert!(
-            !err.contains("Traceback") && !err.contains("panicked"),
-            "{err:?}"
-        );
+        let shown = err
+            .strip_suffix("asciier: ffmpeg could not encode the video\n")
+            .unwrap_or_else(|| panic!("{frames}: {err:?}"));
+        progress(shown);
         await_gone(&sandbox);
     }
 }
