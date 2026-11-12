@@ -403,6 +403,113 @@ fn two_spaces_in_one_batch_leave_it_as_it_was() {
 }
 
 #[test]
+fn no_key_stops_the_clip() {
+    // row P8a: the stopped state, mark `.`, is halt of bin/ascii-viewer:1304 at tag python-final, which MPRIS Stop alone calls (tests/mpris.rs stop_holds_the_frame_until_a_seek_or_space_plays): every key of the video table but q and Q, each sent once the one before acted, and no status row shows `.`; the paused mark `|` and the playing `>` both show
+    let sandbox = Sandbox::new();
+    // 10 frames a second: a frame's number is its time in tenths (mod 256)
+    let video = counter(&sandbox, "long.mp4", "160x90", 10, 70.0, 70.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_playing();
+    let at = tty.send(F1);
+    tty.expect(at, b"any other key closes");
+    tty.send(b"x");
+    tty.await_status("> ");
+    for (key, mark) in [(b" ", "| "), (b"p", "> "), (b" ", "| ")] {
+        tty.send(key);
+        tty.await_status(mark);
+    }
+    let seeks: [(&[u8], u32); 13] = [
+        (DOWN, 0),
+        (UP, 600),
+        (DOWN, 0),
+        (b"k", 600),
+        (b"j", 0),
+        (RIGHT, 50),
+        (LEFT, 0),
+        (b"l", 50),
+        (b"h", 0),
+        (SHIFT_UP, 50),
+        (SHIFT_DOWN, 0),
+        (SHIFT_RIGHT, 10),
+        (SHIFT_LEFT, 0),
+    ];
+    for (keys, tenths) in seeks {
+        let status = format!("| {:02}:{:02} / 01:10", tenths / 600, tenths / 10 % 60);
+        lands(&mut tty, keys, tenths, &status);
+    }
+    tty.send(b"p");
+    tty.await_status("> ");
+    let toasted: [(&[u8], &str); 33] = [
+        (b"]", "speed 110%"),
+        (b"[", "speed 100%"),
+        (b"}", "speed 200%"),
+        (b"{", "speed 100%"),
+        (BACKSPACE, "speed 100%"),
+        (b"\x08", "speed 100%"),
+        (b"\\", "speed 100%"),
+        (b"0", "volume 102"),
+        (b"*", "volume 104"),
+        (b"9", "volume 102"),
+        (b"/", "volume 100"),
+        (b"m", "muted"),
+        (b"m", "unmuted"),
+        (b"L", "loop on"),
+        (b"L", "loop off"),
+        (b"3", "level 5% darker"),
+        (b"4", "level 0"),
+        (b"1", "contrast -5%"),
+        (b"2", "contrast 0"),
+        (b"3", "level 5% darker"),
+        (b"`", "level 0, contrast 0"),
+        (b"7", "saturation 90%"),
+        (b"8", "saturation 100%"),
+        (b"c", "mono"),
+        (b"c", "colour"),
+        (b"b", "bold"),
+        (b"b", "regular"),
+        (b"g", "glyphs: density"),
+        (b"g", "glyphs: shape"),
+        (b"g", "glyphs: mixed"),
+        (b"s", "saved "),
+        // the keys with no video action, then one that shows they were read
+        (b"HJK+=-vyduD", ""),
+        (b"m", "muted"),
+    ];
+    for (keys, text) in toasted {
+        if text.is_empty() {
+            tty.send(keys);
+        } else {
+            let at = tty.send(keys);
+            tty.expect(at, format!("\x1b[7m {text}"));
+        }
+    }
+    tty.send(b"f");
+    sandbox.await_noted("hyprctl.calls", "clients");
+    tty.send(b".");
+    tty.await_status("| ");
+    tty.send(b",");
+    tty.await_status("| ");
+    tty.send(b" ");
+    tty.await_status("> ");
+    tty.send(b"r");
+    tty.until("the page", |screen| screen.row(1).starts_with(" Render"));
+    tty.send(b"r");
+    tty.await_status("> ");
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+    let marks: Vec<String> = replay(&tty.out(), SMALL, |screen| screen.row(24))
+        .into_iter()
+        .filter_map(|row| row.get(..2).map(str::to_string))
+        .collect();
+    assert!(!marks.iter().any(|mark| mark == ". "), "{marks:?}");
+    assert!(
+        ["> ", "| "]
+            .iter()
+            .all(|mark| marks.iter().any(|seen| seen == mark))
+    );
+}
+
+#[test]
 fn seeks_move_by_their_steps_and_stop_at_both_ends() {
     // row P9: SEEKS and seek_to of bin/ascii-viewer:126 and :1423 at tag python-final: Right Left l h 5 s, Up Down k j 60 s, Shift+Right Shift+Left 1 s, Shift+Up Shift+Down 5 s, exact, clamped to the clip; paused, the frame there shows and the mark stays `|`
     let sandbox = Sandbox::new();
