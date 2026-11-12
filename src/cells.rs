@@ -875,7 +875,7 @@ mod tests {
 
     #[test]
     fn flat_cells_take_the_python_tools_glyphs() {
-        // rows G4, G5, G6, G7: lib/ascii_term.py grid() on the same picture (16 x 8 cells of 8 px, ratio 1) with the same ramp, bl1nk, work 0.2, 2026-11-10.
+        // rows G3-G7: lib/ascii_term.py grid() on the same picture (16 x 8 cells of 8 px, ratio 1) with the same ramp, bl1nk, work 0.2, 2026-11-10.
         // Density draws every cell from the ramp and mixed every flat one: no glyph here is libchafa's.
         let picture = flat(16, 8, 8);
         let chars = " *4>KZl~~~~~~GMSZbirx~~~~~~~~VY^bflpuz~~~~~~gjnquy}~~~~~lprvy}~~KEA988:558GMW`lxqlgdXXYMH[aiNTZa~~~~~~wxz}LMPR~~~~~~~~~~~~~~~~~~";
@@ -898,7 +898,7 @@ mod tests {
             );
             assert_eq!(art.slots, [FG; 128], "{glyphs:?}, mono");
         }
-        // lib/ascii_term.py Term.text() of the two grids
+        // lib/ascii_term.py Term.text() of the two grids: the 13 cells of slot 0, 12 of them inked, print as spaces
         let art = cells(&picture, 128, 64, 16, None, 1.0, Glyphs::Density, false);
         let want = b"\x1b[30m             \x1b[36mGMS\x1b[39m\n\x1b[36mZbir\x1b[90mx~~~~~~~~\x1b[96mVY^\x1b[39m\n\x1b[96mbflpuz~~~~~~\x1b[37mgjnq\x1b[39m\n\x1b[37muy}~~~~~\x1b[97mlprvy}~~\x1b[39m\n\x1b[94mKEA\x1b[35m988:\x1b[95m5\x1b[31m58\x1b[91mGMW`lx\x1b[39m\n\x1b[94mqlgd\x1b[35mXXY\x1b[95mM\x1b[31mH\x1b[91m[ai\x1b[33mNTZa\x1b[39m\n\x1b[34m~~~~~~\x1b[92mwxz}\x1b[93mLMPR\x1b[33m~~\x1b[39m\n\x1b[34m~\x1b[92m~~~\x1b[32m~~~~~~~~~~\x1b[93m~~\x1b[39m";
         assert_eq!(text(&art, None), lines(want));
@@ -971,7 +971,7 @@ mod tests {
 
     #[test]
     fn mono_measures_against_its_own_slot() {
-        // rows G6: the luminance a mono cell is measured against is mono's slot's, as lib/ascii_term.py:68 luma_mono gives it: mono's cells count as the foreground slot and shine as mono's colour, so a brighter slot draws sparser glyphs.
+        // rows G6, G7: the luminance a mono cell is measured against is mono's slot's, as lib/ascii_term.py:68 luma_mono gives it: mono's cells count as the foreground slot and shine as mono's colour, so a brighter slot draws sparser glyphs; in mono a picked cell keeps the foreground slot, not its mean colour's.
         let (picture, mut inks, mode) = (flat(16, 8, 8), inks(), Glyphs::Density);
         let mut draw = |mono: u8| {
             inks.mono = mono;
