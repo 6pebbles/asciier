@@ -895,4 +895,43 @@ mod tests {
             assert!(!src.exists() && !empty(&stored));
         }
     }
+
+    #[test]
+    fn a_file_on_another_device_goes_to_its_mounts_trash() {
+        // row T1: trash_dirs of bin/ascii-viewer:310 at tag python-final: a file on another device than the home trash goes to the trash of its mount point, $top/.Trash-$uid where $top/.Trash is not there, its Path relative to $top, the home trash unused; the device is a tmpfs of a user and mount namespace of its own (unprivileged; uid 0 there), gone with it
+        let temp = Temp::new();
+        let top = temp.dir.join("mnt");
+        fs::create_dir(&top).unwrap();
+        let script = r#"mount -t tmpfs none "$1" || exit 9
+mkdir "$1/sub" && printf x > "$1/sub/$2" || exit 8
+ASCIIER_TRASH_CHILD="$1/sub/$2" "$3" --exact trash::tests::trash_child --nocapture
+echo "files: $(ls -A "$1/.Trash-0/files")"
+echo "left: $(ls -A "$1/sub")"
+cat "$1/.Trash-0/info/$2.trashinfo""#;
+        let ran = Command::new("unshare")
+            .args([
+                "--user",
+                "--map-root-user",
+                "--mount",
+                "sh",
+                "-c",
+                script,
+                "sh",
+            ])
+            .arg(&top)
+            .arg("f č.png")
+            .arg(std::env::current_exe().unwrap())
+            .env("HOME", temp.dir.join("home"))
+            .env("XDG_DATA_HOME", temp.dir.join("data"))
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&ran.stdout);
+        let why = String::from_utf8_lossy(&ran.stderr);
+        assert!(ran.status.success(), "{said}{why}");
+        let stored = format!("stored {}/.Trash-0/files/f č.png\n", top.display());
+        assert!(said.contains(&stored), "{said}");
+        assert!(said.contains("files: f č.png\nleft: \n"), "{said}");
+        assert!(said.contains("\nPath=sub/f%20%C4%8D.png\n"), "{said}");
+        assert!(!temp.home().exists() && empty(&top));
+    }
 }
