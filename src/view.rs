@@ -757,11 +757,7 @@ impl Viewer {
             return;
         }
         (p.playing, p.paused) = (false, true); // a step ends paused, reported or not
-        p.mpv.command(&[if forward {
-            "frame-step"
-        } else {
-            "frame-back-step"
-        }]);
+        p.mpv.step(forward);
     }
 
     fn look_key(&mut self, key: &[u8]) {

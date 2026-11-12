@@ -362,9 +362,8 @@ fn frame_steps_move_one_frame_and_pause() {
 }
 
 #[test]
-#[ignore = "defect: after `.` on the last frame of a clip whose sound ends with it, `,` shows the last frame again"]
 fn a_step_on_the_last_frame_keeps_its_place() {
-    // row P15: `.` on the last frame only pauses (frame_step of bin/ascii-viewer:1441 at tag python-final returns there, its clock on that frame): the status row stays as it was on frame 54 of this 2.2 s clip with 2.2 s of sound, and `,` after it shows frame 53; seen: 54 again, once with `| 00:02 / 00:02` and the whole bar, the clock at the length; a silent clip, or one whose sound outlasts the picture, steps back as it should
+    // row P15: `.` on the last frame only pauses (frame_step of bin/ascii-viewer:1441 at tag python-final returns there, its clock on that frame): the status row on frame 54 of this 2.2 s clip with 2.2 s of sound shows 2.16 s (63 of the bar's 64 cells) and stays so, and `,` after it shows frame 53; seen before the fix: 54 again, the clock at the length with the whole bar
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 2.2, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
@@ -375,7 +374,9 @@ fn a_step_on_the_last_frame_keeps_its_place() {
     for number in 51..=54 {
         lands(&mut tty, b".", number, "| 00:02");
     }
+    tty.settle(Duration::from_millis(300));
     let on_it = tty.screen().row(24);
+    assert_eq!(on_it.matches('━').count(), 63, "{on_it:?}");
     tty.send(b".");
     // a window for what must not happen: the clock moving on
     std::thread::sleep(Duration::from_millis(1000));
