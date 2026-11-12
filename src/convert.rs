@@ -95,7 +95,7 @@ output:
   -a, --at SECONDS                  a video's frame at that time, as a PNG
   -h, --help                        this text";
 
-/// Ctrl-C, noted for the whole run: before a video's encoding what runs is killed and nothing made counts; while its frames are read the reading stops and the file is finished (row X9); after the reading the file is finished and nothing said (row C10).
+/// Ctrl-C, noted for the whole run: before a video's encoding what runs is killed and nothing made counts; while its frames are read the reading stops and the file is finished (row X9); after the reading the file is finished and nothing said, however the encoder ends (row C10).
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 /// Set once a video's decoder and encoder are to start: from then on Ctrl-C kills the decoder alone, while its frames are read.
 static ENCODING: AtomicBool = AtomicBool::new(false);
@@ -863,6 +863,10 @@ fn video(
         return Err(Stop::Interrupted(None));
     }
     let stopped = read?;
+    // a Ctrl-C after the reading: the file as the encoder left it, nothing said, also of an encoder that failed (row C10)
+    if INTERRUPTED.load(Ordering::SeqCst) && !stopped {
+        return Err(Stop::Interrupted(None));
+    }
     if !encoded {
         return Err(Stop::Failed("ffmpeg could not encode the video".into()));
     }
@@ -872,9 +876,6 @@ fn video(
             out.display()
         ));
         return Err(Stop::Interrupted(Some(out.to_path_buf())));
-    }
-    if INTERRUPTED.load(Ordering::SeqCst) {
-        return Err(Stop::Interrupted(None));
     }
     if !decoded {
         return Err(Stop::Failed(format!(

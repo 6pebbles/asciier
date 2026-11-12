@@ -50,7 +50,7 @@ const VIVID: &str =
 const HELD: &str =
     r#"n=0; while [ ! -e "$DUMP/go" ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n + 1)); done"#;
 
-/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw and its arguments in $DUMP/encode.args; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $CHATTER: the decoder says that line on stderr again and again while it decodes; $DECODE_BYTES: the decoder fails after that many bytes; $STALL: the decoder gives that many bytes, then nothing, its pipe open, until $DUMP/go, `$DUMP/held` said first; $GRAB: a frame grab ignores Ctrl-C and waits for $DUMP/go, `$DUMP/held` said first.
+/// ffmpeg as the converter runs it, first on PATH (tests/test_convert.py:28 at tag python-final): the decoder's PPM stream kept in $DUMP/decode.ppm and its arguments in $DUMP/decode.args, the encoder's input in $DUMP/encode.raw and its arguments in $DUMP/encode.args; $FAIL_AFTER: the encoder reads that many bytes and fails; $HOLD: it takes $HOLD frames of $FRAME bytes, then nothing until $DUMP/go; $HOLD_END: the encoder, its file written, ends only at $DUMP/go, `$DUMP/held` said first; $END_STATUS: the encoder ends with that status, whatever the real one's; $CHATTER: the decoder says that line on stderr again and again while it decodes; $DECODE_BYTES: the decoder fails after that many bytes; $STALL: the decoder gives that many bytes, then nothing, its pipe open, until $DUMP/go, `$DUMP/held` said first; $GRAB: a frame grab ignores Ctrl-C and waits for $DUMP/go, `$DUMP/held` said first.
 const FFMPEG: &str = r#"#!/bin/sh
 held() { HELD; }
 case " $* " in
@@ -64,7 +64,7 @@ case " $* " in
     fi
     status=$?
     if [ -n "$HOLD_END" ]; then touch "$DUMP/held"; held; fi
-    exit $status ;;
+    exit "${END_STATUS:-$status}" ;;
 *" -an "*)
     printf '%s\n' "$@" > "$DUMP/decode.args"
     if [ -n "$CHATTER" ]; then
@@ -1194,27 +1194,35 @@ fn ctrl_c_on_a_still_or_a_frame_ends_it_quietly() {
 
 #[test]
 fn ctrl_c_while_the_encoder_finishes_ends_it_quietly_too() {
-    // rows C10, N25: main of bin/ascii-convert:561 at tag python-final: Ctrl-C in a video run after its read loop, while it waits for the encoder (held through the wrapper once the file is written): no message, then death by SIGINT; run in this harness the old converter exited 130 with nothing printed (3 of 3); the file the encoder wrote stays
+    // rows C10, N25: main of bin/ascii-convert:561 at tag python-final: Ctrl-C in a video run after its read loop, while it waits for the encoder (held through the wrapper once the file is written): no message, then death by SIGINT, also when the encoder then fails: the old converter's KeyboardInterrupt in encode.wait() (bin/ascii-convert:490) came before the encoder's status was read; run in this harness the old converter exited 130 with nothing printed, either way (3 of 3); the file the encoder wrote stays
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "clip.mp4", 0.4, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
     sandbox.set("HOLD_END", "1");
-    let run = Running::start(
-        &sandbox,
-        &["-W", "320", "-H", "180", "-o", "clip-out.mp4", "clip.mp4"],
-    );
-    await_file(&sandbox.path("held"));
-    run.interrupt();
-    std::fs::write(sandbox.path("go"), "").unwrap();
-    let (status, out, err) = run.finish();
-    assert_eq!(
-        (status.signal(), out.as_str()),
-        (Some(libc::SIGINT), ""),
-        "{err:?}"
-    );
-    assert!(err.ends_with("\r10/10 frames\n"), "{err:?}");
-    assert_eq!(frames_in(&sandbox, &sandbox.path("clip-out.mp4")), 10);
-    await_gone(&sandbox);
+    for (made, fails) in [("clip-out.mp4", false), ("fail-out.mp4", true)] {
+        for file in ["held", "go"] {
+            let _ = std::fs::remove_file(sandbox.path(file));
+        }
+        if fails {
+            sandbox.set("END_STATUS", "1");
+        }
+        let run = Running::start(
+            &sandbox,
+            &["-W", "320", "-H", "180", "-o", made, "clip.mp4"],
+        );
+        await_file(&sandbox.path("held"));
+        run.interrupt();
+        std::fs::write(sandbox.path("go"), "").unwrap();
+        let (status, out, err) = run.finish();
+        assert_eq!(
+            (status.signal(), out.as_str()),
+            (Some(libc::SIGINT), ""),
+            "{made}: {err:?}"
+        );
+        assert!(err.ends_with("\r10/10 frames\n"), "{made}: {err:?}");
+        assert_eq!(frames_in(&sandbox, &sandbox.path(made)), 10);
+        await_gone(&sandbox);
+    }
 }
 
 #[test]
