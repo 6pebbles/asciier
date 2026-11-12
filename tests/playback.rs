@@ -31,6 +31,12 @@ fn drawn(out: &[u8]) -> Vec<(Option<u32>, u32)> {
     })
 }
 
+/// The clip's time a status row shows by its bar, finer than its clock: the bar's cells of its room (`cols` less the text and a space) times `length`; 0 before the bar's first cell.
+fn bar_time(row: &str, cols: usize, length: f64) -> f64 {
+    let text = row.trim_end_matches(['━', ' ']).chars().count();
+    row.matches('━').count() as f64 * length / (cols - text - 1) as f64
+}
+
 /// The frames drawn while the status row showed `second`, each once.
 fn frames_in(drawn: &[(Option<u32>, u32)], second: u32) -> Vec<u32> {
     let mut frames: Vec<u32> = drawn
@@ -168,30 +174,28 @@ fn saved(path: &Path) -> (u32, (u32, u32)) {
 
 #[test]
 fn frames_come_at_the_clips_rate_and_the_end_quits() {
-    // rows P2, P4, P14: play_rate and run of bin/ascii-viewer:431 and :2386 at tag python-final: 25 frames a second, each drawn when the clock reaches its time, exit 0 at the end; run in this harness the old viewer drew all 25 frames of each second
+    // rows P2, P14: play_rate and run of bin/ascii-viewer:431 and :2386 at tag python-final: 25 frames a second, exit 0 at the end, past the clip's 3 s; run in this harness the old viewer drew all 25 frames of each second
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 3.0, 3.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
-    let playing = Instant::now();
+    // the clip's time then, by the frame on screen: a test thread late under load sees a later frame (a start taken here instead gave 1.36 s from 00:01 to the end in a run at load 45)
+    let (start, from) = (Instant::now(), frame(tty.screen()));
     assert_eq!(tty.exit(), 0);
-    let took = playing.elapsed();
+    let took = from as f64 / 25.0 + start.elapsed().as_secs_f64();
     assert!(
-        took > Duration::from_millis(1500) && took < Duration::from_secs(10),
-        "{took:?} from 00:01 to the end"
+        took > 2.5 && took < 10.0,
+        "ended {took:.2} s into the clip, from frame {from}"
     );
     let drawn = drawn(&tty.out());
     for &(at, number) in &drawn {
-        // a draw can carry the clock of the frame before
+        // under N26 the clock is mpv's position, the frame's own or a later one's when the screen lags mpv under load (a mixed-load run drew frame 47 under 00:02 and frame 70 under 00:03), never an earlier one's
         let time = number as f64 / 25.0;
         if let Some(at) = at {
-            assert!(
-                time > at as f64 - 0.1 && time < at as f64 + 1.1,
-                "frame {number} drawn at {at} s"
-            );
+            assert!(time < at as f64 + 1.1, "frame {number} drawn at {at} s");
         }
     }
-    // no more frames than the clip's own; a frame drawn late is dropped (row P4): a debug build among the other tests drew 1 to 25 of a second's 25, as loaded as the machine was
+    // no more frames than the clip's own: a debug build among the other tests drew 1 to 25 of a second's 25, as loaded as the machine was
     let second = frames_in(&drawn, 1);
     assert!(
         second.windows(2).all(|pair| pair[0] < pair[1]),
@@ -309,7 +313,7 @@ fn space_right_after_the_start_pauses_too() {
 
 #[test]
 fn two_spaces_in_one_batch_leave_it_as_it_was() {
-    // rows P8, V14: each `space` toggles what the one before asked for, as bin/ascii-viewer:2270 at tag python-final flips its own flag; mpv may report neither of two requests so close
+    // row P8: each `space` toggles what the one before asked for, as bin/ascii-viewer:2270 at tag python-final flips its own flag; mpv may report neither of two requests so close
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
@@ -1394,7 +1398,7 @@ fn tenths(hundredths: u32) -> String {
 
 #[test]
 fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
-    // rows P22, N5, N23: open_page and close_page of bin/ascii-viewer:2048 and :2112 at tag python-final: the page on the frame at full size, named by its time (N5: the frame mpv holds, within 3 frames of the one drawn while playing, its time to 0.1 s); playback pauses meanwhile and goes on after; the page's lines as the old viewer drew them in this harness; on the last frame too (N23: the old viewer could end there, P29)
+    // rows P22, R3, R16, N5, N23: open_page and close_page of bin/ascii-viewer:2048 and :2112 at tag python-final: the page on the frame at full size, named by its time when it opens (N5: the frame mpv holds, within 3 frames of the one drawn while playing, its time to 0.1 s); of R3's defaults the size, 1920 on the long side, and the crop, the whole frame; R16's export, `s`, the full-size PNG beside the clip under that name; playback pauses meanwhile and goes on after; the page's lines as the old viewer drew them in this harness; on the last frame too (N23: the old viewer could end there, P29)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 8.0, 8.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
@@ -1446,27 +1450,33 @@ fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
     std::thread::sleep(Duration::from_millis(1500));
     tty.send(b"q");
     tty.until("the menu", |screen| screen.row(1).starts_with(" Render"));
-    tty.send(b"q");
+    let closed = tty.send(b"q");
     tty.until("the player", |screen| {
         screen.row(24).starts_with("> ") && seconds(&screen.row(24)).is_some()
     });
-    let after = seconds(&tty.screen().row(24)).unwrap();
+    // the first clock drawn after the page: the screen a test thread late under load reads can be later
+    let after = drawn(&tty.out()[closed..])
+        .into_iter()
+        .find_map(|(clock, _)| clock)
+        .unwrap();
     assert!(after <= clock + 1, "{clock} s at `r`, {after} s after");
     tty.until("playing on", |screen| {
         seconds(&screen.row(24)).is_some_and(|at| at > after)
     });
-    // paused: the frame on screen, named by its time; it stays paused
+    // paused: the frame on screen, named by its time; it stays paused. The screen can lag mpv under load (this failed so once under heavy load, the name against the frame read on screen right after the pause): the page's frame is the reference, and the screen must come to it
     pause(&mut tty);
-    let held = frame(tty.screen());
     tty.send(b"r");
     tty.until("the page", |screen| screen.row(1).starts_with(" Render"));
     let name = page_name(&mut tty);
+    let (held, _) = exported(&mut tty, &sandbox, &name);
     assert_eq!(name, format!("clip-ascii-{}s.png", tenths(held * 4)));
     tty.send(b"q");
-    tty.until("the player", |screen| screen.row(24).starts_with("| "));
+    tty.until("the player on the frame taken", |screen| {
+        screen.row(24).starts_with("| ") && frame(screen) == held
+    });
     // a window for what must not happen: playing on after the page closed
     std::thread::sleep(Duration::from_millis(600));
-    assert!(tty.screen().row(24).starts_with("| "));
+    assert!(tty.screen().row(24).starts_with("| ") && frame(tty.screen()) == held);
     // on the last frame
     lands(&mut tty, UP, 199, "| 00:07 / 00:08");
     tty.send(b"r");
@@ -1971,11 +1981,17 @@ fn sound_that_outlasts_the_video_plays_on_over_its_last_frame() {
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 1.0, 3.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    tty.until("the first status row", |screen| !screen.row(24).is_empty());
-    let start = Instant::now();
+    tty.until("the first status row with the length", |screen| {
+        screen.row(24).starts_with("> ") && screen.row(24).contains(" / ")
+    });
+    // the clip's time then, by the bar: a test thread late under load sees a later one
+    let (start, from) = (Instant::now(), bar_time(&tty.screen().row(24), 80, 3.0));
     assert_eq!(tty.exit(), 0);
-    let took = start.elapsed();
-    assert!(took > Duration::from_millis(2500), "ended after {took:?}");
+    let took = from + start.elapsed().as_secs_f64();
+    assert!(
+        took > 2.5,
+        "ended {took:.2} s into the clip, from {from:.2} s"
+    );
     // a frame of the picture held while the clock runs on
     let drawn = drawn(&tty.out());
     assert!(
@@ -1994,23 +2010,33 @@ fn video_plays_on_without_sound_and_after_its_sound_ends() {
     let silent = counter(&sandbox, "silent.mp4", "160x90", 25, 3.0, 0.0, &[]);
     let short = counter(&sandbox, "short.mp4", "160x90", 25, 3.0, 1.0, &[]);
     let mut ttys = [&silent, &short].map(|video| sandbox.launch().arg(video).size(SMALL).start());
+    // each clip's time when its first clock past 00:00 is seen, by the frame on screen: a test thread late under load sees a later frame
+    let mut seen = Vec::new();
     for tty in &mut ttys {
         tty.await_playing();
+        seen.push((Instant::now(), frame(tty.screen())));
     }
-    let start = Instant::now();
-    for tty in &mut ttys {
+    // and how far into the clip each ended
+    let (mut took, end) = ([None; 2], Instant::now() + PATIENCE);
+    while took.contains(&None) && Instant::now() < end {
+        for (i, tty) in ttys.iter_mut().enumerate() {
+            if took[i].is_none() && !tty.running() {
+                let (at, from) = seen[i];
+                took[i] = Some(from as f64 / 25.0 + at.elapsed().as_secs_f64());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    for (tty, took) in ttys.iter_mut().zip(took) {
         assert_eq!(tty.exit(), 0);
+        let took = took.unwrap();
+        assert!(took > 2.5 && took < 10.0, "ended {took:.2} s into the clip");
         let drawn = drawn(&tty.out());
         // the last second plays on, to the last frames (a debug build among the other tests drops late ones)
         let second = frames_in(&drawn, 2);
         assert!(!second.is_empty(), "{second:?}");
         assert!(drawn.last().is_some_and(|(_, number)| *number >= 50));
     }
-    let took = start.elapsed();
-    assert!(
-        took > Duration::from_millis(1500) && took < Duration::from_secs(8),
-        "{took:?} from 00:01 to the ends"
-    );
 }
 
 #[test]
