@@ -1446,6 +1446,34 @@ fn s_saves_the_whole_picture_as_turned_beside_the_file() {
 }
 
 #[test]
+fn s_draws_in_the_players_look_or_says_it_failed() {
+    // row S12: screenshot of bin/ascii-viewer:1621 at tag python-final hands ascii-convert the player's look (`--level 95` here) and toasts `screenshot failed` when it fails: a ramp up to 200 at 95 % darker, where every value under 242 goes to 0 (tone_table of lib/ascii_theme.py:135), is bl1nk's background (#111111) alone, at level 0 it is not; a folder of the file's name is a file that cannot be written
+    let sandbox = Sandbox::new();
+    let ramp = RgbImage::from_fn(800, 400, |x, _| Rgb([(x * 200 / 799) as u8; 3]));
+    let pic = save(&ramp, &sandbox.path("pic.png"));
+    let shot = sandbox.path("pic-ascii.png");
+    let mut tty = drawn(&sandbox, &pic, SMALL);
+    let at = says(&mut tty, b"s", "screenshot ...");
+    tty.expect(at, toast("saved pic-ascii.png"));
+    let plain = picture_at(&shot);
+    assert!(plain.pixels().any(|px| px.0 != [0x11; 3]), "no picture");
+    says(&mut tty, &[b'3'; 19], "level 95% darker");
+    let at = says(&mut tty, b"s", "screenshot ...");
+    tty.expect(at, toast("saved pic-ascii.png"));
+    let dark = picture_at(&shot);
+    assert_eq!(dark.dimensions(), plain.dimensions());
+    assert!(
+        dark.pixels().all(|px| px.0 == [0x11; 3]),
+        "not drawn at 95 % darker"
+    );
+    std::fs::remove_file(&shot).unwrap();
+    std::fs::create_dir(&shot).unwrap();
+    let at = says(&mut tty, b"s", "screenshot ...");
+    tty.expect(at, toast("screenshot failed"));
+    quit(&mut tty);
+}
+
+#[test]
 fn r_opens_the_render_page_on_the_picture_as_turned() {
     // row S12: open_page of bin/ascii-viewer:2048 at tag python-final hands the page the picture in memory as turned: after `k` the crop editor shows 400x800 of an 800 x 400 still; `q` there and `q` on the menu come back to the still, turned as it was
     let sandbox = Sandbox::new();
