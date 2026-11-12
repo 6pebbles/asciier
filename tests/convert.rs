@@ -7,7 +7,7 @@ use image::RgbImage;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io::Read;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -1055,7 +1055,7 @@ fn a_still_over_the_pixel_limit_is_refused() {
 
 #[test]
 fn ctrl_c_on_a_still_or_a_frame_ends_it_quietly() {
-    // row C10: bin/ascii-convert:561 at tag python-final: Ctrl-C on a still, on an `--at` frame, or in a video run before its read loop: exit 130, no message, a file in the way as it was, nothing left running; each run held where it waits for fc-match or for the first frame by a child that ignores Ctrl-C, then SIGINT to its process group: the old converter killed the child it waited on (subprocess.run) and exited 130
+    // rows C10, N25: bin/ascii-convert:561 at tag python-final: Ctrl-C on a still, on an `--at` frame, or in a video run before its read loop: no message, a file in the way as it was, nothing left running, then death by SIGINT (N25; the old converter exited 130, as a shell shows both); each run held where it waits for fc-match or for the first frame by a child that ignores Ctrl-C, then SIGINT to its process group: the old converter killed the child it waited on (subprocess.run)
     let mut sandbox = Sandbox::new();
     save(&gradient(400, 300), &sandbox.path("pic.png"));
     clip(&sandbox, "clip.mp4", 0.4, "160x90", 25);
@@ -1079,7 +1079,7 @@ fn ctrl_c_on_a_still_or_a_frame_ends_it_quietly() {
         await_file(&sandbox.path("held"));
         run.interrupt();
         let (status, out, err) = run.finish();
-        assert_eq!(status.code(), Some(130), "{args:?}: {status:?}");
+        assert_eq!(status.signal(), Some(libc::SIGINT), "{args:?}: {status:?}");
         assert_eq!((out.as_str(), err.as_str()), ("", ""), "{args:?}");
         assert!(
             made.is_none_or(|made| !sandbox.path(made).exists()),
@@ -1094,8 +1094,8 @@ fn ctrl_c_on_a_still_or_a_frame_ends_it_quietly() {
 }
 
 #[test]
-fn ctrl_c_while_the_encoder_finishes_is_130_too() {
-    // row C10: main of bin/ascii-convert:561 at tag python-final: Ctrl-C in a video run after its read loop, while it waits for the encoder (held through the wrapper once the file is written): exit 130, no message; run in this harness the old converter exited 130 with nothing printed (3 of 3); the file the encoder wrote stays
+fn ctrl_c_while_the_encoder_finishes_ends_it_quietly_too() {
+    // rows C10, N25: main of bin/ascii-convert:561 at tag python-final: Ctrl-C in a video run after its read loop, while it waits for the encoder (held through the wrapper once the file is written): no message, then death by SIGINT; run in this harness the old converter exited 130 with nothing printed (3 of 3); the file the encoder wrote stays
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "clip.mp4", 0.4, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
@@ -1108,7 +1108,11 @@ fn ctrl_c_while_the_encoder_finishes_is_130_too() {
     run.interrupt();
     std::fs::write(sandbox.path("go"), "").unwrap();
     let (status, out, err) = run.finish();
-    assert_eq!((status.code(), out.as_str()), (Some(130), ""), "{err:?}");
+    assert_eq!(
+        (status.signal(), out.as_str()),
+        (Some(libc::SIGINT), ""),
+        "{err:?}"
+    );
     assert!(err.ends_with("\r10/10 frames\n"), "{err:?}");
     assert_eq!(frames_in(&sandbox, &sandbox.path("clip-out.mp4")), 10);
     await_gone(&sandbox);
@@ -2017,7 +2021,7 @@ fn progress_counts_the_frames_on_stderr() {
 
 #[test]
 fn ctrl_c_writes_the_frames_in_flight_and_finishes_the_file() {
-    // rows X9, X8, X4, N24: tests/test_convert.py:305 at tag python-final: the encoder held after 10 frames until the reading stops, then Ctrl-C (SIGINT to the group): the frames read are written whole but those Ctrl-C found in the pipes (4 at most), the file is finished and plays them, on stderr the progress then `stopped at frame <n>: <out> holds the part converted` and nothing else (the old converter killed the decoder at once: no complaint of a broken pipe from it), the path printed, exit 130; nothing left running; X4 memory bounded, N24 8 in flight (AGENTS.md, 2026-11-11): at most 10 frames past the 10 held, 8 waiting and one each in the reader's and the painter's hands
+    // rows X9, X8, X4, N24: tests/test_convert.py:305 at tag python-final: the encoder held after 10 frames until the reading stops, then Ctrl-C (SIGINT to the group): the frames read are written whole but those Ctrl-C found in the pipes (4 at most), the file is finished and plays them, on stderr the progress then `stopped at frame <n>: <out> holds the part converted` and nothing else (the old converter killed the decoder at once: no complaint of a broken pipe from it), the path printed, then death by SIGINT (N25; the old converter exited 130); nothing left running; X4 memory bounded, N24 8 in flight (AGENTS.md, 2026-11-11): at most 10 frames past the 10 held, 8 waiting and one each in the reader's and the painter's hands
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "long.mp4", 10.0, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
@@ -2033,8 +2037,8 @@ fn ctrl_c_writes_the_frames_in_flight_and_finishes_the_file() {
     std::fs::write(sandbox.path("go"), "").unwrap();
     let (status, out, err) = run.finish();
     assert_eq!(
-        (status.code(), out.as_str()),
-        (Some(130), "long-out.mp4\n"),
+        (status.signal(), out.as_str()),
+        (Some(libc::SIGINT), "long-out.mp4\n"),
         "{err}"
     );
     let (shown, said) = err

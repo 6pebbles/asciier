@@ -104,7 +104,7 @@ enum Stop {
     Usage(String),
     /// A failure: exit 1.
     Failed(String),
-    /// Ctrl-C: exit 130; the path of a file that holds the part converted (row X9), else nothing printed (row C10).
+    /// Ctrl-C: death by SIGINT; the path of a file that holds the part converted (row X9), else nothing printed (row C10).
     Interrupted(Option<PathBuf>),
 }
 
@@ -114,7 +114,7 @@ impl From<Error> for Stop {
     }
 }
 
-/// Run `asciier convert` with its arguments; the exit code (0, 1, 2, 130).
+/// Run `asciier convert` with its arguments; the exit code (0, 1, 2), or none after Ctrl-C: the process ends by SIGINT.
 pub fn main(args: impl Iterator<Item = OsString>) -> u8 {
     let options = match parse(args) {
         Ok(options) => options,
@@ -155,9 +155,22 @@ pub fn main(args: impl Iterator<Item = OsString>) -> u8 {
             if let Some(out) = out {
                 println!("{}", out.display());
             }
-            130
+            die_by_sigint()
         }
     }
+}
+
+/// Ctrl-C's end once its cleanup and messages are done: death by SIGINT, which a shell shows as 130 and which stops a script that ran the converter, where an exit 130 lets the script go on (N25); 130 only should the signal return.
+fn die_by_sigint() -> u8 {
+    let _ = std::io::stdout().flush();
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        let mut none = std::mem::zeroed();
+        libc::sigemptyset(&mut none);
+        libc::pthread_sigmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+        libc::raise(libc::SIGINT);
+    }
+    130
 }
 
 /// Ctrl-C for the whole run: SIGINT blocked in every thread (threads inherit the mask, std starts a child unblocked) and taken by a thread of its own, which notes it and, before a video's encoding, kills every child of the main thread: a child may outlive the terminal's SIGINT, or get none when it was sent to the converter alone.
