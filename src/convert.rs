@@ -1173,6 +1173,27 @@ mod tests {
     }
 
     #[test]
+    fn the_vaapi_trial_is_at_the_output_size() {
+        // row X6: tests/test_convert.py:344 at tag python-final: the one-frame trial runs at the size asked, not at one of its own (a 64 x 64 trial, under the 128 px a GPU's encoder may need, sent every video to libx264): vaapi(w, h) says what that trial at w x h says, 64 x 64 and 1920 x 1080; nothing to check without the render node
+        if !Path::new(VAAPI).exists() {
+            return;
+        }
+        let encodes = |w: u32, h: u32| {
+            Command::new("ffmpeg")
+                .args(["-v", "error", "-nostdin", "-vaapi_device", VAAPI])
+                .args(["-f", "lavfi", "-i", &format!("color=s={w}x{h}:d=0.04")])
+                .args(["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi"])
+                .args(["-f", "null", "-"])
+                .stdin(Stdio::null())
+                .output()
+                .is_ok_and(|output| output.status.success())
+        };
+        for (w, h) in [(64, 64), (1920, 1080)] {
+            assert_eq!(vaapi(w, h), encodes(w, h), "{w} x {h}");
+        }
+    }
+
+    #[test]
     fn floats_print_as_c_does() {
         assert_eq!(
             [g(1.5), g(5.0), g(0.1), g(12.30), g(1234567.0), g(0.00001)],
