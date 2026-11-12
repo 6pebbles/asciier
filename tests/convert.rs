@@ -2298,6 +2298,33 @@ fn ctrl_c_while_the_decoder_writes_nothing_stops_the_reading() {
 }
 
 #[test]
+fn ctrl_c_before_the_first_frame_ends_as_before_the_encoding() {
+    // rows C10, N25: a Ctrl-C once the decoder and the encoder run but before a frame was written leaves nothing to finish, so it ends as one before a video's encoding: the encoder killed before its input closes, no message, no path, death by SIGINT; the decoder writes nothing, its pipe open, and the Ctrl-C comes once the progress is out; on stderr the progress alone, the encoder's file (made at its start) empty; bin/ascii-convert:476 at tag python-final took it in its read loop and closed the encoder's empty input: exit 1 with ffmpeg's errors and `ffmpeg could not encode the video` where h264_vaapi encodes, `stopped at frame 0` and exit 130 where libx264 does
+    let mut sandbox = Sandbox::new();
+    clip(&sandbox, "clip.mp4", 0.8, "160x90", 25);
+    wrap_ffmpeg(&mut sandbox);
+    sandbox.set("STALL", "0");
+    let run = Running::start(
+        &sandbox,
+        &["-W", "320", "-H", "180", "-o", "clip-out.mp4", "clip.mp4"],
+    );
+    await_file(&sandbox.path("held"));
+    run.await_err("\r0/20 frames");
+    run.interrupt();
+    let (status, out, err) = run.finish();
+    assert_eq!(
+        (status.signal(), out.as_str()),
+        (Some(libc::SIGINT), ""),
+        "{err:?}"
+    );
+    let (counts, total) = progress(&err);
+    assert_eq!((counts.last(), total.as_str()), (Some(&0), "20"), "{err:?}");
+    let made = std::fs::metadata(sandbox.path("clip-out.mp4")).map_or(0, |meta| meta.len());
+    assert_eq!(made, 0, "{err:?}");
+    await_gone(&sandbox);
+}
+
+#[test]
 fn an_encoder_that_quits_is_exit_1_not_a_hang() {
     // row X10: tests/test_convert.py:335 at tag python-final: the encoder quits after reading three frames, or at once: exit 1, on stderr the progress then `asciier: ffmpeg could not encode the video` and nothing else (no traceback, no complaint of a broken pipe from the decoder, killed before its pipe closes), nothing printed, no hang, nothing left running
     let mut sandbox = Sandbox::new();

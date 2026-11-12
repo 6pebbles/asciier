@@ -839,10 +839,18 @@ fn video(
     });
     eprintln!("\r{done}/{shown} frames");
     *decoder_group() = 0;
+    // a Ctrl-C before a frame was written leaves the encoder nothing to finish: killed before its input closes, of which it would complain, it ends as before the encoding (row C10)
+    let unmade = || done == 0 && INTERRUPTED.load(Ordering::SeqCst);
+    if unmade() {
+        kill(encode.id() as libc::pid_t);
+    }
     let finish = |child: &mut Child| child.wait().map(|status| status.success()).unwrap_or(false);
     let decoded = finish(&mut decode);
     drop(sink);
     let encoded = finish(&mut encode);
+    if unmade() {
+        return Err(Stop::Interrupted(None));
+    }
     let stopped = read?;
     if !encoded {
         return Err(Stop::Failed("ffmpeg could not encode the video".into()));
