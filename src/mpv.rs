@@ -1541,16 +1541,18 @@ pub(crate) mod tests {
 
     #[test]
     fn a_step_back_after_a_seek_that_plays_ends_paused() {
-        // rows P8a, P15: `,` right after a seek that plays (`l,` after MPRIS Stop) ends paused, the step taking the place of the seek mpv had not run; the play that waited for the seek came after it (seen in this test before a step dropped the play: at 1.92 s on frame 48 a second later, 3 of 3)
+        // rows P8a, P15: `,` right after a seek that plays (`l,` after MPRIS Stop) ends paused: in place of the seek mpv has not run, or, once it runs it, on its target (mpv drops a step back during a seek); the play that waited for the seek came after the step (seen in this test before a step dropped the play: at 1.92 s on frame 48, half a second later at 2.44 s on 61, 3 of 3)
         let mut stage = Stage::new();
-        stage.clip(4.0, 4.0);
+        stage.clip(10.0, 10.0);
         stage.until_at(&["seek", "1", "absolute+exact"], 25, 1.0);
         stage.mpv.seek_and_play(&["seek", "5", "relative+exact"]);
         stage.mpv.step(false);
-        let events = stage.pump(1.0, |_| false);
+        stage.pump(1.0, |_| false);
+        let held = (stage.time, stage.shown.last().copied());
+        let events = stage.pump(0.5, |_| false);
         assert!(
-            stage.mpv.paused && stage.time < 1.0,
-            "at {} on frame {:?}: {events:?}",
+            stage.mpv.paused && (stage.time, stage.shown.last().copied()) == held,
+            "at {held:?}, then {} on frame {:?}: {events:?}",
             stage.time,
             stage.shown.last()
         );
