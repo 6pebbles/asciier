@@ -549,10 +549,11 @@ impl Viewer {
 
     fn serve_mpris(&mut self) {
         let Some(state) = self.state() else { return };
+        let opening = self.opening();
         let Some(mpris) = &mut self.mpris else { return };
         let requests = mpris.serve(&state);
-        if self.page.is_some() {
-            return; // the page holds playback paused: requests are dropped there
+        if self.page.is_some() || opening {
+            return; // the page holds playback paused from `r` on, while its frame is on its way too: requests are dropped there
         }
         for request in requests {
             let playing = state.status == "Playing";
