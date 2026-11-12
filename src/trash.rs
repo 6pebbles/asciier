@@ -902,6 +902,16 @@ mod tests {
         let temp = Temp::new();
         let top = temp.dir.join("mnt");
         fs::create_dir(&top).unwrap();
+        // without unshare, or where unprivileged user and mount namespaces are off, no such device can be made: said, and the test passed over
+        let mounts = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--mount", "sh", "-c"])
+            .args([r#"mount -t tmpfs none "$1""#, "sh"])
+            .arg(&top)
+            .output();
+        if !mounts.is_ok_and(|ran| ran.status.success()) {
+            eprintln!("skipped: unshare mounts no tmpfs in a user namespace here");
+            return;
+        }
         let script = r#"mount -t tmpfs none "$1" || exit 9
 mkdir "$1/sub" && printf x > "$1/sub/$2" || exit 8
 ASCIIER_TRASH_CHILD="$1/sub/$2" "$3" --exact trash::tests::trash_child --nocapture
