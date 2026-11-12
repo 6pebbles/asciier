@@ -268,28 +268,42 @@ fn the_status_row_goes_under_the_scope_between_decsc_and_decrc() {
     assert_eq!(tty.exit(), 0);
 }
 
-/// MPRIS `method` of the player `pid` on the test's bus, called once the viewer owns its name there; its empty reply waited for.
+/// MPRIS `method` of the player `pid` on the test's bus, `org.mpris.MediaPlayer2.<name>.instance<pid>` (N1: `asciier`, the old viewer's `ascii-viewer`), called once it owns that name; its empty reply waited for.
 fn mpris(sandbox: &Sandbox, bus: &Bus, pid: u32, method: &str) {
-    let end = Instant::now() + PATIENCE;
-    loop {
-        let output = sandbox
+    let send = |args: &[&str]| {
+        sandbox
             .command("dbus-send")
             .arg(format!("--bus={}", bus.address))
             .arg("--print-reply")
-            .arg(format!(
-                "--dest=org.mpris.MediaPlayer2.asciier.instance{pid}"
-            ))
-            .arg("/org/mpris/MediaPlayer2")
-            .arg(format!("org.mpris.MediaPlayer2.Player.{method}"))
+            .args(args)
             .output()
-            .unwrap();
-        if output.status.success() {
-            return;
+            .unwrap()
+    };
+    let (instance, end) = (format!(".instance{pid}"), Instant::now() + PATIENCE);
+    let name = loop {
+        let names = send(&[
+            "--dest=org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus.ListNames",
+        ]);
+        let names = String::from_utf8_lossy(&names.stdout).into_owned();
+        let player = names
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("string \"")?.strip_suffix('"'))
+            .find(|name| name.starts_with("org.mpris.MediaPlayer2.") && name.ends_with(&instance));
+        if let Some(name) = player {
+            break name.to_string();
         }
-        let said = String::from_utf8_lossy(&output.stderr);
-        assert!(Instant::now() < end, "{method}: {said}");
+        assert!(Instant::now() < end, "no player {pid} on the bus: {names}");
         std::thread::sleep(Duration::from_millis(50));
-    }
+    };
+    let called = send(&[
+        &format!("--dest={name}"),
+        "/org/mpris/MediaPlayer2",
+        &format!("org.mpris.MediaPlayer2.Player.{method}"),
+    ]);
+    let said = String::from_utf8_lossy(&called.stderr);
+    assert!(called.status.success(), "{method}: {said}");
 }
 
 #[test]
