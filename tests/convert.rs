@@ -1298,7 +1298,7 @@ fn ctrl_c_while_a_picture_is_written_prints_no_path() {
 
 #[test]
 fn ctrl_c_stays_ignored_when_the_parent_ignored_it() {
-    // rows C10, X9, C4: a shell without job control starts a background job with SIGINT ignored (POSIX; `/bin/sh -c 'grep SigIgn /proc/self/status & wait'` gives 0x6 here), so the terminal's Ctrl-C is not that job's: Python keeps an ignored SIGINT ignored, and the old converter ran on to its end, exit 0 with the file (reviewer's probe); a still held where it waits for fc-match and a video held after 5 of its 10 frames, each given SIGINT then let go: exit 0, nothing on stderr but the progress, the path printed, the whole file made
+    // rows C10, X9, C4: a shell without job control starts a background job with SIGINT ignored (POSIX; `/bin/sh -c 'grep SigIgn /proc/self/status & wait'` gives 0x6 here), so the terminal's Ctrl-C is not that job's: Python keeps an ignored SIGINT ignored, and the old converter ran on to its end, exit 0 with the file (reviewer's probe); a still held where it waits for fc-match and a video held after 5 of its 10 frames (seen in the encoder's input: the old converter printed its count only as it read a frame, bin/ascii-convert:475), each given SIGINT then let go: exit 0, nothing on stderr but the progress, the path printed, the whole file made
     let mut sandbox = Sandbox::new();
     save(&gradient(80, 40), &sandbox.path("pic.png"));
     clip(&sandbox, "clip.mp4", 0.4, "160x90", 25);
@@ -1331,7 +1331,7 @@ fn ctrl_c_stays_ignored_when_the_parent_ignored_it() {
         &sandbox,
         &["-W", "320", "-H", "180", "-o", "clip-out.mp4", "clip.mp4"],
     );
-    run.await_err("\r5/10 frames");
+    settled(&sandbox.path("encode.raw"), 5 * FRAME);
     run.interrupt();
     std::fs::write(sandbox.path("go"), "").unwrap();
     let (status, out, err) = run.finish();
