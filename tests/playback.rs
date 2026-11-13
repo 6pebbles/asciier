@@ -64,9 +64,9 @@ fn taken(tty: &mut Tty, sandbox: &Sandbox) -> u32 {
     saved(&sandbox.path(name)).0
 }
 
-/// Pause as soon as the first frame is written, then go to the start: under load a clip of a few seconds ends before a key sent once it plays on (seen: the viewer gone before the key, the terminal echoing it after the restore). Keys sent before the viewer read the ones before can reach it in the same read and add up with them (V14): Left and two Shift+Right landed on 0 (the review's probe of this shape: 7 of 8 copies at load 38-54, and the stress run's 5 of 44). The pause can land on frame 0, where Left changes nothing on screen and a redraw of frame 0 tells nothing of it, so the screen is moved off frame 0 first, by Shift+Right; Left then lands on 0 from there, alone or with it.
+/// Pause at the start, then go to frame 0: under load a clip of a few seconds ends before a key sent once it plays on (seen: the viewer gone before the key, the terminal echoing it after the restore). `space` goes once the first synchronized update is out, which the viewer writes as it starts to play, before its first frame, and after it took the terminal (keys typed before that are dropped, V3; the old viewer's first update comes after that too); sent once the first frame showed, after a start slow under load, it came too late for a 2.2 s clip (the review: 3 of 6 runs at load 105, the first rows seen 1.2 to 3.5 s after the launch at load 62). Keys sent before the viewer read the ones before can reach it in the same read and add up with them (V14): Left and two Shift+Right landed on 0 (the review's probe of this shape: 7 of 8 copies at load 38-54, and the stress run's 5 of 44). The pause can land on frame 0, where Left changes nothing on screen and a redraw of frame 0 tells nothing of it, so the screen is moved off frame 0 first, by Shift+Right; Left then lands on 0 from there, alone or with it.
 fn paused_at_the_start(tty: &mut Tty) {
-    assert!(tty.wait(0, PATIENCE, |out| !written_rows(out).is_empty()));
+    tty.expect(0, b"\x1b[?2026l");
     tty.send(b" ");
     tty.await_status("| ");
     // frames decoded before the pause still land
