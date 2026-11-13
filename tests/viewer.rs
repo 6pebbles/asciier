@@ -340,7 +340,7 @@ fn signals_and_ctrl_c_end_it_cleanly() {
 
 #[test]
 fn the_terminal_gone_ends_it() {
-    // rows V5, V13: the window closed under it (its master side gone): exit 0
+    // rows V5, V13, N37: the window closed under it (its master side gone): exit 0, as the old code reads (bin/ascii-viewer:2352-2353 at tag python-final); the old tools exited 120 there, Python's failed flush of stdout at exit (N37)
     let sandbox = Sandbox::new();
     let mut tty = shown_still(&sandbox);
     let status = tty.hang_up().expect("it ended");
@@ -758,7 +758,7 @@ fn player_keys() -> Vec<&'static str> {
 
 #[test]
 fn f1_shows_the_keys_and_any_key_closes_them() {
-    // rows V23, H1, H2, H4, K5, V21: F1 as kitty, xterm and rxvt send it (bin/ascii-viewer:146 at tag python-final); kitty's images deleted, then each line of src/keys.txt at its row after a space, the hint in SGR 2 on the bottom row (bin/ascii-viewer:2100); q and Q close the keys and do not quit; the old text differs in two lines: its `s` row reads `screenshot (ascii-convert --at)` (bin/ascii-viewer:35), and its last prose line is wrapped in the source (bin/ascii-viewer:44-45), where N27 wraps it at draw time
+    // rows V23, H1, H2, H4, K5, V21, N36: F1 as kitty, xterm and rxvt send it (bin/ascii-viewer:146 at tag python-final); kitty's images deleted, then each line of src/keys.txt at its row after a space, the hint in SGR 2 on the bottom row (bin/ascii-viewer:2100); q and Q close the keys and do not quit; the old text differs in two lines: its `s` row reads `screenshot (ascii-convert --at)` (bin/ascii-viewer:35), where N36 reads `screenshot of the frame shown`, and its last prose line is wrapped in the source (bin/ascii-viewer:44-45), where N27 wraps it at draw time
     let sandbox = Sandbox::new();
     let mut tty = shown_still(&sandbox);
     let lines = player_keys();
