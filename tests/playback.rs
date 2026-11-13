@@ -270,10 +270,10 @@ fn a_faster_clip_is_drawn_at_30_frames_a_second_at_most() {
 
 #[test]
 fn a_stream_without_times_plays_at_25_frames_a_second() {
-    // row P2: play_rate of bin/ascii-viewer:431 at tag python-final: 25 frames a second when the stream gives no rate. A raw HEVC stream without timing information, of frames made at 10 a second, holds no time (ffprobe: no duration, the raw demuxer's default rate 25/1), so mpv makes the frames' times up at 25 a second (`No video PTS! Making something up. Using 25.000000 FPS.`, seen from mpv itself): frame n shows under the clock of n/25 s, give or take the frame or so mpv's report of the clock and the frame drawn are apart (at 10 a second frame 10 would show at 00:01, at 30 frame 30). By the wall clock 75 to 85 frames took 3.0 to 3.5 s in 11 runs at load 10 to 29, and 80 took 4.1 s in one heavier: a loaded machine slows mpv's own pace, so the test reads the times mpv made up. A raw MJPEG stream would do as well, but mpv does not open one (probe score 25, mpv takes 26 and up). The old viewer ends on a raw stream with a traceback: its decoder seeks first, which such a stream does not let it (a_stream_without_a_length_shows_its_clock_alone)
+    // row P2: play_rate of bin/ascii-viewer:431 at tag python-final: 25 frames a second when the stream gives no rate. A raw HEVC stream without timing information, of frames made at 10 a second, holds no time (ffprobe: no duration, the raw demuxer's default rate 25/1), so mpv makes the frames' times up at 25 a second (`No video PTS! Making something up. Using 25.000000 FPS.`, seen from mpv itself): frame n shows under the clock of n/25 s, give or take the frame or so mpv's report of the clock and the frame drawn are apart (at 10 a second frame 10 would show at 00:01, at 30 frame 30). By the wall clock 75 to 85 frames took 3.0 to 3.5 s in 11 runs at load 10 to 29, and 80 took 4.1 s in one heavier: a loaded machine slows mpv's own pace, so the test reads the times mpv made up. 240 frames play 9.6 s, the counter's 8 bits all the way, and the clock's seconds 1 to 8 hold the draws read: a viewer slow under load draws few (11 in 3 s at 80 x 24 under load 50, 6 in 3 s in this window at load 99, the stress run's). A raw MJPEG stream would do as well, but mpv does not open one (probe score 25, mpv takes 26 and up). The old viewer ends on a raw stream with a traceback: its decoder seeks first, which such a stream does not let it (a_stream_without_a_length_shows_its_clock_alone)
     let sandbox = Sandbox::new();
     let raw = sandbox.path("clip.hevc");
-    let picture = format!("nullsrc=s=160x90:r=10:d=12,{COUNTER}");
+    let picture = format!("nullsrc=s=160x90:r=10:d=24,{COUNTER}");
     ffmpeg(
         &sandbox,
         &[
@@ -296,15 +296,14 @@ fn a_stream_without_times_plays_at_25_frames_a_second() {
     );
     let probed = probe(&sandbox, &raw, "stream=avg_frame_rate,duration", None);
     assert_eq!(probed, "avg_frame_rate=25/1\nduration=N/A\n");
-    // in this window a viewer slow under load still draws most frames (at 80 x 24 under load 50: 11 in 3 s)
     let mut tty = sandbox.launch().arg(&raw).size(QUICK).start();
     assert_eq!(tty.exit(), 0);
-    // the draws while the clock showed 00:01 to 00:03: each frame within the second the clock shows, 3 frames either side
+    // the draws while the clock showed 00:01 to 00:08: each frame within the second the clock shows, 3 frames either side
     let drawn: Vec<(u32, u32)> = replay(&tty.out(), QUICK, |screen| {
         (seconds(&screen.row(9)), counted(screen, 4, 1, 32))
     })
     .into_iter()
-    .filter_map(|(at, number)| at.filter(|at| (1..=3).contains(at)).map(|at| (at, number)))
+    .filter_map(|(at, number)| at.filter(|at| (1..=8).contains(at)).map(|at| (at, number)))
     .collect();
     let inside = drawn
         .iter()
