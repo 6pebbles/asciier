@@ -1108,7 +1108,7 @@ fn a_stream_without_a_length_shows_its_clock_alone() {
 
 #[test]
 fn the_clock_never_shows_past_the_length() {
-    // row P16: status of bin/ascii-viewer:2160 at tag python-final caps the position at the length: an MKV whose Duration says 1.5 s holds 3 s of frames, which play on; no status row shows a clock past its length. The old viewer took the container's 1.5 s and capped the clock there; mpv raises a duration to the highest time it has demuxed, ahead of the frame shown (demux.c: "update duration based on highest TS demuxed"), so the new row read `> 00:00 / 00:01` at first and `> 00:02 / 00:02` at the end, and the viewer's own cap (status in src/view.rs) is held by code reading: no file brings mpv's position past its duration
+    // no inventory row of its own: what an MKV whose Duration says 1.5 s over 3 s of frames shows, a difference from the old viewer put to the owner as a candidate N35 (not approved). The frames play on, and mpv raises the length to the highest time it has demuxed, ahead of the frame shown (demux.c: "update duration based on highest TS demuxed"): the row read `> 00:00 / 00:01` at first, `> 00:02 / 00:02` at the end, and no row shows a clock past its length. The old viewer took the container's 1.5 s and capped the clock there (status of bin/ascii-viewer:2160 at tag python-final). The viewer's own cap of the clock at the length (status in src/view.rs) is not reached: mpv's position never passes its duration, raised ahead of the frames played and the position clamped to it while a seek runs (get_playback_time in player/playloop.c), and with the cap taken out this test passed 3 of 3; that cap stands by code reading
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mkv", "160x90", 25, 3.0, 0.0, &[]);
     let mut bytes = std::fs::read(&video).unwrap();
@@ -1139,6 +1139,14 @@ fn the_clock_never_shows_past_the_length() {
             .all(|(_, row)| clocks(row).is_none_or(|(now, length)| now <= length)),
         "{drawn:?}"
     );
+    // the length shown at the end: the frames' that mpv demuxed, past the 1.5 s declared
+    let length = drawn
+        .iter()
+        .rev()
+        .find_map(|(_, row)| clocks(row))
+        .unwrap()
+        .1;
+    assert!((2..=3).contains(&length), "{drawn:?}");
 }
 
 /// A window of 24 x 4 cells: each look key draws the frame again, so a long run of them stays quick in it.
