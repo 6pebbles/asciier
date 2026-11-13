@@ -2439,9 +2439,14 @@ pub(crate) mod tests {
                 None => {
                     for _ in 0..2 {
                         stage.mpv.step(true);
-                        // the step is done once mpv is paused again, after it played the sound out (2.0, 2.3) and a seek past the end gave the frame its own time; a quiet window ended before the step's position came (2 of 5 runs at load 13-33: 2.3 s of sound, 1.92 on the last frame)
+                        // the step is done once mpv is paused again, after it played the sound out (2.0, 2.3) and a seek past the end gave the frame its own time; a quiet window ended before the step's position came (2 of 5 runs at load 13-33: 2.3 s of sound, 1.92 on the last frame); with 6.0 the step on the frame pauses at the sound's position past it, as far as the sound ran in mpv's pass (1.9618 at load 69), short of the next frame's time
                         let (start, there) = (Instant::now(), |stage: &Stage| {
-                            stage.shown.last() == Some(&49) && near(stage.time, 1.96, 0.001)
+                            let time = stage.time;
+                            stage.shown.last() == Some(&49)
+                                && match audio {
+                                    6.0 => (1.9595..2.0).contains(&time),
+                                    _ => near(time, 1.96, 0.001),
+                                }
                         });
                         while !(idle(&mut stage, 10.0) && there(&stage))
                             && start.elapsed() < Duration::from_secs(10)
