@@ -2567,12 +2567,13 @@ pub(crate) mod tests {
 
     #[test]
     fn a_frame_let_go_during_a_step_on_the_last_frame_moves_nothing() {
-        // rows P15, N21: mpv reports a frame it let go untaken a little after it; under load one let go before a step on the last frame was reported during the step, which then passed for one that moved, and `,` after it sought to where the step started, the same frame (seen with three playback groups at once, the count going 7 to 8); here the count rises by one during the step; seen in this test with a count that rose taken for a move: frame 49 at 1.77 after `,`
+        // rows P15, N21: mpv reports a frame it let go untaken a little after it; under load one let go before a step on the last frame was reported during the step, which then passed for one that moved, and `,` after it sought to where the step started, the same frame (seen with three playback groups at once, the count going 7 to 8); here the count rises by one during the step, which goes at once, the seek before it done (held behind the seek, the step took the risen count for its start: with a count that rose taken for a move this test passed 3 of 3 in review); seen with a count that rose taken for a move: frame 49 at 1.77 after `,`
         let mut stage = Stage::new();
         stage.clip(2.0, 6.0);
         stage.mpv.seek(&["seek", "1.96", "absolute+exact"]);
-        assert!(stage.reach(49, 1.96, 10.0));
+        assert!(stage.reach(49, 1.96, 10.0) && idle(&mut stage, 10.0));
         stage.mpv.step(true);
+        assert!(matches!(stage.mpv.busy, Some(Busy::Step { .. })));
         stage.mpv.drops += 1;
         assert!(idle(&mut stage, 10.0));
         stage.mpv.step(false);
