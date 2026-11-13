@@ -765,12 +765,28 @@ impl Tty {
         }
     }
 
-    /// The program and what runs in its session, killed.
+    /// The program ended, then what runs in its session: SIGTERM first, on which the viewer leaves as it does on `q` (row V5), the file of its last kitty placement removed, then SIGKILL for the session once it ended or 5 s passed. Killed outright, a run left in /dev/shm a file it had made and not yet named in its output.
     pub fn kill(&mut self) {
         if self.running() {
-            // SAFETY: the session's process group: the child leads it.
+            self.signal(libc::SIGTERM);
+            let end = Instant::now() + Duration::from_secs(5);
+            while !self.ended() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // SAFETY: the session's process group: the child leads it, and is not reaped yet, so the id is still its own.
             unsafe { libc::kill(-(self.pid as libc::pid_t), libc::SIGKILL) };
             self.status = self.child.wait().ok();
+        }
+    }
+
+    /// Whether the program has ended, leaving it unreaped.
+    fn ended(&self) -> bool {
+        // SAFETY: waitid into a zeroed siginfo; WNOWAIT leaves the child to be reaped.
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+            libc::waitid(libc::P_PID, self.pid as libc::id_t, &mut info, flags) == 0
+                && info.si_pid() != 0
         }
     }
 
@@ -807,7 +823,7 @@ impl Drop for Tty {
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
-        // a program killed while it showed a kitty image (a failed test) leaves the file the image travelled in
+        // a program SIGTERM did not end, killed while it showed a kitty image, leaves the file the image travelled in
         for file in transfer_files(&self.out()) {
             let _ = std::fs::remove_file(file);
         }

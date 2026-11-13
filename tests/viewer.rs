@@ -348,6 +348,37 @@ fn the_terminal_gone_ends_it() {
 }
 
 #[test]
+fn a_run_the_harness_ends_leaves_no_file_for_kitty() {
+    // row V5: the harness ends a run as SIGTERM does: the viewer leaves cleanly, exit 0 with the terminal given back, and removes the file its last kitty placement travelled in; killed outright, a run left in /dev/shm a file it had made and not yet named in the output (the units review's F2); here a still in kitty mode, zoomed in and out, each zoom a placement and a file, ended by the harness while its keys are on their way
+    let mut sandbox = Sandbox::new();
+    sandbox.set("KITTY_WINDOW_ID", "1");
+    let picture = save(&gradient(800, 400), &sandbox.path("pic.png"));
+    let mut tty = sandbox
+        .launch()
+        .arg(&picture)
+        .kitty(KITTY_OK, Duration::ZERO)
+        .start();
+    let placement: &[u8] = b"\x1b_Ga=T,f=24,t=t";
+    let first = tty.expect(0, placement);
+    tty.send(&b"+-".repeat(20));
+    tty.expect(first, placement);
+    tty.kill();
+    assert_eq!(tty.exit(), 0);
+    let out = tty.out();
+    assert!(
+        out.ends_with(RESTORE),
+        "{}",
+        shown(&out[out.len().saturating_sub(80)..])
+    );
+    let named = transfer_files(&out);
+    let left: Vec<_> = named.iter().filter(|file| file.exists()).collect();
+    assert!(
+        named.len() > 2 && left.is_empty(),
+        "left in /dev/shm: {left:?} of {named:?}"
+    );
+}
+
+#[test]
 fn a_batch_of_keys_draws_once_and_quits_at_once() {
     // row V14: tests/test_viewer_tty.py:85 and :93 at tag python-final pin under 1.0 s from the keys to the exit
     let sandbox = Sandbox::new();
