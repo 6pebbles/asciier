@@ -365,9 +365,7 @@ impl Viewer {
                     revents: 0,
                 },
             ];
-            let wait = self
-                .timeout()
-                .map_or(-1, |d| d.as_millis().min(i32::MAX as u128) as i32);
+            let wait = poll_wait(self.timeout());
             unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, wait) };
             if fds[1].revents != 0 {
                 for wake in self.ui.term.wakes() {
@@ -1173,6 +1171,13 @@ impl Viewer {
     }
 }
 
+/// A wait as poll takes it, whole milliseconds rounded up, -1 for none: rounded down, the loop spun on a wait of 0 through the last part of a millisecond before an owed frame or a toast's end.
+fn poll_wait(wait: Option<Duration>) -> i32 {
+    wait.map_or(-1, |d| {
+        d.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32
+    })
+}
+
 /// Seconds a seek key moves: mpv's arrows, plus `h l` and `j k`.
 fn seek_step(key: &[u8]) -> Option<f64> {
     Some(match key {
@@ -1186,4 +1191,21 @@ fn seek_step(key: &[u8]) -> Option<f64> {
         b"\x1b[1;2B" => -5.0,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_loop_sleeps_to_the_end_of_its_wait() {
+        // no inventory row: an owed frame is due 1/30 s after the last drawn, and a 30 fps source's frames come at or just under that gap, so many waits end within a millisecond; each was cut to a wait of 0, and the loop spun on poll until the frame was due
+        assert_eq!(poll_wait(None), -1);
+        assert_eq!(poll_wait(Some(Duration::ZERO)), 0);
+        assert_eq!(poll_wait(Some(Duration::from_nanos(1))), 1);
+        assert_eq!(poll_wait(Some(Duration::from_micros(1000))), 1);
+        assert_eq!(poll_wait(Some(Duration::from_micros(1001))), 2);
+        assert_eq!(poll_wait(Some(FRAME_GAP)), 34);
+        assert_eq!(poll_wait(Some(Duration::MAX)), i32::MAX);
+    }
 }
