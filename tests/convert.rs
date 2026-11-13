@@ -528,24 +528,44 @@ impl Running {
 }
 
 impl Drop for Running {
-    /// After a test that failed part-way: the converter's group and the ffmpeg it started in sessions of their own, killed.
+    /// After a test that failed part-way: the converter's group and the ffmpeg it started in sessions of their own, ended by SIGTERM, and by SIGKILL what is left of them after 5 s. SIGTERM first lets the old tools' converter end its pool: its multiprocessing resource tracker, in the group, ignores SIGTERM and unlinks the pool's semaphores in /dev/shm once the rest is gone, where SIGKILL left them behind.
     fn drop(&mut self) {
         if let Ok(None) = self.child.try_wait() {
-            let pid = self.child.id();
+            let pid = self.child.id() as libc::pid_t;
             let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
                 .unwrap_or_default();
-            for child in children
+            // a child's own session group, the child, the group the converter leads
+            let targets: Vec<libc::pid_t> = children
                 .split_whitespace()
                 .flat_map(str::parse::<libc::pid_t>)
-            {
-                // SAFETY: signals to a child's own session group, then to the child.
-                unsafe {
-                    libc::kill(-child, libc::SIGKILL);
-                    libc::kill(child, libc::SIGKILL);
-                }
+                .flat_map(|child| [-child, child])
+                .chain([-pid])
+                .collect();
+            // SAFETY: a signal (0: none, a test of being there) to a group or process found above, the converter not reaped yet or its group not empty.
+            let send = |target: libc::pid_t, signal| unsafe { libc::kill(target, signal) == 0 };
+            for &target in &targets {
+                send(target, libc::SIGTERM);
             }
-            // SAFETY: the group the child leads, not reaped yet.
-            unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+            let end = Instant::now() + Duration::from_secs(5);
+            let mut ended = None;
+            loop {
+                ended = ended.or(self.child.try_wait().ok().flatten());
+                let left: Vec<libc::pid_t> = targets
+                    .iter()
+                    .copied()
+                    .filter(|&target| send(target, 0))
+                    .collect();
+                if ended.is_some() && left.is_empty() {
+                    break;
+                }
+                if Instant::now() >= end {
+                    for target in left {
+                        send(target, libc::SIGKILL);
+                    }
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
             let _ = self.child.wait();
         }
     }
