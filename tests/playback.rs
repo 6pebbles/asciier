@@ -1839,10 +1839,12 @@ fn mpeg_ts_counts_time_from_its_start() {
     assert_eq!(tty.exit(), 0);
 }
 
-/// A 2 s counter clip of variable rate, frames 10 to 34 of 50 left out, with 2 s of sound.
-fn gap_clip(sandbox: &Sandbox) -> std::path::PathBuf {
+/// A counter clip of variable rate, `seconds` long at 25 frames a second with frames 10 to `after` - 1 left out, with as much sound.
+fn gap_clip(sandbox: &Sandbox, seconds: u32, after: u32) -> std::path::PathBuf {
     let gap = sandbox.path("gap.mkv");
-    let picture = format!("nullsrc=s=160x90:r=25:d=2,{COUNTER},select='lt(n,10)+gte(n,35)'");
+    let picture =
+        format!("nullsrc=s=160x90:r=25:d={seconds},{COUNTER},select='lt(n,10)+gte(n,{after})'");
+    let tone = format!("sine=d={seconds}");
     ffmpeg(
         sandbox,
         &[
@@ -1853,7 +1855,7 @@ fn gap_clip(sandbox: &Sandbox) -> std::path::PathBuf {
             "-f",
             "lavfi",
             "-i",
-            "sine=d=2",
+            &tone,
             "-c:a",
             "aac",
             "-fps_mode",
@@ -1872,26 +1874,25 @@ fn gap_clip(sandbox: &Sandbox) -> std::path::PathBuf {
 
 #[test]
 fn a_gap_in_a_variable_rate_clip_holds_the_frame_before_it() {
-    // row P24: Decoder.read of bin/ascii-viewer:479 at tag python-final holds the last frame across a gap; run in this harness the old viewer showed frames up to 9, then 35 to 49
+    // row P24: Decoder.read of bin/ascii-viewer:479 at tag python-final holds the last frame across a gap; run in this harness the old viewer showed frames up to 9, then 35 to 49 of a 2 s clip with frames 10 to 34 left out. Here frames 10 to 109 of 6 s are left out: frames 1 to 9 are due by 0.36 s, 110 at 4.4 s, so the frame before the gap stays 4 s; the hold is timed from the test's first sight of a frame before the gap, which under load comes late in the hold (the 1 s gap of the 2 s clip measured 0.40 to 0.66 s at 111 to 215 runnable tasks, the first frame drawn there 6 or 9), so half the gap is the bound
     let sandbox = Sandbox::new();
-    let gap = gap_clip(&sandbox);
+    let gap = gap_clip(&sandbox, 6, 110);
     let mut tty = sandbox.launch().arg(&gap).size(SMALL).start();
-    // frames 1 to 9 are due by 0.36 s, 35 at 1.4 s: the frame before the gap stays about a second
     tty.until("the frames before the gap", |screen| {
         (1..10).contains(&frame(screen))
     });
     let held = Instant::now();
-    tty.until("the frames after it", |screen| frame(screen) >= 35);
+    tty.until("the frames after it", |screen| frame(screen) >= 110);
     let took = held.elapsed();
-    assert!(took > Duration::from_millis(700), "held for {took:?}");
+    assert!(took > Duration::from_secs(2), "held for {took:?}");
     assert_eq!(tty.exit(), 0);
     let mut numbers: Vec<u32> = drawn(&tty.out()).into_iter().map(|(_, n)| n).collect();
     numbers.dedup();
-    let after = numbers.iter().position(|number| *number >= 35).unwrap();
+    let after = numbers.iter().position(|number| *number >= 110).unwrap();
     assert!(
         after > 0
             && numbers[after - 1] <= 9
-            && !numbers.iter().any(|number| (10..35).contains(number)),
+            && !numbers.iter().any(|number| (10..110).contains(number)),
         "{numbers:?}"
     );
 }
@@ -1900,7 +1901,7 @@ fn a_gap_in_a_variable_rate_clip_holds_the_frame_before_it() {
 fn the_clock_stands_with_the_frame_held_through_a_gap() {
     // rows P16, P24, N26: the clock is the time of the frame on screen: frame 9 is due at 0.36 s and held until frame 35 comes at 1.4 s, so at about 1 s the clock shows 00:00 over frame 9 and 00:01 comes with frame 35 (the old viewer's clock ran with the sound, clock and position of bin/ascii-viewer:1394 at tag python-final: 00:01 over frame 9)
     let sandbox = Sandbox::new();
-    let gap = gap_clip(&sandbox);
+    let gap = gap_clip(&sandbox, 2, 35);
     let mut tty = sandbox.launch().arg(&gap).size(SMALL).start();
     assert_eq!(tty.exit(), 0);
     let drawn = replay(&tty.out(), SMALL, |screen| (frame(screen), screen.row(24)));
