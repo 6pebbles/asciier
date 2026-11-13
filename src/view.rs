@@ -838,8 +838,9 @@ impl Viewer {
                 if look.mono { "mono" } else { "colour" }.to_string()
             }
         };
-        self.ui.say(toast);
+        // the frame drawn again first: a toast's time runs from `say`, and a redraw slow under load, or with the bold face's first load, outlasted it, the toast never drawn
         self.refresh();
+        self.ui.say(toast);
     }
 
     /// The look as converter options for a picture of this file.
@@ -1429,6 +1430,86 @@ mod tests {
         assert!(viewer.quit, "the end quits");
         let saved = image::open(&shot).map(|png| (png.width(), png.height()));
         assert!(matches!(saved, Ok((1920, 1080))), "{shot:?}: {saved:?}");
+    }
+
+    #[test]
+    fn a_look_keys_toast_runs_from_the_frame_drawn_again() {
+        // row V16: a toast shows 1.2 s; a look key draws the frame again, which under load, or with the bold face loaded at a run's first `b`, can outlast that: timed from before the redraw, the toast was never drawn (seen at load 116: `bold` never written after `b`, tests/playback.rs every_run_starts_at_the_defaults; the old viewer timed it at the key too, bin/ascii-viewer:2129 and :2154 at tag python-final); its time now starts once the frame is drawn again, so all of it is left for the draw that shows it
+        let _env = crate::mpv::tests::env();
+        let home = crate::mpv::tests::Scratch::new();
+        std::fs::create_dir_all(home.0.join(".config/mpv")).unwrap();
+        std::fs::write(home.0.join(".config/mpv/mpv.conf"), "ao=null\n").unwrap();
+        let _home = crate::mpv::tests::Var::set("HOME", &home.0);
+        let file = home.0.join("clip.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i"])
+            .args([
+                "testsrc2=s=160x90:r=25:d=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&file)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let mut mpv = Mpv::new("asciier-test", || {}).unwrap();
+        mpv.open(&file, 10.0).unwrap();
+        let playback = Playback {
+            mpv,
+            audio: false,
+            paused: true,
+            time: 0.0,
+            length: Some(1.0),
+            speed: 100,
+            volume: None,
+            muted: false,
+            looping: false,
+            stopped: false,
+            playing: false,
+            shape: None,
+            drawn: Instant::now() - FRAME_GAP,
+            owed: false,
+            rows: Vec::new(),
+            grabs: VecDeque::new(),
+        };
+        let mut viewer = Viewer {
+            ui: ui(SMALL),
+            mode: Mode::Video(playback),
+            page: None,
+            held: Vec::new(),
+            help: None,
+            resume: false,
+            mpris: None,
+            file,
+            results: channel().1,
+            quit: false,
+        };
+        // the first frame drawn, as the loop draws it
+        let end = Instant::now() + Duration::from_secs(10);
+        let drawn = |viewer: &Viewer| matches!(&viewer.mode, Mode::Video(p) if !p.rows.is_empty());
+        while !drawn(&viewer) && Instant::now() < end {
+            viewer.mpv_events();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(drawn(&viewer), "no frame drawn");
+        let mut wrong = Vec::new();
+        for key in [b"b", b"3"] {
+            let before = Instant::now();
+            viewer.look_key(key);
+            let after = Instant::now();
+            let (text, until) = viewer.ui.toast.clone().expect("a toast");
+            // all of the toast's time left once the key is done
+            if until + Duration::from_millis(1) < after + TOAST {
+                let left = until.saturating_duration_since(after);
+                wrong.push(format!(
+                    "{text}: {left:?} left of {TOAST:?}, the key took {:?}",
+                    after - before
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
