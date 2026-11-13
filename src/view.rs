@@ -466,10 +466,17 @@ impl Viewer {
     }
 
     fn mpv_events(&mut self) {
+        let Some(p) = self.playback() else { return };
+        let events = p.mpv.events();
+        self.mpv_batch(events);
+    }
+
+    /// One batch of mpv's events, as `Mpv::events` hands them.
+    fn mpv_batch(&mut self, events: Vec<Event>) {
         let live = self.help.is_none() && self.page.is_none();
         let Some(p) = self.playback() else { return };
         let (mut frame, mut grabbed, mut ended) = (false, Vec::new(), false);
-        for event in p.mpv.events() {
+        for event in events {
             match event {
                 Event::Frame => frame = true,
                 Event::Pause(paused) => p.paused = paused,
@@ -494,6 +501,16 @@ impl Viewer {
             if (frame || p.owed) && p.rows.is_empty() && live {
                 self.frame();
                 self.flush();
+            }
+            // an `s` whose frame came with the end is saved before the quit; the render page's frame goes unused
+            for (picture, time) in grabbed {
+                if let Mode::Video(p) = &mut self.mode
+                    && p.grabs.front() == Some(&Grab::Page)
+                {
+                    p.grabs.pop_front();
+                    continue;
+                }
+                self.grabbed(picture, time);
             }
             self.quit = true;
             return;
@@ -1349,6 +1366,69 @@ mod tests {
         );
         ui.toast = Some((text, Instant::now()));
         assert_eq!(ui.toast_row(), None);
+    }
+
+    #[test]
+    fn a_shot_whose_frame_comes_with_the_end_is_saved_before_the_quit() {
+        // rows P21, P14: `s` just before a clip's end: mpv's answer, the frame and its time, can come in the batch of events that holds the end, which quits; the shot is saved first, beside the clip and named by the frame's time, and the run then ends; seen before: the end taken first and the shot lost (the steps review, by code reading); the old viewer's converter, started for each press, died with the viewer (P21b), so a shot this late was lost there too
+        let _env = crate::mpv::tests::env();
+        let home = crate::mpv::tests::Scratch::new();
+        for (file, text) in [
+            (
+                ".config/kitty/current-theme.conf",
+                include_str!("../tests/bl1nk.conf"),
+            ),
+            (".config/mpv/mpv.conf", "ao=null\n"),
+        ] {
+            let path = home.0.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let _home = crate::mpv::tests::Var::set("HOME", &home.0);
+        let file = home.0.join("clip.mp4");
+        let options = Options {
+            input: file.clone(),
+            ..Options::default()
+        };
+        let playback = Playback {
+            mpv: Mpv::new("asciier-test", || {}).unwrap(),
+            audio: true,
+            paused: false,
+            time: 0.96,
+            length: Some(1.0),
+            speed: 100,
+            volume: Some(100.0),
+            muted: false,
+            looping: false,
+            stopped: false,
+            playing: true,
+            shape: Some((160, 90)),
+            drawn: Instant::now(),
+            owed: false,
+            rows: b"\x1b[2;1H the last frame drawn".to_vec(),
+            grabs: VecDeque::from([Grab::Shot(options)]),
+        };
+        let mut viewer = Viewer {
+            ui: ui(SMALL),
+            mode: Mode::Video(playback),
+            page: None,
+            held: Vec::new(),
+            help: None,
+            resume: false,
+            mpris: None,
+            file,
+            results: channel().1,
+            quit: false,
+        };
+        let frame = RgbImage::from_pixel(160, 90, image::Rgb([200, 200, 200]));
+        viewer.mpv_batch(vec![
+            Event::Grabbed(Some(frame), Some(0.96)),
+            Event::Ended(true),
+        ]);
+        let shot = home.0.join("clip-ascii-1s.png");
+        assert!(viewer.quit, "the end quits");
+        let saved = image::open(&shot).map(|png| (png.width(), png.height()));
+        assert!(matches!(saved, Ok((1920, 1080))), "{shot:?}: {saved:?}");
     }
 
     #[test]
