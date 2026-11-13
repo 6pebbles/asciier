@@ -528,13 +528,16 @@ fn a_step_back_after_a_step_on_the_last_frame_shows_the_frame_before() {
 
 #[test]
 fn a_step_while_the_sound_plays_on_past_the_picture_only_pauses() {
-    // rows P15, N5, N21: past the picture's end the sound plays on over the last frame, frame 54 of this 2.2 s clip with 6 s of sound; `.` there only pauses, the clock where the sound was, `s` takes that frame, and `,` shows frame 53 (frame_step of bin/ascii-viewer:1441 at tag python-final; N21: the old viewer ended with the picture); seen before the fix: the playing step's seek to the frame after the one on screen went past the last frame and put the clock back short of the frame, the bar falling from 27 cells to 21, and `s` named the frame `clip-ascii-2s.png` (the review; with 2.6 s of sound `,` kept frame 54 in 1 of 2 runs); the name's time is the position mpv gave with the frame, a look late under load (`a_frame_taken_while_the_sound_plays_on_is_named_by_its_time`; src/mpv.rs `a_step_while_the_sound_plays_on_past_the_picture_only_pauses` pins it to a frame)
+    // rows P15, N5, N21: past the picture's end the sound plays on over the last frame, frame 54 of this 2.2 s clip with 12 s of sound (under load the screen was seconds behind mpv); `.` there only pauses, the clock where the sound was, `s` takes that frame, and `,` shows frame 53 (frame_step of bin/ascii-viewer:1441 at tag python-final; N21: the old viewer ended with the picture); seen before the fix: the playing step's seek to the frame after the one on screen went past the last frame and put the clock back short of the frame, the bar falling from 27 cells to 21 with 6 s of sound, and `s` named the frame `clip-ascii-2s.png` (the review; with 2.6 s of sound `,` kept frame 54 in 1 of 2 runs); here without the fix the clock read `| 00:01` or `| 00:02` after `.` (3 of 3); the name's time is the position mpv gave with the frame, a look late under load (`a_frame_taken_while_the_sound_plays_on_is_named_by_its_time`; src/mpv.rs `a_step_while_the_sound_plays_on_past_the_picture_only_pauses` pins it to a frame)
     let sandbox = Sandbox::new();
-    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 6.0, &[]);
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 12.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_status("> 00:03");
     tty.send(b".");
-    tty.await_status("| ");
+    // the screen can lag mpv under load: it must come to the last frame, paused (seen at load 59 without the wait: frame 52 on screen 0.5 s after the pause)
+    tty.until("the last frame, paused", |screen| {
+        frame(screen) == 54 && screen.row(24).starts_with("| ")
+    });
     // a window for what must not happen: the clip moving on, or the clock going back
     std::thread::sleep(Duration::from_millis(500));
     let (on, row) = (frame(tty.screen()), tty.screen().row(24));

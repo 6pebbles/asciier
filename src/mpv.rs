@@ -907,8 +907,8 @@ impl Mpv {
             Some(Busy::Step { from, rested, .. }) => {
                 // a step that played the sound out (mpv reports the end later) leaves the position at its end
                 let out = self.at_end || self.length.is_some_and(|length| landed > length - 0.001);
-                // a frame mpv handed over, or the position of the next frame: a step that moved; mpv's count of frames let go untaken tells nothing here, as it reports one let go before the step during it (seen under load: a step on the last frame taken for one that moved)
-                let next = !out && (landed - from).abs() >= 0.75 * self.frame;
+                // a frame mpv handed over, or the position of the next frame: a step that moved; mpv's count of frames let go untaken tells nothing here, as it reports one let go before the step during it (seen under load: a step on the last frame taken for one that moved); past the picture's end the position is the sound's, which runs on while a loaded mpv takes the step (seen at load 59: frame 54 at 2.16 s named 5.3 s, `.` sent when the screen showed 00:03; inference: the caller's last position taken in was seconds behind mpv's)
+                let next = !out && !self.tail && (landed - from).abs() >= 0.75 * self.frame;
                 if self.fresh || next {
                     self.back = rested.then_some(from);
                     (self.seen, self.prev) = (Some((landed, self.drops)), None);
@@ -2856,6 +2856,56 @@ pub(crate) mod tests {
                 let now = (stage.shown.last(), stage.time);
                 wrong.push(format!(
                     "{audio} s of sound, `.` at {at}: paused {paused} on {on:?}, `s` took {taken:?}, `,` on {now:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn a_step_in_the_tail_moves_nothing_while_the_sound_runs_on() {
+        // rows P15, N5, N21: past the picture's end mpv's position is the sound's, which runs on past the last position a loaded caller took in before its step went; that move passed for a step that moved, and the frame was named by the sound's position (the black-box test of `.` in the tail at load 59: `clip-ascii-5.3s.png` for frame 54 at 2.16 s, `.` sent when its screen showed 00:03); here the last position taken in is put that far back; seen in this test before the fix: frame 49 named 2.41 s, the sound's position (2 of 2)
+        let mut wrong = Vec::new();
+        for lag in [0.1, 1.0] {
+            let mut stage = Stage::new();
+            stage.clip(2.0, 6.0);
+            stage.mpv.seek(&["seek", "1.7", "absolute+exact"]);
+            assert!(stage.reach(43, 1.72, 10.0));
+            stage.mpv.pause(false);
+            let start = Instant::now();
+            while stage.time < 2.4 && start.elapsed() < Duration::from_secs(5) {
+                for event in stage.mpv.events() {
+                    match event {
+                        Event::Frame => {
+                            stage.draw();
+                            stage.mpv.shown();
+                        }
+                        Event::Time(time) => stage.time = time,
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            stage.mpv.time -= lag;
+            stage.mpv.step(true);
+            let paused = idle(&mut stage, 10.0) && stage.mpv.paused;
+            stage.mpv.grab();
+            let events = stage.pump(5.0, |e| matches!(e, Event::Grabbed(..)));
+            let taken = match events.last() {
+                Some(Event::Grabbed(Some(picture), Some(time))) => {
+                    Some((number(picture.as_raw(), 160, 120), *time))
+                }
+                _ => None,
+            };
+            let named = taken.is_some_and(|(number, time)| number == 49 && near(time, 1.96, 0.041));
+            stage.mpv.step(false);
+            let back = idle(&mut stage, 10.0)
+                && stage.shown.last() == Some(&48)
+                && near(stage.time, 1.92, 0.0005);
+            if !(paused && named && back) {
+                let now = (stage.shown.last(), stage.time);
+                wrong.push(format!(
+                    "{lag} s behind: `s` took {taken:?}, `,` on {now:?}"
                 ));
             }
         }
