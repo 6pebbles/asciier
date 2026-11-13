@@ -58,11 +58,20 @@ fn taken(tty: &mut Tty, sandbox: &Sandbox) -> u32 {
     saved(&sandbox.path(name)).0
 }
 
-/// Pause as soon as the first frame is written: under load a clip of a few seconds ends before a key sent once it plays on (seen: the viewer gone before the key, the terminal echoing it after the restore).
-fn paused_at_once(tty: &mut Tty) {
+/// Pause as soon as the first frame is written, then go to the start: under load a clip of a few seconds ends before a key sent once it plays on (seen: the viewer gone before the key, the terminal echoing it after the restore). The pause can land on frame 0, where Left changes nothing on screen, so a draw after it is waited for: keys sent sooner can reach the viewer in the same read and add up with it (V14), Left and two Shift+Right landing on 0 (the review's probe of this shape: 7 of 8 copies at load 38-54).
+fn paused_at_the_start(tty: &mut Tty) {
     assert!(tty.wait(0, PATIENCE, |out| !written_rows(out).is_empty()));
     tty.send(b" ");
     tty.await_status("| ");
+    // frames decoded before the pause still land
+    tty.settle(Duration::from_millis(300));
+    let at = tty.send(LEFT);
+    let start = |screen: &Screen| frame(screen) == 0 && screen.row(24).starts_with("| 00:00");
+    if !tty.wait(at, PATIENCE, |out| {
+        replay(out, SMALL, start).contains(&true)
+    }) {
+        tty.fail("no draw of frame 0 after Left");
+    }
 }
 
 /// Send `keys`, then wait for the toast `text`.
@@ -338,10 +347,10 @@ fn seeks_move_by_their_steps_and_stop_at_both_ends() {
 fn frame_steps_move_one_frame_and_pause() {
     // rows P15, N2: frame_step of bin/ascii-viewer:1441 at tag python-final: `.` a frame on, `,` a frame back, then paused, a playing clip paused first, one or two frames after the one on screen at the key; `,` on the first frame and `.` on the last only pause; the clock follows the frame; `,` right after a seek is mpv's back step (N2); seen before `.` on a playing clip went from the frame drawn: 1 of 8 runs at load 20 one or two frames on, the others 5 to 21, mpv stepping from the frame it held, past the one drawn under load
     let sandbox = Sandbox::new();
-    // frames 0 to 54
-    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 2.2, &[]);
+    // frames 0 to 254, all under the counter's wrap; a clip of 2.2 s ended before `.` landed at load 55 (the review: 2 of 18 copies)
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.2, 10.2, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    // `.` as soon as it plays on: under load a clip this short ends before a key sent later
+    // `.` as soon as it plays on
     tty.until("playing", |screen| {
         screen.row(24).starts_with("> ") && frame(screen) >= 3
     });
@@ -368,7 +377,7 @@ fn frame_steps_move_one_frame_and_pause() {
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
         (frame(tty.screen()), tty.screen().row(24)),
-        (0, "| 00:00 / 00:02".to_string())
+        (0, "| 00:00 / 00:10".to_string())
     );
     lands(&mut tty, SHIFT_RIGHT, 25, "| 00:01");
     for (key, number, status) in [
@@ -379,17 +388,18 @@ fn frame_steps_move_one_frame_and_pause() {
     ] {
         lands(&mut tty, key, number, status);
     }
-    lands(&mut tty, SHIFT_RIGHT, 50, "| 00:02");
-    for number in 51..=54 {
-        lands(&mut tty, b".", number, "| 00:02");
+    lands(&mut tty, b"l", 150, "| 00:06");
+    lands(&mut tty, &SHIFT_RIGHT.repeat(4), 250, "| 00:10");
+    for number in 251..=254 {
+        lands(&mut tty, b".", number, "| 00:10");
     }
     // on the last frame `.` only pauses
     tty.send(b".");
     // a window for what must not happen: the picture moving on, or the run ending
     std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(frame(tty.screen()), 54);
+    assert_eq!(frame(tty.screen()), 254);
     assert!(tty.running());
-    lands(&mut tty, LEFT, 0, "| 00:00");
+    lands(&mut tty, DOWN, 0, "| 00:00");
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }
@@ -401,8 +411,7 @@ fn a_step_on_the_last_frame_keeps_its_place() {
         let sandbox = Sandbox::new();
         let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, audio, &[]);
         let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-        paused_at_once(&mut tty);
-        lands(&mut tty, LEFT, 0, "| 00:00");
+        paused_at_the_start(&mut tty);
         lands(&mut tty, b"\x1b[1;2C\x1b[1;2C", 50, "| 00:02");
         for number in 51..=54 {
             lands(&mut tty, b".", number, "| 00:02");
@@ -435,8 +444,7 @@ fn a_step_back_soon_after_a_step_onto_the_last_frame_shows_the_frame_before() {
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 2.5, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    paused_at_once(&mut tty);
-    lands(&mut tty, LEFT, 0, "| 00:00");
+    paused_at_the_start(&mut tty);
     lands(&mut tty, b"\x1b[1;2C\x1b[1;2C", 50, "| 00:02");
     for number in 51..=53 {
         lands(&mut tty, b".", number, "| 00:02");
@@ -502,8 +510,7 @@ fn a_step_back_after_a_step_on_the_last_frame_shows_the_frame_before() {
         let sandbox = Sandbox::new();
         let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, audio, &[]);
         let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-        paused_at_once(&mut tty);
-        lands(&mut tty, LEFT, 0, "| 00:00");
+        paused_at_the_start(&mut tty);
         lands(&mut tty, SHIFT_RIGHT, 25, "| 00:01");
         // four steps in one write, each its frame
         lands(&mut tty, b"....", 29, "| 00:01");
@@ -1412,9 +1419,9 @@ fn a_frame_taken_while_playing_is_named_by_its_time() {
 
 #[test]
 fn a_frame_taken_while_the_sound_plays_on_is_named_by_its_time() {
-    // rows N5, N21, P21: past the picture's end the sound plays on over the last frame, frame 49 of this 2 s clip with 6 s of sound; `s` there saves that frame named by the position mpv gave with it, 1.96 s, which comes a look later under load, or an earlier frame's when mpv dropped the last frames untaken (seen with three test binaries at once: 1.9 to 2.1 s, and 2 s unloaded); seen before: `clip-ascii-3s.png`, the sound's position
+    // rows N5, N21, P21: past the picture's end the sound plays on over the last frame, frame 49 of this 2 s clip with 12 s of sound; `s` there saves that frame named by the position mpv gave with it, 1.96 s, which comes a look later under load, or an earlier frame's when mpv dropped the last frames untaken (seen with three test binaries at once: 1.9 to 2.1 s, and 2 s unloaded); seen before: `clip-ascii-3s.png`, the sound's position; with 6 s of sound the clip ended before the toast at load 45-55 (the review: 4 of 18 copies)
     let sandbox = Sandbox::new();
-    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.0, 6.0, &[]);
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.0, 12.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_status("> 00:03");
     let at = tty.send(b"s");
