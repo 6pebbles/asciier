@@ -68,27 +68,33 @@ fn caught<T>(work: impl FnOnce() -> T) -> Option<T> {
     crate::term::guard(std::panic::AssertUnwindSafe(work)).ok()
 }
 
-/// Whether the file holds several frames to play, as Pillow's n_frames counts them (lib/ascii_image.py:61): a GIF by its blocks, an APNG and a WebP by their chunks, nothing decoded; one of a single frame is a still.
-fn animated(path: &Path, format: Option<ImageFormat>) -> std::io::Result<bool> {
-    let mut file = BufReader::new(File::open(path)?);
-    Ok(match format {
-        Some(ImageFormat::Gif) => gif_frames(&mut file)? > 1,
-        Some(ImageFormat::Png) => png_frames(&mut file)? > 1,
-        Some(ImageFormat::WebP) => webp_frames(&mut file)? > 1,
-        _ => false,
-    })
+/// A raster still's frames as Pillow's n_frames counts them (lib/ascii_image.py:61), up to 2, nothing decoded: a GIF by its blocks, an APNG and a WebP by their chunks, 1 for any other format; `Not::Image` for a file Pillow refuses on the way to its first frame, `Not::TooLarge` for a GIF whose first frame grows it past `MAX_PIXELS`.
+fn frames(path: &Path, format: Option<ImageFormat>) -> std::result::Result<u32, Not> {
+    let mut file = BufReader::new(File::open(path).map_err(|_| Not::Image)?);
+    let counted = match format {
+        Some(ImageFormat::Gif) => return gif_frames(&mut file),
+        Some(ImageFormat::Png) => png_frames(&mut file),
+        Some(ImageFormat::WebP) => webp_frames(&mut file),
+        _ => Ok(1),
+    };
+    counted.map_err(|_| Not::Image) // frames Pillow cannot count: it refuses the file
 }
 
-/// A GIF's frames as Pillow 13 counts them (GifImagePlugin _seek), up to 2: its image descriptors, the blocks between walked past their data, nothing decoded; the trailer or the file's end ends the walk, a byte that starts no block is passed over, a descriptor cut short counts no frame; an error without a frame, a file Pillow refuses.
-fn gif_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
+/// A GIF's frames as Pillow 13 counts them (GifImagePlugin _seek), up to 2: its image descriptors, the blocks between walked past their data, nothing decoded; the trailer or the file's end ends the walk, a byte that starts no block is passed over, a descriptor cut short counts no frame; no frame, a file Pillow refuses (`Not::Image`). The first frame reaching past the screen grows the picture to its extent, as Pillow measures it: over `MAX_PIXELS`, `Not::TooLarge`.
+fn gif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     fn byte(file: &mut impl Read) -> Option<u8> {
         let mut byte = [0];
         file.read_exact(&mut byte).ok().map(|()| byte[0])
     }
+    fn skip(file: &mut impl Seek, bytes: i64) -> std::result::Result<(), Not> {
+        file.seek(SeekFrom::Current(bytes))
+            .map(drop)
+            .map_err(|_| Not::Image)
+    }
     // past the data sub-blocks to their terminator, or to the file's end
-    fn blocks(file: &mut (impl Read + Seek)) -> std::io::Result<()> {
+    fn blocks(file: &mut (impl Read + Seek)) -> std::result::Result<(), Not> {
         while let Some(length @ 1..) = byte(file) {
-            file.seek(SeekFrom::Current(i64::from(length)))?;
+            skip(file, i64::from(length))?;
         }
         Ok(())
     }
@@ -99,9 +105,11 @@ fn gif_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
             3 << ((flags & 7) + 1)
         }
     };
-    let mut screen = [0; 13]; // the header and the logical screen descriptor
-    file.read_exact(&mut screen)?;
-    file.seek(SeekFrom::Current(colours(screen[10])))?;
+    let side = |bytes: &[u8]| u32::from(u16::from_le_bytes([bytes[0], bytes[1]]));
+    let mut head = [0; 13]; // the header and the logical screen descriptor
+    file.read_exact(&mut head).map_err(|_| Not::Image)?;
+    let screen = (side(&head[6..]), side(&head[8..]));
+    skip(file, colours(head[10]))?;
     let mut frames = 0;
     while frames < 2 {
         match byte(file) {
@@ -117,7 +125,15 @@ fn gif_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
                 if file.read_exact(&mut image).is_err() {
                     break;
                 }
-                file.seek(SeekFrom::Current(colours(image[8])))?;
+                let extent = (
+                    side(&image) + side(&image[4..]),
+                    side(&image[2..]) + side(&image[6..]),
+                );
+                let grown = (extent.0.max(screen.0), extent.1.max(screen.1));
+                if frames == 0 && grown != screen && too_large(grown) {
+                    return Err(Not::TooLarge);
+                }
+                skip(file, colours(image[8]))?;
                 if byte(file).is_none() {
                     break; // no LZW code size
                 }
@@ -128,7 +144,7 @@ fn gif_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
         }
     }
     match frames {
-        0 => Err(std::io::ErrorKind::InvalidData.into()),
+        0 => Err(Not::Image),
         frames => Ok(frames),
     }
 }
@@ -181,7 +197,7 @@ fn webp_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
     Ok(frames.max(1))
 }
 
-/// The decoder of the raster still at `path`, its header read: the format by content, within `MAX_PIXELS`, no animation.
+/// The decoder of the raster still at `path`, its header read: the format by content, within `MAX_PIXELS`, no animation; in Pillow's order (Image.open, then lib/ascii_image.py:61): the file read to its first frame, then its size, then its frames.
 fn header(path: &Path) -> std::result::Result<impl ImageDecoder, Not> {
     let mut reader = ImageReader::open(path)
         .and_then(ImageReader::with_guessed_format)
@@ -189,14 +205,13 @@ fn header(path: &Path) -> std::result::Result<impl ImageDecoder, Not> {
     reader.no_limits(); // MAX_PIXELS is the limit
     let format = reader.format();
     let decoder = reader.into_decoder().map_err(|_| Not::Image)?;
+    let frames = frames(path, format)?;
     if too_large(decoder.dimensions()) {
         return Err(Not::TooLarge);
     }
-    match animated(path, format) {
-        Ok(false) => Ok(decoder),
-        Ok(true) => Err(Not::Animation),
-        // frames Pillow cannot count: it refuses the file
-        Err(_) => Err(Not::Image),
+    match frames {
+        1 => Ok(decoder),
+        _ => Err(Not::Animation),
     }
 }
 
@@ -1325,6 +1340,30 @@ mod tests {
         out
     }
 
+    /// A GIF87a of a `screen` with Pillow's palette of red and three blacks, then `blocks`, then the trailer.
+    fn gif_of(screen: (u16, u16), blocks: &[&[u8]]) -> Vec<u8> {
+        let mut out = b"GIF87a".to_vec();
+        out.extend(screen.0.to_le_bytes());
+        out.extend(screen.1.to_le_bytes());
+        out.extend([&[0x81, 0, 0, 200][..], &[0; 11]].concat()); // a palette of 4, its background 0
+        out.extend(blocks.concat());
+        out.push(b';');
+        out
+    }
+
+    /// An image descriptor of `w` x `h` px at (`x`, `y`), then Pillow's data of an 8 x 8 frame of red.
+    fn gif_frame(x: u16, y: u16, w: u16, h: u16) -> Vec<u8> {
+        let mut out = vec![b','];
+        for value in [x, y, w, h] {
+            out.extend(value.to_le_bytes());
+        }
+        let data = [
+            0, 1, 8, 0x1c, 0x48, 0xb0, 0xa0, 0xc1, 0x83, 8, 0x13, 0x2a, 0x4c, 0x18, 0x10,
+        ];
+        out.extend([&[0, 8, 15][..], &data, &[0]].concat()); // no palette, 8 bits a code, a sub-block, its terminator
+        out
+    }
+
     #[test]
     fn animations_and_non_images_are_no_stills() {
         // rows S1, V17: tests/test_image.py:93 at tag python-final: a GIF, an APNG or an animated WebP of more than one frame is an animation, no still, also an APNG of one frame behind a default image outside the animation, two frames to Pillow's n_frames (lib/ascii_image.py:61; it opened as a still while frames were counted by decoding, which passes over that image), and a GIF cut short in its second frame, a frame to Pillow 13 from its image descriptor on (GifImagePlugin _seek); text, a clip, a missing file, a folder are no picture; so is a PNG whose acTL is cut short, which Pillow 13 refuses (PngImagePlugin chunk_acTL: `APNG contains truncated acTL chunk`, a ValueError, no picture to open_picture of lib/ascii_image.py:105; seen 2026-11-13)
@@ -1424,6 +1463,38 @@ mod tests {
         let full = dir.file("full.png", png_header(12470, 14351));
         assert_eq!(kind(&full), "no image");
         assert!(identifies(&full));
+    }
+
+    #[test]
+    fn a_gif_reaches_as_far_as_its_first_frame() {
+        // rows S18, S8a, S8: Pillow 13 grows a GIF to its first frame's extent and holds that to the limit (GifImagePlugin _seek, _decompression_bomb_check; seen 2026-11-13, Pillow 13.0.0 through lib/ascii_image.py): on a screen of 8 x 8 px, a first frame of 65288 x 65535 px, of 8 x 8 px at (60000, 60000), or reaching one row past 12470 x 14351 px is too large to open, and identifies (lib/ascii_image.py:76); one reaching to the limit opens; the decoder knows the screen's size alone and allocates the frame whole, 17 GB for this file of 54 bytes; Pillow measures a file once it has read its first frame: a screen over the limit whose first frame is cut short, and a PNG over it whose acTL is, are refused, no picture to identify
+        let dir = Dir::new("gif_extent");
+        assert_eq!(12470 * 14351, MAX_PIXELS);
+        for (name, frame) in [
+            ("big.gif", gif_frame(0, 0, 65288, 65535)),
+            ("far.gif", gif_frame(60000, 60000, 8, 8)),
+            ("past.gif", gif_frame(12462, 14344, 8, 8)),
+        ] {
+            let file = dir.file(name, gif_of((8, 8), &[&frame]));
+            assert_eq!(kind(&file), "too large", "{name}");
+            assert!(identifies(&file), "{name}");
+        }
+        let at = dir.file("at.gif", gif_of((8, 8), &[&gif_frame(12462, 14343, 8, 8)]));
+        assert_eq!(kind(&at), "still");
+        let mut cut = gif_of((20000, 20000), &[&gif_frame(0, 0, 8, 8)[..10]]);
+        cut.pop(); // the file ends with the descriptor
+        let cut = dir.file("cut.gif", cut);
+        assert_eq!(kind(&cut), "no image");
+        assert!(!identifies(&cut));
+        let actl = png_chunks(&[
+            (b"IHDR", ihdr(20000, 20000, 8, 2)),
+            (b"acTL", 1u32.to_be_bytes().to_vec()),
+            (b"IDAT", vec![]),
+            (b"IEND", vec![]),
+        ]);
+        let actl = dir.file("cut-actl.png", actl);
+        assert_eq!(kind(&actl), "no image");
+        assert!(!identifies(&actl));
     }
 
     #[test]
