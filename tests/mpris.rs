@@ -833,11 +833,13 @@ fn without_a_bus_it_plays_silently() {
 
 #[test]
 fn without_a_bus_address_it_plays_silently() {
-    // row M6: serve_mpris of bin/ascii-viewer:1512 at tag python-final: no session bus, no MPRIS, nothing said; here no address at all, no DISPLAY and an XDG_RUNTIME_DIR without a `bus` socket: the session bus libdbus looks for by default is not there, and with no X display to start one for (by inference from libdbus's autolaunch) the viewer plays and says nothing, alone in its session
+    // row M6: serve_mpris of bin/ascii-viewer:1512 at tag python-final: no session bus, no MPRIS, nothing said; here no address at all, no DISPLAY (the sandbox's environment never has one) and an XDG_RUNTIME_DIR without a `bus` socket: the session bus libdbus looks for by default is not there, and with no X display to start one for (by inference from libdbus's autolaunch) the viewer plays and says nothing, alone in its session
     let mut sandbox = Sandbox::new();
     sandbox.unset("DBUS_SESSION_BUS_ADDRESS");
-    sandbox.unset("DISPLAY");
-    assert!(!sandbox.path("runtime/bus").exists());
+    assert!(
+        !sandbox.env().iter().any(|(name, _)| name == "DISPLAY")
+            && !sandbox.path("runtime/bus").exists()
+    );
     let video = clip(&sandbox, "clip.mp4", 20.0, "160x90", 25);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
