@@ -672,15 +672,20 @@ fn a_step_back_soon_after_a_step_onto_the_last_frame_shows_the_frame_before() {
         lands(&mut tty, b".", number, "| 00:02");
     }
     for wait in [50, 150, 250] {
-        tty.send(b".");
+        let at = tty.send(b".");
+        // the keys' timing, not a wait for the viewer
         std::thread::sleep(Duration::from_millis(wait));
         tty.send(b",");
-        let end = Instant::now() + Duration::from_secs(5);
-        while frame(tty.screen()) != 53 && Instant::now() < end {
-            let at = tty.len();
-            tty.wait(at, Duration::from_millis(100), |out| !out.is_empty());
+        // the end of what the keys set going: frame 54, mpv playing the sound out, a seek past the end, then the step back, each stage with its draw, 0.5 to 0.9 s apart under load (the stress run: read in the middle of it at 151 to 182 runnable tasks, 54 at 2.16 s); frame 53 had been on screen before the keys
+        let back = |out: &[u8]| {
+            let frames = replay(out, SMALL, frame);
+            let onto = frames.iter().position(|number| *number == 54);
+            onto.is_some_and(|onto| frames[onto..].contains(&53))
+        };
+        if !tty.wait(at, PATIENCE, back) {
+            tty.fail(&format!("{wait} ms: no frame 53 after 54"));
         }
-        // what mpv ends on after the sound has played out
+        // a window for what must not happen: moving on from it
         tty.settle(Duration::from_millis(600));
         let status = tty.screen().row(24);
         assert_eq!(frame(tty.screen()), 53, "{wait} ms: {status:?}");
