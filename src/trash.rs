@@ -902,14 +902,15 @@ mod tests {
         let temp = Temp::new();
         let top = temp.dir.join("mnt");
         fs::create_dir(&top).unwrap();
-        // without unshare, or where unprivileged user and mount namespaces are off, no such device can be made: said, and the test passed over
+        // without unshare, or where unprivileged user and mount namespaces are off, no such device can be made: the test is passed over, and T1's mount clause is then unproven by it; said on stderr past libtest's capture, which keeps eprintln! of a passing test unseen
         let mounts = Command::new("unshare")
             .args(["--user", "--map-root-user", "--mount", "sh", "-c"])
             .args([r#"mount -t tmpfs none "$1""#, "sh"])
             .arg(&top)
             .output();
         if !mounts.is_ok_and(|ran| ran.status.success()) {
-            eprintln!("skipped: unshare mounts no tmpfs in a user namespace here");
+            let skipped = "skipped: unshare mounts no tmpfs in a user namespace here: row T1's mount clause unproven\n";
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), skipped.as_bytes());
             return;
         }
         let script = r#"mount -t tmpfs none "$1" || exit 9
