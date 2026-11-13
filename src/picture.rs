@@ -3,12 +3,11 @@
 use crate::Result;
 use crate::theme::Rgb;
 use fast_image_resize as fir;
-use image::codecs::gif::GifDecoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::metadata::Orientation;
 use image::{
-    AnimationDecoder, ColorType, DynamicImage, ImageBuffer, ImageDecoder, ImageFormat, ImageReader,
-    Pixel, RgbImage, RgbaImage,
+    ColorType, DynamicImage, ImageBuffer, ImageDecoder, ImageFormat, ImageReader, Pixel, RgbImage,
+    RgbaImage,
 };
 use resvg::{tiny_skia, usvg};
 use std::fs::File;
@@ -69,15 +68,69 @@ fn caught<T>(work: impl FnOnce() -> T) -> Option<T> {
     crate::term::guard(std::panic::AssertUnwindSafe(work)).ok()
 }
 
-/// Whether the file holds several frames to play, as Pillow's n_frames counts them (lib/ascii_image.py:61): a GIF by its first two frames, an APNG and a WebP by their chunks, nothing decoded; one of a single frame is a still.
-fn animated(path: &Path, format: Option<ImageFormat>) -> image::ImageResult<bool> {
+/// Whether the file holds several frames to play, as Pillow's n_frames counts them (lib/ascii_image.py:61): a GIF by its blocks, an APNG and a WebP by their chunks, nothing decoded; one of a single frame is a still.
+fn animated(path: &Path, format: Option<ImageFormat>) -> std::io::Result<bool> {
     let mut file = BufReader::new(File::open(path)?);
     Ok(match format {
-        Some(ImageFormat::Gif) => GifDecoder::new(file)?.into_frames().take(2).count() > 1,
+        Some(ImageFormat::Gif) => gif_frames(&mut file)? > 1,
         Some(ImageFormat::Png) => png_frames(&mut file)? > 1,
         Some(ImageFormat::WebP) => webp_frames(&mut file)? > 1,
         _ => false,
     })
+}
+
+/// A GIF's frames as Pillow 13 counts them (GifImagePlugin _seek), up to 2: its image descriptors, the blocks between walked past their data, nothing decoded; the trailer or the file's end ends the walk, a byte that starts no block is passed over, a descriptor cut short counts no frame; an error without a frame, a file Pillow refuses.
+fn gif_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
+    fn byte(file: &mut impl Read) -> Option<u8> {
+        let mut byte = [0];
+        file.read_exact(&mut byte).ok().map(|()| byte[0])
+    }
+    // past the data sub-blocks to their terminator, or to the file's end
+    fn blocks(file: &mut (impl Read + Seek)) -> std::io::Result<()> {
+        while let Some(length @ 1..) = byte(file) {
+            file.seek(SeekFrom::Current(i64::from(length)))?;
+        }
+        Ok(())
+    }
+    let colours = |flags: u8| {
+        if flags & 0x80 == 0 {
+            0
+        } else {
+            3 << ((flags & 7) + 1)
+        }
+    };
+    let mut screen = [0; 13]; // the header and the logical screen descriptor
+    file.read_exact(&mut screen)?;
+    file.seek(SeekFrom::Current(colours(screen[10])))?;
+    let mut frames = 0;
+    while frames < 2 {
+        match byte(file) {
+            None | Some(b';') => break,
+            Some(b'!') => {
+                if byte(file).is_none() {
+                    break; // no label
+                }
+                blocks(file)?;
+            }
+            Some(b',') => {
+                let mut image = [0; 9];
+                if file.read_exact(&mut image).is_err() {
+                    break;
+                }
+                file.seek(SeekFrom::Current(colours(image[8])))?;
+                if byte(file).is_none() {
+                    break; // no LZW code size
+                }
+                frames += 1;
+                blocks(file)?;
+            }
+            Some(_) => {}
+        }
+    }
+    match frames {
+        0 => Err(std::io::ErrorKind::InvalidData.into()),
+        frames => Ok(frames),
+    }
 }
 
 /// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two; an error for an acTL under 8 bytes, a file Pillow refuses.
@@ -200,7 +253,7 @@ pub fn open(path: &Path) -> Opened {
     }
 }
 
-/// Whether `path` holds a still by its header, a GIF's first two frames, an APNG's or a WebP's chunks (an SVG by its suffix; an image over the limit counts).
+/// Whether `path` holds a still by its header, a GIF's blocks, an APNG's or a WebP's chunks (an SVG by its suffix; an image over the limit counts).
 pub fn identifies(path: &Path) -> bool {
     let raster = || caught(|| header(path).map(drop));
     is_svg(path) || matches!(raster(), Some(Ok(()) | Err(Not::TooLarge)))
@@ -1272,11 +1325,14 @@ mod tests {
         out
     }
 
-    // rows S1, V17: tests/test_image.py:93 at tag python-final: a GIF, an APNG or an animated WebP of more than one frame is an animation, no still, also an APNG of one frame behind a default image outside the animation, two frames to Pillow's n_frames (lib/ascii_image.py:61; it opened as a still while frames were counted by decoding, which passes over that image); text, a clip, a missing file, a folder are no picture; so is a PNG whose acTL is cut short, which Pillow 13 refuses (PngImagePlugin chunk_acTL: `APNG contains truncated acTL chunk`, a ValueError, no picture to open_picture of lib/ascii_image.py:105; seen 2026-11-13)
+    // rows S1, V17: tests/test_image.py:93 at tag python-final: a GIF, an APNG or an animated WebP of more than one frame is an animation, no still, also an APNG of one frame behind a default image outside the animation, two frames to Pillow's n_frames (lib/ascii_image.py:61; it opened as a still while frames were counted by decoding, which passes over that image), and a GIF cut short in its second frame, a frame to Pillow 13 from its image descriptor on (GifImagePlugin _seek); text, a clip, a missing file, a folder are no picture; so is a PNG whose acTL is cut short, which Pillow 13 refuses (PngImagePlugin chunk_acTL: `APNG contains truncated acTL chunk`, a ValueError, no picture to open_picture of lib/ascii_image.py:105; seen 2026-11-13)
     #[test]
     fn animations_and_non_images_are_no_stills() {
         let dir = Dir::new("animations");
         assert_eq!(kind(&dir.file("a.gif", gif(3))), "animation");
+        let two = gif(2);
+        let cut = dir.file("cut.gif", &two[..two.len() - 3]);
+        assert_eq!(kind(&cut), "animation");
         assert_eq!(kind(&dir.file("a.png", apng(2, false))), "animation");
         assert_eq!(kind(&dir.file("default.png", apng(1, true))), "animation");
         assert_eq!(
@@ -1290,12 +1346,15 @@ mod tests {
         assert_eq!(kind(&dir.0), "no image");
     }
 
-    // rows S1, V17: is_animation of lib/ascii_image.py:61 at tag python-final: more than one frame (Pillow's n_frames) makes an animation; a GIF, an APNG or an animated WebP of one frame is a still (the last two went to mpv while their headers decided)
+    // rows S1, V17: is_animation of lib/ascii_image.py:61 at tag python-final: more than one frame (Pillow's n_frames) makes an animation; a GIF, an APNG or an animated WebP of one frame is a still (the last two went to mpv while their headers decided); so is a GIF of one frame without its trailer, whose blocks Pillow 13 walks to the file's end (GifImagePlugin _seek; seen 2026-11-13), where decoding took the missing trailer for a second frame
     #[test]
     fn one_frame_of_an_animated_format_is_a_still() {
         let dir = Dir::new("one_frame");
         let one = still(&dir.file("one.gif", gif(1)));
         assert_eq!(rgb(&one.pic).dimensions(), (8, 8));
+        let whole = gif(1);
+        let open = still(&dir.file("open.gif", &whole[..whole.len() - 1]));
+        assert_eq!(rgb(&open.pic).get_pixel(7, 7).0, [0, 0, 0]);
         let source = RgbImage::from_pixel(8, 8, [1, 2, 3].into());
         let one = still(&dir.file("one.webp", encoded(&source.into(), ImageFormat::WebP)));
         assert_eq!(rgb(&one.pic).get_pixel(7, 7).0, [1, 2, 3]);
@@ -1367,7 +1426,7 @@ mod tests {
         assert!(identifies(&full));
     }
 
-    // rows S8, S8a: identifies of lib/ascii_image.py:67 at tag python-final: a still by its header, also one cut short that then does not open, and an SVG by its suffix, unread; an animation of more than one frame (an APNG's default image outside the animation counted, as Pillow counts it), text, a clip or a missing file is passed over, and so is a PNG whose acTL is cut short, a ValueError of Pillow 13 that identifies takes for no still (lib/ascii_image.py:78)
+    // rows S8, S8a: identifies of lib/ascii_image.py:67 at tag python-final: a still by its header, also one cut short that then does not open (a GIF too, cut in its only frame's data: one frame to Pillow 13's walk of its blocks, two to decoding), and an SVG by its suffix, unread; an animation of more than one frame (an APNG's default image outside the animation counted, as Pillow counts it), text, a clip or a missing file is passed over, and so is a PNG whose acTL is cut short, a ValueError of Pillow 13 that identifies takes for no still (lib/ascii_image.py:78)
     #[test]
     fn identifies_by_the_header_alone() {
         let dir = Dir::new("identifies");
@@ -1375,6 +1434,10 @@ mod tests {
         assert!(identifies(&dir.file("whole.png", &whole)));
         // tests/test_viewer.py:499: a header, cut short
         let cut = dir.file("cut.png", &whole[..60]);
+        assert!(identifies(&cut));
+        assert_eq!(kind(&cut), "no image");
+        let one = gif(1);
+        let cut = dir.file("cut.gif", &one[..one.len() - 3]);
         assert!(identifies(&cut));
         assert_eq!(kind(&cut), "no image");
         assert!(!identifies(&dir.file("text.png", "not a picture")));
