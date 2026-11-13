@@ -366,15 +366,21 @@ fn space_and_p_pause_and_play_on() {
     lands(&mut tty, SHIFT_RIGHT, 25, "| 00:01");
     lands(&mut tty, b",", 24, "| 00:00");
     says(&mut tty, b"{{", "speed 25%");
-    let from = tty.send(b" ");
+    let (from, sent) = (tty.send(b" "), Instant::now());
     tty.until("playing on", |screen| {
         screen.row(24).starts_with("> ") && frame(screen) > 24
     });
+    // a frame each 160 ms from frame 24 on: the first one drawn after it by the time the test saw it, at least as late as the viewer drew it (under load 112 the first came about 1 s on: frame 30, the stress run's)
+    let seen = sent.elapsed().as_secs_f64();
     let next = replay(&tty.out()[from..], SMALL, frame)
         .into_iter()
         .find(|number| *number != 24)
         .unwrap();
-    assert!((25..=28).contains(&next), "on from frame 24 to {next}");
+    let latest = 26 + (seen / 0.16) as u32;
+    assert!(
+        (25..=latest).contains(&next),
+        "on from frame 24 to {next}, seen {seen:.2} s after `space`"
+    );
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }
