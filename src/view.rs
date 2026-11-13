@@ -1371,7 +1371,7 @@ mod tests {
 
     #[test]
     fn a_shot_whose_frame_comes_with_the_end_is_saved_before_the_quit() {
-        // rows P21, P14: `s` just before a clip's end: mpv's answer, the frame and its time, can come in the batch of events that holds the end, which quits; the shot is saved first, beside the clip and named by the frame's time, and the run then ends; seen before: the end taken first and the shot lost (the steps review, by code reading); the old viewer's converter, started for each press, died with the viewer (P21b), so a shot this late was lost there too
+        // rows P21, P14, N39: `s` just before a clip's end: mpv's answer, the frame and its time, can come in the batch of events that holds the end, which quits; N39: the shot is saved first, beside the clip and named by the frame's time, and the run then ends; seen before: the end taken first and the shot lost (the steps review, by code reading); the old viewer's converter, started for each press, died with the viewer (P21b), so a shot this late was lost there too
         let _env = crate::mpv::tests::env();
         let home = crate::mpv::tests::Scratch::new();
         for (file, text) in [
@@ -1434,7 +1434,7 @@ mod tests {
 
     #[test]
     fn a_look_keys_toast_runs_from_the_frame_drawn_again() {
-        // row V16: a toast shows 1.2 s; a look key draws the frame again, which under load, or with the bold face loaded at a run's first `b`, can outlast that: timed from before the redraw, the toast was never drawn (seen at load 116: `bold` never written after `b`, tests/playback.rs every_run_starts_at_the_defaults; the old viewer timed it at the key too, bin/ascii-viewer:2129 and :2154 at tag python-final); its time now starts once the frame is drawn again, so all of it is left for the draw that shows it
+        // rows V16, N40: a toast shows 1.2 s; a look key draws the frame again, which under load, or with the bold face loaded at a run's first `b`, can outlast that: timed from before the redraw, the toast was never drawn (seen at load 116: `bold` never written after `b`, tests/playback.rs every_run_starts_at_the_defaults; the old viewer timed it at the key too, bin/ascii-viewer:2129 and :2154 at tag python-final); N40: its time now starts once the frame is drawn again, so all of it is left for the draw that shows it
         let _env = crate::mpv::tests::env();
         let home = crate::mpv::tests::Scratch::new();
         std::fs::create_dir_all(home.0.join(".config/mpv")).unwrap();

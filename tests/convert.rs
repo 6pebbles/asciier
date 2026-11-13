@@ -1450,7 +1450,7 @@ fn children_start_with_no_signal_blocked() {
 
 #[test]
 fn animations_and_pictures_only_ffmpeg_reads_convert_as_video() {
-    // rows C11, N7, C3: bin/ascii-convert:527 and :538 at tag python-final: an animation is no still: a GIF, an animated WebP or an APNG converts as a video, `<stem>-ascii.mp4`, at its own rate, every frame; N7: so does a picture the built-in decoders do not take (PCX, which the old converter opened as a still and wrote as `pic-ascii.png`); the WebP's first frame taken without a seek, after which ffmpeg's webp_anim demuxer gives no frame (with ffmpeg n9.0.2 the old converter, seeking to 0 s, ended `no frame at 0 s in spin.webp`, exit 1)
+    // rows C11, N7, C3, N38: bin/ascii-convert:527 and :538 at tag python-final: an animation is no still: a GIF, an animated WebP or an APNG converts as a video, `<stem>-ascii.mp4`, at its own rate, every frame; N7: so does a picture the built-in decoders do not take (PCX, which the old converter opened as a still and wrote as `pic-ascii.png`); N38: the WebP's first frame taken without a seek, after which ffmpeg's webp_anim demuxer gives no frame (with ffmpeg n9.0.2 the old converter, seeking to 0 s, ended `no frame at 0 s in spin.webp`, exit 1)
     let sandbox = Sandbox::new();
     let moving = "testsrc2=s=80x44:r=10:d=0.3";
     for (out, extra) in [
@@ -1554,7 +1554,7 @@ fn input_ffmpeg_cannot_read_is_exit_1_with_its_words() {
 
 #[test]
 fn a_frame_is_found_at_its_time_where_ffmpeg_cannot_seek() {
-    // rows C11, C12: frame_at of bin/ascii-convert:350 at tag python-final seeked before ffmpeg read the source: an animation or anything else ffmpeg decodes is a video (C11), whose `--at` frame is the one at that time, and a time without one is `no frame at <s> s in <path>` (C12); with ffmpeg n9.0.2 that seek finds no frame in an animated WebP or a raw H.264 stream, whose length ffprobe cannot tell, so the old converter ended `no frame at 0.1 s in spin.webp`, exit 1 (seen here): the frame is now decoded from the start, a second grab, and is the one a twin of the same frames that ffmpeg can seek gives at that time (a lossless MKV; the MP4 the stream came out of), not the first; a time past the end of a source whose length ffprobe tells fails at once, one grab, never decoded from the start
+    // rows C11, C12, N38: frame_at of bin/ascii-convert:350 at tag python-final seeked before ffmpeg read the source: an animation or anything else ffmpeg decodes is a video (C11), whose `--at` frame is the one at that time, and a time without one is `no frame at <s> s in <path>` (C12); with ffmpeg n9.0.2 that seek finds no frame in an animated WebP or a raw H.264 stream, whose length ffprobe cannot tell, so the old converter ended `no frame at 0.1 s in spin.webp`, exit 1 (seen here): N38: the frame is now decoded from the start, a second grab, and is the one a twin of the same frames that ffmpeg can seek gives at that time (a lossless MKV; the MP4 the stream came out of), not the first; a time past the end of a source whose length ffprobe tells fails at once, one grab, never decoded from the start
     let mut sandbox = Sandbox::new();
     let moving = "testsrc2=s=80x44:r=10:d=0.3,format=rgb24";
     for (out, codec) in [
