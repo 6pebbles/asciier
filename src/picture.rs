@@ -80,7 +80,7 @@ fn animated(path: &Path, format: Option<ImageFormat>) -> image::ImageResult<bool
     })
 }
 
-/// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two.
+/// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two; an error for an acTL under 8 bytes, a file Pillow refuses.
 fn png_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
     file.seek(SeekFrom::Start(8))?; // past the signature
     let (mut frames, mut control) = (None, false);
@@ -92,7 +92,8 @@ fn png_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
         match &head[4..] {
             b"IDAT" | b"fdAT" => return Ok(frames.map_or(1, |n| n + u32::from(!control))),
             b"fcTL" => control = true,
-            b"acTL" if length >= 8 => {
+            b"acTL" if length < 8 => return Err(std::io::ErrorKind::InvalidData.into()),
+            b"acTL" => {
                 let mut count = [0; 4];
                 file.read_exact(&mut count)?;
                 rest -= 4;
@@ -138,10 +139,12 @@ fn header(path: &Path) -> std::result::Result<impl ImageDecoder, Not> {
     if too_large(decoder.dimensions()) {
         return Err(Not::TooLarge);
     }
-    if animated(path, format).unwrap_or(false) {
-        return Err(Not::Animation);
+    match animated(path, format) {
+        Ok(false) => Ok(decoder),
+        Ok(true) => Err(Not::Animation),
+        // frames Pillow cannot count: it refuses the file
+        Err(_) => Err(Not::Image),
     }
-    Ok(decoder)
 }
 
 /// The raster still at `path` as its decoder gives it, upright by its EXIF orientation.
@@ -722,6 +725,17 @@ mod tests {
         png_chunks(&chunks)
     }
 
+    /// An 8 x 8 PNG of one frame whose acTL holds 4 of its 8 bytes: the frame count, 1, without the plays.
+    fn short_actl() -> Vec<u8> {
+        let row = [&[0][..], &[1, 2, 3].repeat(8)].concat(); // filter 0
+        png_chunks(&[
+            (b"IHDR", ihdr(8, 8, 8, 2)),
+            (b"acTL", 1u32.to_be_bytes().to_vec()),
+            (b"IDAT", zlib(&row.repeat(8))),
+            (b"IEND", vec![]),
+        ])
+    }
+
     /// An 8 x 8 animated WebP of a lossless frame of each red: the container written here around the encoder's frames.
     fn animated_webp(reds: &[u8]) -> Vec<u8> {
         let chunk = |kind: &[u8; 4], data: &[u8]| {
@@ -1258,7 +1272,7 @@ mod tests {
         out
     }
 
-    // rows S1, V17: tests/test_image.py:93 at tag python-final: a GIF, an APNG or an animated WebP of more than one frame is an animation, no still, also an APNG of one frame behind a default image outside the animation, two frames to Pillow's n_frames (lib/ascii_image.py:61; it opened as a still while frames were counted by decoding, which passes over that image); text, a clip, a missing file, a folder are no picture
+    // rows S1, V17: tests/test_image.py:93 at tag python-final: a GIF, an APNG or an animated WebP of more than one frame is an animation, no still, also an APNG of one frame behind a default image outside the animation, two frames to Pillow's n_frames (lib/ascii_image.py:61; it opened as a still while frames were counted by decoding, which passes over that image); text, a clip, a missing file, a folder are no picture; so is a PNG whose acTL is cut short, which Pillow 13 refuses (PngImagePlugin chunk_acTL: `APNG contains truncated acTL chunk`, a ValueError, no picture to open_picture of lib/ascii_image.py:105; seen 2026-11-13)
     #[test]
     fn animations_and_non_images_are_no_stills() {
         let dir = Dir::new("animations");
@@ -1270,6 +1284,7 @@ mod tests {
             "animation"
         );
         assert_eq!(kind(&dir.file("x.png", "not a picture")), "no image");
+        assert_eq!(kind(&dir.file("cut-actl.png", short_actl())), "no image");
         assert_eq!(kind(&dir.file("clip.mp4", [0u8; 64])), "no image");
         assert_eq!(kind(&dir.0.join("missing.png")), "no image");
         assert_eq!(kind(&dir.0), "no image");
@@ -1352,7 +1367,7 @@ mod tests {
         assert!(identifies(&full));
     }
 
-    // rows S8, S8a: identifies of lib/ascii_image.py:67 at tag python-final: a still by its header, also one cut short that then does not open, and an SVG by its suffix, unread; an animation of more than one frame (an APNG's default image outside the animation counted, as Pillow counts it), text, a clip or a missing file is passed over
+    // rows S8, S8a: identifies of lib/ascii_image.py:67 at tag python-final: a still by its header, also one cut short that then does not open, and an SVG by its suffix, unread; an animation of more than one frame (an APNG's default image outside the animation counted, as Pillow counts it), text, a clip or a missing file is passed over, and so is a PNG whose acTL is cut short, a ValueError of Pillow 13 that identifies takes for no still (lib/ascii_image.py:78)
     #[test]
     fn identifies_by_the_header_alone() {
         let dir = Dir::new("identifies");
@@ -1363,6 +1378,7 @@ mod tests {
         assert!(identifies(&cut));
         assert_eq!(kind(&cut), "no image");
         assert!(!identifies(&dir.file("text.png", "not a picture")));
+        assert!(!identifies(&dir.file("cut-actl.png", short_actl())));
         assert!(!identifies(&dir.file("a.gif", gif(3))));
         assert!(!identifies(&dir.file("a.png", apng(2, false))));
         assert!(!identifies(&dir.file("default.png", apng(1, true))));
