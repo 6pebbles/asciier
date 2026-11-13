@@ -93,6 +93,8 @@ pub struct Mpv {
     surface: Vec<u8>,
     /// mpv's `volume-max`, read when a file opened.
     volume_max: f64,
+    /// The file is a picture, held until `q` (`picture`): a single frame, the first and the last.
+    still: bool,
 }
 
 /// A request on the frame shown, the position or the pause. Requests that reach mpv together run in one pass, where it merges or drops them: a seek and a step forward leave it playing, a step back takes the place of a seek waiting to run or adds itself to it as a second, a step back during a seek is dropped, a play before a seek has run counts that seek from the frame then due. So each goes once mpv has done the one before (`Busy`), as the old viewer did each key before the next.
@@ -501,6 +503,7 @@ impl Mpv {
             looked: Instant::now(),
             surface: Vec::new(),
             volume_max: 130.0,
+            still: false,
         };
         let conf =
             std::env::var_os("HOME").map(|home| Path::new(&home).join(".config/mpv/mpv.conf"));
@@ -743,6 +746,11 @@ impl Mpv {
             }
             Op::BackStep => self.start_seek(&["frame-back-step".into()], false),
             Op::Back => self.back_step(),
+            // a picture's frame is its last, and its end never comes: mpv's step plays on, waiting for a frame after it, and holds every request behind it; as on a clip's last frame, the step only pauses
+            Op::Step if self.still => {
+                self.pausing += 1;
+                self.put_pause(true);
+            }
             // playing, mpv steps from the frame it holds, which a caller drawing late is frames past: the clip pauses and the frame after the one drawn shows; past the picture's end, the sound playing on, there is none, and mpv's step only pauses
             Op::Step
                 if !self.paused
@@ -1062,7 +1070,8 @@ impl Mpv {
                 }
                 // mpv holds the frame of a one-frame stream without sound for image-display-duration, 0: a one-frame video ends after its frame, with a length or without one (a Matroska live stream, NUT, raw H.264 or HEVC); a picture stays until `q`; set and waited for, as mpv may reorder an asynchronous request after the play
                 let length = self.get(c"duration").and_then(|length| length.parse().ok());
-                if picture(&format, length) {
+                self.still = picture(&format, length);
+                if self.still {
                     self.option("image-display-duration", "inf");
                 }
                 let plays = |track| self.get(track).is_some_and(|id| id != "no");
@@ -3425,22 +3434,7 @@ pub(crate) mod tests {
         ];
         for (name, size, length) in pictures {
             let mut stage = Stage::new();
-            let file = stage.file(name);
-            let mut args = vec!["-f", "lavfi", "-i", QUADRANTS, "-frames:v", "1"];
-            match name {
-                "still.heic" => {
-                    let heic = include_bytes!("../tests/golden/picture-testsrc2.heic");
-                    std::fs::write(&file, heic).unwrap();
-                }
-                _ => {
-                    if name == "still.xface" {
-                        args.extend(["-s", "48x48", "-c:v", "xface", "-pix_fmt", "monob"]);
-                        args.extend(["-f", "image2"]);
-                    }
-                    args.push(file.to_str().unwrap());
-                    ffmpeg(&args);
-                }
-            }
+            let file = still(&stage, name);
             assert_eq!(stage.open(&file), (true, false), "{name}");
             stage.settle();
             assert_eq!(
@@ -3451,6 +3445,72 @@ pub(crate) mod tests {
             stage.mpv.set("pause", "no");
             assert_eq!(stage.pump(0.5, |_| false), [Event::Pause(false)], "{name}");
         }
+    }
+
+    /// A picture of the stage named `name`: a PNG of the quadrants, the golden HEIC, or the quadrants as X-Face (48 x 48, which mpv knows by the suffix alone).
+    fn still(stage: &Stage, name: &str) -> PathBuf {
+        let file = stage.file(name);
+        let mut args = vec!["-f", "lavfi", "-i", QUADRANTS, "-frames:v", "1"];
+        match name {
+            "still.heic" => {
+                let heic = include_bytes!("../tests/golden/picture-testsrc2.heic");
+                std::fs::write(&file, heic).unwrap();
+            }
+            _ => {
+                if name == "still.xface" {
+                    args.extend(["-s", "48x48", "-c:v", "xface", "-pix_fmt", "monob"]);
+                    args.extend(["-f", "image2"]);
+                }
+                args.push(file.to_str().unwrap());
+                ffmpeg(&args);
+            }
+        }
+        file
+    }
+
+    #[test]
+    fn a_step_on_a_picture_only_pauses() {
+        // rows P15, N7: a picture mpv holds until `q` (N7) has one frame, its first and its last, where `.` and `,` only pause, from playing or paused, and the requests after them go: a grab comes back; mpv's own step plays on there, waiting for a frame after the picture's, and its end never comes (image-display-duration inf); seen before the fix: a step forward still under way 5 s on and every request held behind it, PNG, HEIC and X-Face alike (the review's probe: 3 of 3 in 2 runs)
+        let mut wrong = Vec::new();
+        for name in ["still.png", "still.heic", "still.xface"] {
+            let mut stage = Stage::new();
+            let file = still(&stage, name);
+            stage.open(&file);
+            stage.settle();
+            for (playing, forward) in [(true, true), (false, true), (true, false), (false, false)] {
+                if playing {
+                    stage.mpv.pause(false);
+                    let start = Instant::now();
+                    while stage.mpv.paused && start.elapsed() < Duration::from_secs(5) {
+                        stage.pump(0.01, |_| false);
+                    }
+                }
+                stage.mpv.step(forward);
+                // done: nothing under way or held, and mpv paused, as confirmed
+                let rested = |stage: &Stage| {
+                    let mpv = &stage.mpv;
+                    mpv.busy.is_none() && mpv.held.is_empty() && mpv.paused && mpv.pausing == 0
+                };
+                let start = Instant::now();
+                while !rested(&stage) && start.elapsed() < Duration::from_secs(5) {
+                    stage.pump(0.01, |_| false);
+                }
+                let done = rested(&stage);
+                if !(done && stage.holds(0.2) && stage.mpv.paused) {
+                    let busy = format!("{:?}", stage.mpv.busy);
+                    wrong.push(format!(
+                        "{name}: step forward {forward} from playing {playing}: done {done}, paused {}, under way {busy}",
+                        stage.mpv.paused
+                    ));
+                }
+            }
+            stage.mpv.grab();
+            let events = stage.pump(5.0, |e| matches!(e, Event::Grabbed(..)));
+            if !matches!(events.last(), Some(Event::Grabbed(Some(_), _))) {
+                wrong.push(format!("{name}: no frame grabbed: {:?}", events.last()));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]

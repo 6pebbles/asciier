@@ -2165,6 +2165,35 @@ fn a_heic_picture_shows_until_q() {
 }
 
 #[test]
+fn a_step_on_a_picture_only_pauses() {
+    // rows P15, N7: a picture mpv holds until `q` (N7) has one frame, its first and its last: `.` and `,` only pause there, as on a clip's last frame, and the keys after them act: `s` saves the picture, `space` plays on; seen before the fix: after `.`, `s` saved nothing and the status row stayed `| 00:00`, mpv's step playing on to a frame that never comes (the review's probe on this file, 2 of 2); the old viewer showed this file as a video and ended within the second (N7)
+    let sandbox = Sandbox::new();
+    let heic = sandbox.path("pic.heic");
+    std::fs::copy(
+        Path::new(CRATE).join("tests/golden/picture-testsrc2.heic"),
+        &heic,
+    )
+    .unwrap();
+    let mut tty = sandbox.launch().arg(&heic).size(SMALL).start();
+    tty.until("the picture", |screen| {
+        screen.inked() > 1000 && screen.row(24) == "> 00:00"
+    });
+    // each key from playing, then from paused; `s` waits for the requests before it (N5)
+    for key in [&b"."[..], b","] {
+        tty.send(key);
+        tty.await_status("| 00:00");
+        shot(&mut tty, "saved pic-ascii-0s.png");
+        tty.send(key);
+        shot(&mut tty, "saved pic-ascii-0s.png");
+        tty.send(b" ");
+        tty.await_status("> 00:00");
+    }
+    assert!(image::open(sandbox.path("pic-ascii-0s.png")).is_ok());
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
 fn a_picture_mpv_knows_by_its_suffix_shows_until_q() {
     // rows V17, N7: an X-Face picture, which neither the built-in decoders nor FFmpeg's probes take, opens through mpv's picture demuxer by its suffix (mf), 1 s long at mf-fps 1, as a one-frame video held until `q` (it ended after its frame while the rule went by the length; run in this harness the old viewer drew nothing and ended)
     let sandbox = Sandbox::new();
