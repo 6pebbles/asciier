@@ -520,6 +520,39 @@ fn a_step_back_after_a_step_on_the_last_frame_shows_the_frame_before() {
 }
 
 #[test]
+fn a_step_while_the_sound_plays_on_past_the_picture_only_pauses() {
+    // rows P15, N5, N21: past the picture's end the sound plays on over the last frame, frame 54 of this 2.2 s clip with 6 s of sound; `.` there only pauses, the clock where the sound was, `s` takes that frame, and `,` shows frame 53 (frame_step of bin/ascii-viewer:1441 at tag python-final; N21: the old viewer ended with the picture); seen before the fix: the playing step's seek to the frame after the one on screen went past the last frame and put the clock back short of the frame, the bar falling from 27 cells to 21, and `s` named the frame `clip-ascii-2s.png` (the review; with 2.6 s of sound `,` kept frame 54 in 1 of 2 runs); the name's time is the position mpv gave with the frame, a look late under load (`a_frame_taken_while_the_sound_plays_on_is_named_by_its_time`; src/mpv.rs `a_step_while_the_sound_plays_on_past_the_picture_only_pauses` pins it to a frame)
+    let sandbox = Sandbox::new();
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 6.0, &[]);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    tty.await_status("> 00:03");
+    tty.send(b".");
+    tty.await_status("| ");
+    // a window for what must not happen: the clip moving on, or the clock going back
+    std::thread::sleep(Duration::from_millis(500));
+    let (on, row) = (frame(tty.screen()), tty.screen().row(24));
+    assert!(
+        on == 54 && seconds(&row).is_some_and(|at| at >= 3) && tty.running(),
+        "{row:?} on frame {on}"
+    );
+    let at = tty.send(b"s");
+    let start = tty.expect(at, b"\x1b[7m saved ");
+    let end = tty.expect(start, b" \x1b[0m") - 5;
+    let name = String::from_utf8(tty.out()[start..end].to_vec()).unwrap();
+    let time: f64 = name["clip-ascii-".len()..name.len() - "s.png".len()]
+        .parse()
+        .unwrap();
+    let number = saved(&sandbox.path(&name)).0;
+    assert!(
+        (1.7..=2.7).contains(&time) && number == 54,
+        "{name}: {number}"
+    );
+    lands(&mut tty, b",", 53, "| 00:02");
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
 fn steps_typed_apart_each_take_their_frame() {
     // rows P15, N5: `.` `.` `,` typed 30 to 100 ms apart end one frame on (frame_step of bin/ascii-viewer:1441 at tag python-final did each before the next key; run in this harness the old viewer showed frame 26, read on the screen, while its `s`, which N5 makes mpv's frame, took 28); seen in this test before the fix: frame 25 for keys 30 ms apart (the review: 2 of 4 runs), mpv taking the step back while the second step waited for its frame
     let sandbox = Sandbox::new();
