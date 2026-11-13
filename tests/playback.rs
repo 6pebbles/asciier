@@ -1108,7 +1108,7 @@ fn a_stream_without_a_length_shows_its_clock_alone() {
 
 #[test]
 fn the_clock_never_shows_past_the_length() {
-    // no inventory row of its own: what an MKV whose Duration says 1.5 s over 3 s of frames shows, a difference from the old viewer put to the owner as a candidate N35 (not approved). The frames play on, and mpv raises the length to the highest time it has demuxed, ahead of the frame shown (demux.c: "update duration based on highest TS demuxed"): the row read `> 00:00 / 00:01` at first, `> 00:02 / 00:02` at the end, and no row shows a clock past its length. The old viewer took the container's 1.5 s and capped the clock there (status of bin/ascii-viewer:2160 at tag python-final). The viewer's own cap of the clock at the length (status in src/view.rs) is not reached: mpv's position never passes its duration, raised ahead of the frames played and the position clamped to it while a seek runs (get_playback_time in player/playloop.c), and with the cap taken out this test passed 3 of 3; that cap stands by code reading
+    // rows P16, N35: an MKV whose Duration says 1.5 s over 3 s of frames: the frames play on past the declared length (frame 50 is 2 s in; the viewer quits on the last frame it drew, which under load comes before the clip's last 0.2 s: frames 64 to 69 last in failed runs at load 23 to 116, review and stress), and mpv raises the length to the highest time it has demuxed, ahead of the frame shown (demux.c: "update duration based on highest TS demuxed"): the row read `> 00:00 / 00:01` at first, `> 00:02 / 00:02` at the end, and no row shows a clock past its length. The old viewer took the container's 1.5 s and capped the clock there (status of bin/ascii-viewer:2160 at tag python-final), the difference N35 approves. The viewer's own cap of the clock at the length (status in src/view.rs) is not reached: mpv's position never passes its duration, raised ahead of the frames played and the position clamped to it while a seek runs (get_playback_time in player/playloop.c), and with the cap taken out this test passed 3 of 3; that cap stands by code reading
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mkv", "160x90", 25, 3.0, 0.0, &[]);
     let mut bytes = std::fs::read(&video).unwrap();
@@ -1132,7 +1132,7 @@ fn the_clock_never_shows_past_the_length() {
             seconds(&format!("> {length}"))?,
         ))
     };
-    assert!(drawn.iter().any(|(number, _)| *number >= 70), "{drawn:?}");
+    assert!(drawn.iter().any(|(number, _)| *number >= 50), "{drawn:?}");
     assert!(
         drawn
             .iter()
