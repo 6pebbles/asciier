@@ -935,9 +935,9 @@ mod tests {
         assert_eq!(picture.get_pixel(9, 9).0, [255, 255, 255, 255]);
     }
 
-    // row S3: open_picture of lib/ascii_image.py:109 at tag python-final: a colour key (tRNS of an RGB or a grey PNG) is transparency, clear on the key's pixels alone; these files give these pixels there too
     #[test]
     fn a_colour_key_is_transparency() {
+        // row S3: open_picture of lib/ascii_image.py:109 at tag python-final: a colour key (tRNS of an RGB or a grey PNG) is transparency, clear on the key's pixels alone; these files give these pixels there too
         let dir = Dir::new("colour_key");
         // 4 x 1 px each, a row of filter 0, the key black: black, near black, grey, white
         let row = [0, 0, 0, 0, 0, 0, 1, 128, 128, 128, 255, 255, 255];
@@ -1325,9 +1325,9 @@ mod tests {
         out
     }
 
-    // rows S1, V17: tests/test_image.py:93 at tag python-final: a GIF, an APNG or an animated WebP of more than one frame is an animation, no still, also an APNG of one frame behind a default image outside the animation, two frames to Pillow's n_frames (lib/ascii_image.py:61; it opened as a still while frames were counted by decoding, which passes over that image), and a GIF cut short in its second frame, a frame to Pillow 13 from its image descriptor on (GifImagePlugin _seek); text, a clip, a missing file, a folder are no picture; so is a PNG whose acTL is cut short, which Pillow 13 refuses (PngImagePlugin chunk_acTL: `APNG contains truncated acTL chunk`, a ValueError, no picture to open_picture of lib/ascii_image.py:105; seen 2026-11-13)
     #[test]
     fn animations_and_non_images_are_no_stills() {
+        // rows S1, V17: tests/test_image.py:93 at tag python-final: a GIF, an APNG or an animated WebP of more than one frame is an animation, no still, also an APNG of one frame behind a default image outside the animation, two frames to Pillow's n_frames (lib/ascii_image.py:61; it opened as a still while frames were counted by decoding, which passes over that image), and a GIF cut short in its second frame, a frame to Pillow 13 from its image descriptor on (GifImagePlugin _seek); text, a clip, a missing file, a folder are no picture; so is a PNG whose acTL is cut short, which Pillow 13 refuses (PngImagePlugin chunk_acTL: `APNG contains truncated acTL chunk`, a ValueError, no picture to open_picture of lib/ascii_image.py:105; seen 2026-11-13)
         let dir = Dir::new("animations");
         assert_eq!(kind(&dir.file("a.gif", gif(3))), "animation");
         let two = gif(2);
@@ -1346,9 +1346,9 @@ mod tests {
         assert_eq!(kind(&dir.0), "no image");
     }
 
-    // rows S1, V17: is_animation of lib/ascii_image.py:61 at tag python-final: more than one frame (Pillow's n_frames) makes an animation; a GIF, an APNG or an animated WebP of one frame is a still (the last two went to mpv while their headers decided); so is a GIF of one frame without its trailer, whose blocks Pillow 13 walks to the file's end (GifImagePlugin _seek; seen 2026-11-13), where decoding took the missing trailer for a second frame
     #[test]
     fn one_frame_of_an_animated_format_is_a_still() {
+        // rows S1, V17: is_animation of lib/ascii_image.py:61 at tag python-final: more than one frame (Pillow's n_frames) makes an animation; a GIF, an APNG or an animated WebP of one frame is a still (the last two went to mpv while their headers decided); so is a GIF of one frame without its trailer, whose blocks Pillow 13 walks to the file's end (GifImagePlugin _seek; seen 2026-11-13), where decoding took the missing trailer for a second frame
         let dir = Dir::new("one_frame");
         let one = still(&dir.file("one.gif", gif(1)));
         assert_eq!(rgb(&one.pic).dimensions(), (8, 8));
@@ -1369,9 +1369,9 @@ mod tests {
         );
     }
 
-    // row N7: the first page shows (the Python tools played the pages as an animation); a JPEG with more pictures behind it (MPO) shows its first
     #[test]
     fn more_pictures_in_a_tiff_or_behind_a_jpeg_leave_a_still() {
+        // row N7: the first page shows (the Python tools played the pages as an animation); a JPEG with more pictures behind it (MPO) shows its first
         let dir = Dir::new("more_pictures");
         let pages = still(&dir.file("pages.tif", tiff(&[10, 200])));
         assert_eq!(colours(rgb(&pages.pic)), [[10, 10, 10]].into());
@@ -1426,9 +1426,9 @@ mod tests {
         assert!(identifies(&full));
     }
 
-    // rows S8, S8a: identifies of lib/ascii_image.py:67 at tag python-final: a still by its header, also one cut short that then does not open (a GIF too, cut in its only frame's data: one frame to Pillow 13's walk of its blocks, two to decoding), and an SVG by its suffix, unread; an animation of more than one frame (an APNG's default image outside the animation counted, as Pillow counts it), text, a clip or a missing file is passed over, and so is a PNG whose acTL is cut short, a ValueError of Pillow 13 that identifies takes for no still (lib/ascii_image.py:78)
     #[test]
     fn identifies_by_the_header_alone() {
+        // rows S8, S8a: identifies of lib/ascii_image.py:67 at tag python-final: a still by its header, also one cut short that then does not open (a GIF too, cut in its only frame's data: one frame to Pillow 13's walk of its blocks, two to decoding), and an SVG by its suffix, unread; an animation of more than one frame (an APNG's default image outside the animation counted, as Pillow counts it), text, a clip or a missing file is passed over, and so is a PNG whose acTL is cut short, a ValueError of Pillow 13 that identifies takes for no still (lib/ascii_image.py:78)
         let dir = Dir::new("identifies");
         let whole = png_of(RgbImage::new(40, 30));
         assert!(identifies(&dir.file("whole.png", &whole)));
