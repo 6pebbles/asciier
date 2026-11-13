@@ -1104,12 +1104,22 @@ impl Mpv {
                     time.or_else(|| double(event)),
                 ))
             }
-            GET_PROPERTY_REPLY if event.userdata == SETTLED => self.settled(double(event)),
-            // `pause` as it was once mpv began the step under way: paused, it is done; playing, a report of the pause comes when it is, as one of the play went before this read
+            // each request reads once it is done (`settling`): a read whose request a loop's seek ended (`MPV_EVENT_SEEK`) comes before any read of the request that went next, and is no longer of one under way
+            GET_PROPERTY_REPLY if event.userdata == SETTLED => {
+                let settling = matches!(
+                    self.busy,
+                    Some(Busy::Seek { settling: true, .. } | Busy::Step { settling: true, .. })
+                );
+                settling.then(|| self.settled(double(event))).flatten()
+            }
+            // `pause` as it was once mpv began the step under way: paused, it is done; playing, a report of the pause comes when it is, as one of the play went before this read; a read of a step a loop's seek ended meets the next step before its mark (`asked`), as its own read goes after it
             GET_PROPERTY_REPLY if event.userdata == STEPPED => {
                 let paused = flag(event).unwrap_or(true);
                 if let Some(Busy::Step {
-                    running, settling, ..
+                    asked: true,
+                    running,
+                    settling,
+                    ..
                 }) = &mut self.busy
                     && !*settling
                 {
@@ -2767,6 +2777,65 @@ pub(crate) mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn a_read_left_by_a_request_a_loop_ended_moves_nothing() {
+        // no inventory row: a step reads `pause` after its mark, and a request reads the position once it is done; a loop's seek (`MPV_EVENT_SEEK`) ends a step whose read can still be out, and the next request goes; that read's reply comes before any read of the next request, and was taken for one of it: a `pause` read saying playing let a step whose mark had not come end at the next report of a pause, before mpv ran it, and a position read ended a seek mpv had not run (by code reading, the review's; not seen in a run); here such replies meet the next request
+        let mut stage = Stage::new();
+        stage.clip(2.0, 2.0);
+        stage.settle();
+        let reply = |userdata: u64, property: &Property| RawEvent {
+            id: GET_PROPERTY_REPLY,
+            error: 0,
+            userdata,
+            data: property as *const Property as *const c_void,
+        };
+        let mut playing: c_int = 0;
+        let pause = Property {
+            name: c"pause".as_ptr(),
+            format: FLAG,
+            data: &mut playing as *mut c_int as *const c_void,
+        };
+        let from = stage.mpv.time;
+        stage.mpv.busy = Some(Busy::Step {
+            mark: stage.mpv.marks + 1,
+            asked: false,
+            running: false,
+            settling: false,
+            from,
+            rested: true,
+        });
+        stage.mpv.report(&reply(STEPPED, &pause));
+        let step = format!("{:?}", stage.mpv.busy);
+        let mut at = 1.5f64;
+        let position = Property {
+            name: c"time-pos".as_ptr(),
+            format: DOUBLE,
+            data: &mut at as *mut f64 as *const c_void,
+        };
+        stage.mpv.busy = Some(Busy::Seek {
+            mark: stage.mpv.marks + 1,
+            ran: false,
+            waits: false,
+            settling: false,
+            target: Some(1.0),
+            anchor: false,
+            from: None,
+            kept: None,
+        });
+        let event = stage.mpv.report(&reply(SETTLED, &position));
+        let seek = format!("{:?}", stage.mpv.busy);
+        let (time, moved) = (stage.mpv.time, event);
+        stage.mpv.busy = None;
+        assert!(
+            step.contains("running: false, settling: false"),
+            "the step: {step}"
+        );
+        assert!(
+            seek.starts_with("Some(Seek") && time == from && moved.is_none(),
+            "the seek: {seek}, at {time}, {moved:?}"
+        );
     }
 
     #[test]
