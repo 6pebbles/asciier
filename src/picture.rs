@@ -68,7 +68,7 @@ fn caught<T>(work: impl FnOnce() -> T) -> Option<T> {
     crate::term::guard(std::panic::AssertUnwindSafe(work)).ok()
 }
 
-/// A raster still's frames as Pillow's n_frames counts them (lib/ascii_image.py:61), up to 2, nothing decoded: a GIF by its blocks, an APNG and a WebP by their chunks, 1 for any other format; `Not::Image` for a file Pillow refuses on the way to its first frame, `Not::TooLarge` for a GIF whose screen, grown to its first frame, is over `MAX_PIXELS`.
+/// A raster still's frames as Pillow's n_frames counts a well-formed file's (lib/ascii_image.py:61), up to 2, nothing decoded: a GIF by its blocks, an APNG and a WebP by their chunks, 1 for any other format; `Not::Image` where they cannot be counted, `Not::TooLarge` for a GIF whose screen, grown to its first frame, is over `MAX_PIXELS`; a damaged file can count otherwise in Pillow (N6, N7).
 fn frames(path: &Path, format: Option<ImageFormat>) -> std::result::Result<u32, Not> {
     let mut file = BufReader::new(File::open(path).map_err(|_| Not::Image)?);
     let counted = match format {
@@ -77,7 +77,7 @@ fn frames(path: &Path, format: Option<ImageFormat>) -> std::result::Result<u32, 
         Some(ImageFormat::WebP) => webp_frames(&mut file),
         _ => Ok(1),
     };
-    counted.map_err(|_| Not::Image) // frames Pillow cannot count: it refuses the file
+    counted.map_err(|_| Not::Image) // frames that cannot be counted: no picture
 }
 
 /// A GIF's frames, up to 2, by a walk of its blocks as Pillow 13 walks a well-formed GIF (GifImagePlugin _seek), nothing decoded: its image descriptors, the blocks between walked past their data; the trailer or the file's end ends the walk, a byte that starts no block is passed over, a descriptor cut short counts no frame; no frame, or no GIF87a or GIF89a signature (a GIF by its suffix alone), `Not::Image`. The first frame reaching past the screen grows the picture to its extent, read from the descriptor's first 8 bytes, before its flags, as Pillow measures it: over `MAX_PIXELS`, `Not::TooLarge`, as is a screen over it once the first frame is read (Image.open's measure). A damaged GIF can count otherwise in Pillow (N6, N7): it reads on past an extension's empty first sub-block (a comment's aside) and, before the first frame, past a NETSCAPE2.0 block's empty second one, and there refuses a graphic control block too short for its fields.
@@ -162,7 +162,7 @@ fn gif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     }
 }
 
-/// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two; an error for an acTL under 8 bytes, a file Pillow refuses.
+/// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two; an error for an acTL under 8 bytes, a file Pillow refuses, and for a file without image data, which Pillow counts as one frame where IEND ends it (N6, N7).
 fn png_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
     file.seek(SeekFrom::Start(8))?; // past the signature
     let (mut frames, mut control) = (None, false);
@@ -191,7 +191,7 @@ fn png_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
     }
 }
 
-/// A WebP's frames as libwebp counts them for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP.
+/// A WebP's frames as libwebp counts a well-formed one's for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP; libwebp's demuxer leaves out a frame without an image and refuses a file cut short, so a damaged WebP can count otherwise in Pillow (N6, N7).
 fn webp_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
     let mut head = [0; 21]; // RIFF, its length, WEBP, the first chunk's kind and length, a byte of its data: VP8X's flags
     file.read_exact(&mut head)?;
