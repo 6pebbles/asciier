@@ -1537,6 +1537,22 @@ mod tests {
     }
 
     #[test]
+    fn a_gif_frame_past_its_screen_is_cut_to_it() {
+        // rows S1, S18, N41: a GIF whose first frame reaches past its screen, within the limit, opens as a still of the screen's size, the frame cut to it and transparent outside it (the image crate's decoder): an 8 x 8 frame of red at (4, 4) on a screen of 8 x 8 px; the old tools grew the picture to the frame (Pillow 13, GifImagePlugin _seek): through open_picture of lib/ascii_image.py:99 (tag python-final) this file was a still of 12 x 12 px, palette index 0 outside the frame, red here (seen 2026-11-13, Pillow 13.0.0)
+        let dir = Dir::new("gif_past_screen");
+        let file = dir.file("past.gif", gif_of((8, 8), &[&gif_frame(4, 4, 8, 8)]));
+        let opened = still(&file);
+        let picture = rgba(&opened.pic);
+        assert_eq!(picture.dimensions(), (8, 8));
+        let red = [200, 0, 0, 255];
+        assert_eq!(picture.get_pixel(4, 4).0, red); // the frame's corner
+        assert_eq!(picture.get_pixel(7, 7).0, red);
+        for (x, y) in [(0, 0), (3, 3), (3, 7), (7, 3)] {
+            assert_eq!(picture.get_pixel(x, y).0[3], 0, "({x}, {y})"); // outside the frame
+        }
+    }
+
+    #[test]
     fn identifies_by_the_header_alone() {
         // rows S8, S8a: identifies of lib/ascii_image.py:67 at tag python-final: a still by its header, also one cut short that then does not open (a GIF too, cut in its only frame's data: one frame to Pillow 13's walk of its blocks, two to decoding), and an SVG by its suffix, unread; an animation of more than one frame (an APNG's default image outside the animation counted, as Pillow counts it), text, a clip or a missing file is passed over, and so is a PNG whose acTL is cut short, a ValueError of Pillow 13 that identifies takes for no still (lib/ascii_image.py:78)
         let dir = Dir::new("identifies");
