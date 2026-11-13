@@ -38,7 +38,7 @@ pub enum Event {
         h: u32,
         turn: u32,
     },
-    /// The frame asked for with `grab`, upright, at source size (`None` when mpv had none), and that frame's time: the position mpv gave right after it took the frame; past the picture's end, where the position is the sound's, the position given with the last frame mpv handed over (later than that frame's by the wait for the next look, and an earlier frame's when mpv let the last frames go untaken), or the last frame's own time once a seek past the end has given it.
+    /// The frame asked for with `grab`, upright, at source size (`None` when mpv had none), and that frame's time: the position mpv gave right after it took the frame; past the picture's end, where the position is the sound's, the time of the frame mpv holds as counted from the last one it handed over (`held`: the last of those it let go untaken since, or the one handed over, at the earlier of the position given with it and the time after the frame before), or the last frame's own time once a seek past the end has given it.
     Grabbed(Option<RgbImage>, Option<f64>),
 }
 
@@ -1811,7 +1811,7 @@ pub(crate) mod tests {
     fn new_names_the_stream_and_keeps_the_viewers_options() {
         let conf = "ao=null\nvolume-max=200\nvo=null\npause=yes\naudio-pitch-correction=yes\n[x]\nvolume=5\n";
         let stage = Stage::with_conf(conf);
-        // rows P5, A2, N1, N18: mpv.conf's volume-max applies, its other options do not, pitch is not corrected; the stream's node name is the caller's (`asciier-<pid>` in the viewer)
+        // rows P5, A2, N18: mpv.conf's volume-max applies, its other options do not, pitch is not corrected; the stream's node name is the caller's (the viewer's `asciier-<pid>`: tests/audio.rs)
         // tests/test_viewer.py:647: PIPEWIRE_PROPS == "{ node.name = <stream> }"
         assert_eq!(
             std::env::var("PIPEWIRE_PROPS").unwrap(),
@@ -2264,7 +2264,7 @@ pub(crate) mod tests {
 
     #[test]
     fn speed_volume_and_mute_are_reported() {
-        // row P12: the mute `m` asks for is mpv's and comes back reported (the key and its toasts: tests/playback.rs)
+        // rows P10, P11: speed and volume set on mpv come back reported, and the clip plays at the speed (the keys and their toasts: tests/playback.rs)
         let mut stage = Stage::new();
         stage.clip(2.0, 2.0);
         stage.settle();
@@ -2902,9 +2902,36 @@ pub(crate) mod tests {
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
+    /// A property read as the viewer reads after `open`, without a call that waits for mpv: the reply comes as an event, and the events before it are taken as `events` takes them, handed on by its next call.
+    fn read(stage: &mut Stage, name: &CStr) -> Option<String> {
+        const ASKED: u64 = 99;
+        // SAFETY: the name lives through the call.
+        unsafe { mpv_get_property_async(stage.mpv.handle, ASKED, name.as_ptr(), STRING) };
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            // SAFETY: mpv keeps the event until the next wait.
+            let event = unsafe { &*mpv_wait_event(stage.mpv.handle, 0.01) };
+            if event.id == GET_PROPERTY_REPLY && event.userdata == ASKED {
+                // SAFETY: the data of this event is an `mpv_event_property`; without an error its value is a string.
+                return unsafe {
+                    let property = &*(event.data as *const Property);
+                    (event.error >= 0 && property.format == STRING).then(|| {
+                        let text = CStr::from_ptr(*(property.data as *const *const c_char));
+                        text.to_string_lossy().into_owned()
+                    })
+                };
+            }
+            if event.id != EVENT_NONE {
+                let reported = stage.mpv.report(event);
+                stage.mpv.reported.extend(reported);
+            }
+        }
+        None
+    }
+
     #[test]
     fn a_seek_mpv_cannot_do_lets_the_play_after_it_go() {
-        // rows P8a, P9: mpv answers a seek when it takes it and may then drop it without running it, so no `MPV_EVENT_SEEK` comes, here a seek past what it has read of a stream it cannot seek in; the play of `seek_and_play` waited for that event (seen before: still paused 1.5 s later, the play's pause request counted as unconfirmed, which holds back every later report of `pause`); now the mark behind the seek, reported once mpv has run a pass past it, ends the seek; the viewer opens regular files alone, where every seek tried runs (inference from runs on mp4, mpegts, mkv, h264, mjpeg, y4m, m1v, gif, apng, ivf, nut)
+        // row P8a: mpv answers a seek when it takes it and may then drop it without running it, so no `MPV_EVENT_SEEK` comes, here a seek past what it has read of a stream it cannot seek in; the play of `seek_and_play` waited for that event (seen before: still paused 1.5 s later, the play's pause request counted as unconfirmed, which holds back every later report of `pause`); now the mark behind the seek, reported once mpv has run a pass past it, ends the seek; the viewer opens regular files alone, where every seek tried runs (inference from runs on mp4, mpegts, mkv, h264, mjpeg, y4m, m1v, gif, apng, ivf, nut)
         let mut stage = Stage::new();
         let fifo = stage.file("pipe.ts");
         let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
@@ -2919,7 +2946,7 @@ pub(crate) mod tests {
             .spawn()
             .unwrap();
         stage.open(&fifo);
-        assert_eq!(stage.mpv.get(c"seekable").as_deref(), Some("no"));
+        assert_eq!(read(&mut stage, c"seekable").as_deref(), Some("no"));
         stage.mpv.seek_and_play(&["seek", "6", "relative+exact"]);
         let events = stage.pump(5.0, |e| *e == Event::Pause(false));
         let playing = events.contains(&Event::Pause(false)) && idle(&mut stage, 5.0);
