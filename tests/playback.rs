@@ -2357,11 +2357,19 @@ fn video_plays_on_without_sound_and_after_its_sound_ends() {
         launched.push(Instant::now());
         sandbox.launch().arg(video).size(SMALL).start()
     });
-    // each clip's time when its first clock past 00:00 is seen, by the frame on screen: a test thread late under load sees a later frame
+    // each clip's time when it is first seen playing, the clock past 00:00, by the frame of its last such draw then: a test thread late under load sees a later frame; read from each run's output, as a run that ended leaves the screen blank (seen at load 83: the second run gone before the test looked at it)
+    let playing = |screen: &Screen| {
+        let row = screen.row(24);
+        let past = row.starts_with("> ") && row.contains(" / ") && !row.starts_with("> 00:00 ");
+        past.then(|| frame(screen))
+    };
+    let last_playing = |out: &[u8]| replay(out, SMALL, playing).into_iter().flatten().last();
     let mut seen = Vec::new();
-    for tty in &mut ttys {
-        tty.await_playing();
-        seen.push((Instant::now(), frame(tty.screen())));
+    for tty in &ttys {
+        if !tty.wait(0, PATIENCE, |out| last_playing(out).is_some()) {
+            tty.fail("never seen playing");
+        }
+        seen.push((Instant::now(), last_playing(&tty.out()).unwrap()));
     }
     // and how far into the clip each ended: more than 2.5 s from the launch, as mpv plays no faster than the clock, and at most 10 s into the clip by that frame, which under load lags mpv (an end taken from it alone measured 2.18 to 2.42 s at load 50 to 77)
     let (mut took, end) = ([None; 2], Instant::now() + PATIENCE);
