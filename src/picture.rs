@@ -68,7 +68,7 @@ fn caught<T>(work: impl FnOnce() -> T) -> Option<T> {
     crate::term::guard(std::panic::AssertUnwindSafe(work)).ok()
 }
 
-/// A raster still's frames as Pillow's n_frames counts them (lib/ascii_image.py:61), up to 2, nothing decoded: a GIF by its blocks, an APNG and a WebP by their chunks, 1 for any other format; `Not::Image` for a file Pillow refuses on the way to its first frame, `Not::TooLarge` for a GIF whose first frame grows it past `MAX_PIXELS`.
+/// A raster still's frames as Pillow's n_frames counts them (lib/ascii_image.py:61), up to 2, nothing decoded: a GIF by its blocks, an APNG and a WebP by their chunks, 1 for any other format; `Not::Image` for a file Pillow refuses on the way to its first frame, `Not::TooLarge` for a GIF whose screen, grown to its first frame, is over `MAX_PIXELS`.
 fn frames(path: &Path, format: Option<ImageFormat>) -> std::result::Result<u32, Not> {
     let mut file = BufReader::new(File::open(path).map_err(|_| Not::Image)?);
     let counted = match format {
@@ -80,7 +80,7 @@ fn frames(path: &Path, format: Option<ImageFormat>) -> std::result::Result<u32, 
     counted.map_err(|_| Not::Image) // frames Pillow cannot count: it refuses the file
 }
 
-/// A GIF's frames as Pillow 13 counts them (GifImagePlugin _seek), up to 2: its image descriptors, the blocks between walked past their data, nothing decoded; the trailer or the file's end ends the walk, a byte that starts no block is passed over, a descriptor cut short counts no frame; no frame, a file Pillow refuses (`Not::Image`). The first frame reaching past the screen grows the picture to its extent, as Pillow measures it: over `MAX_PIXELS`, `Not::TooLarge`.
+/// A GIF's frames, up to 2, by a walk of its blocks as Pillow 13 walks a well-formed GIF (GifImagePlugin _seek), nothing decoded: its image descriptors, the blocks between walked past their data; the trailer or the file's end ends the walk, a byte that starts no block is passed over, a descriptor cut short counts no frame; no frame, or no GIF87a or GIF89a signature (a GIF by its suffix alone), `Not::Image`. The first frame reaching past the screen grows the picture to its extent, read from the descriptor's first 8 bytes, before its flags, as Pillow measures it: over `MAX_PIXELS`, `Not::TooLarge`, as is a screen over it once the first frame is read (Image.open's measure). A damaged GIF can count otherwise in Pillow (N6, N7): it reads on past an extension's empty first sub-block (a comment's aside) and, before the first frame, past a NETSCAPE2.0 block's empty second one, and there refuses a graphic control block too short for its fields.
 fn gif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     fn byte(file: &mut impl Read) -> Option<u8> {
         let mut byte = [0];
@@ -108,6 +108,9 @@ fn gif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     let side = |bytes: &[u8]| u32::from(u16::from_le_bytes([bytes[0], bytes[1]]));
     let mut head = [0; 13]; // the header and the logical screen descriptor
     file.read_exact(&mut head).map_err(|_| Not::Image)?;
+    if !head.starts_with(b"GIF87a") && !head.starts_with(b"GIF89a") {
+        return Err(Not::Image); // a GIF by its suffix alone
+    }
     let screen = (side(&head[6..]), side(&head[8..]));
     skip(file, colours(head[10]))?;
     let mut frames = 0;
@@ -121,23 +124,33 @@ fn gif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
                 blocks(file)?;
             }
             Some(b',') => {
-                let mut image = [0; 9];
-                if file.read_exact(&mut image).is_err() {
-                    break;
+                let mut image = Vec::new();
+                file.by_ref()
+                    .take(9)
+                    .read_to_end(&mut image)
+                    .map_err(|_| Not::Image)?;
+                if frames == 0 && image.len() >= 8 {
+                    // the extent, read before the flags
+                    let extent = (
+                        side(&image) + side(&image[4..]),
+                        side(&image[2..]) + side(&image[6..]),
+                    );
+                    let grown = (extent.0.max(screen.0), extent.1.max(screen.1));
+                    if grown != screen && too_large(grown) {
+                        return Err(Not::TooLarge);
+                    }
                 }
-                let extent = (
-                    side(&image) + side(&image[4..]),
-                    side(&image[2..]) + side(&image[6..]),
-                );
-                let grown = (extent.0.max(screen.0), extent.1.max(screen.1));
-                if frames == 0 && grown != screen && too_large(grown) {
-                    return Err(Not::TooLarge);
+                if image.len() < 9 {
+                    break;
                 }
                 skip(file, colours(image[8]))?;
                 if byte(file).is_none() {
                     break; // no LZW code size
                 }
                 frames += 1;
+                if too_large(screen) {
+                    return Err(Not::TooLarge); // Image.open's measure, once the first frame is read
+                }
                 blocks(file)?;
             }
             Some(_) => {}
@@ -197,15 +210,15 @@ fn webp_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
     Ok(frames.max(1))
 }
 
-/// The decoder of the raster still at `path`, its header read: the format by content, within `MAX_PIXELS`, no animation; in Pillow's order (Image.open, then lib/ascii_image.py:61): the file read to its first frame, then its size, then its frames.
+/// The decoder of the raster still at `path`, its header read: the format by content, within `MAX_PIXELS`, no animation; in Pillow's order (Image.open, then lib/ascii_image.py:61): the file read to its first frame, then its size, then its frames; a GIF measured by its blocks before the decoder reads it, whose refusals Pillow does not share.
 fn header(path: &Path) -> std::result::Result<impl ImageDecoder, Not> {
     let mut reader = ImageReader::open(path)
         .and_then(ImageReader::with_guessed_format)
         .map_err(|_| Not::Image)?;
     reader.no_limits(); // MAX_PIXELS is the limit
     let format = reader.format();
-    let decoder = reader.into_decoder().map_err(|_| Not::Image)?;
     let frames = frames(path, format)?;
+    let decoder = reader.into_decoder().map_err(|_| Not::Image)?;
     if too_large(decoder.dimensions()) {
         return Err(Not::TooLarge);
     }
@@ -1467,7 +1480,7 @@ mod tests {
 
     #[test]
     fn a_gif_reaches_as_far_as_its_first_frame() {
-        // rows S18, S8a, S8: Pillow 13 grows a GIF to its first frame's extent and holds that to the limit (GifImagePlugin _seek, _decompression_bomb_check; seen 2026-11-13, Pillow 13.0.0 through lib/ascii_image.py): on a screen of 8 x 8 px, a first frame of 65288 x 65535 px, of 8 x 8 px at (60000, 60000), or reaching one row past 12470 x 14351 px is too large to open, and identifies (lib/ascii_image.py:76); one reaching to the limit opens; the decoder knows the screen's size alone and allocates the frame whole, 17 GB for this file of 54 bytes; Pillow measures a file once it has read its first frame: a screen over the limit whose first frame is cut short, and a PNG over it whose acTL is, are refused, no picture to identify
+        // rows S18, S8a, S8: Pillow 13 grows a GIF to its first frame's extent and holds that to the limit (GifImagePlugin _seek, _decompression_bomb_check; seen 2026-11-13, Pillow 13.0.0 through lib/ascii_image.py): on a screen of 8 x 8 px, a first frame of 65288 x 65535 px, of 8 x 8 px at (60000, 60000), or reaching one row past 12470 x 14351 px is too large to open, and identifies (lib/ascii_image.py:76), also behind blocks the decoder refuses and with the file ended before the frame's flags, as is a screen over the limit; one reaching to the limit opens; the decoder knows the screen's size alone and allocates the frame whole, 17 GB for this file of 54 bytes; Pillow measures a file once it has read its first frame: a screen over the limit whose first frame is cut short, and a PNG over it whose acTL is, are refused, no picture to identify
         let dir = Dir::new("gif_extent");
         assert_eq!(12470 * 14351, MAX_PIXELS);
         for (name, frame) in [
@@ -1481,6 +1494,32 @@ mod tests {
         }
         let at = dir.file("at.gif", gif_of((8, 8), &[&gif_frame(12462, 14343, 8, 8)]));
         assert_eq!(kind(&at), "still");
+        // read by its blocks, before the decoder, which refuses a block of an unknown label or a graphic control block of 6 bytes, where Pillow reads on, and reads a frame's extent before its flags
+        let big = gif_frame(0, 0, 65288, 65535);
+        let mut flagless = gif_of((8, 8), &[&big[..9]]);
+        flagless.pop(); // the file ends before the descriptor's flags
+        for (name, file) in [
+            ("unknown.gif", gif_of((8, 8), &[&[0x21, 0, 1, 7, 0], &big])),
+            (
+                "control-6.gif",
+                gif_of((8, 8), &[&[0x21, 0xF9, 6, 0, 0, 0, 0, 0, 0, 0], &big]),
+            ),
+            (
+                "screen.gif",
+                gif_of(
+                    (20000, 20000),
+                    &[&[0x21, 0, 1, 7, 0], &gif_frame(0, 0, 8, 8)],
+                ),
+            ),
+            ("flagless.gif", flagless),
+        ] {
+            let file = dir.file(name, file);
+            assert_eq!(
+                (kind(&file), identifies(&file)),
+                ("too large", true),
+                "{name}"
+            );
+        }
         let mut cut = gif_of((20000, 20000), &[&gif_frame(0, 0, 8, 8)[..10]]);
         cut.pop(); // the file ends with the descriptor
         let cut = dir.file("cut.gif", cut);
