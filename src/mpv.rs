@@ -2481,6 +2481,55 @@ pub(crate) mod tests {
         assert!(wrong.is_empty(), "a step back: {wrong:#?}");
     }
 
+    #[test]
+    fn a_frame_let_go_during_a_step_on_the_last_frame_moves_nothing() {
+        // rows P15, N21: mpv reports a frame it let go untaken a little after it; under load one let go before a step on the last frame was reported during the step, which then passed for one that moved, and `,` after it sought to where the step started, the same frame (seen with three playback groups at once, the count going 7 to 8); here the count rises by one during the step; seen in this test with a count that rose taken for a move: frame 49 at 1.77 after `,`
+        let mut stage = Stage::new();
+        stage.clip(2.0, 6.0);
+        stage.mpv.seek(&["seek", "1.96", "absolute+exact"]);
+        assert!(stage.reach(49, 1.96, 10.0));
+        stage.mpv.step(true);
+        stage.mpv.drops += 1;
+        assert!(idle(&mut stage, 10.0));
+        stage.mpv.step(false);
+        let done = idle(&mut stage, 10.0);
+        let there = stage.shown.last() == Some(&48) && near(stage.time, 1.92, 0.0005);
+        assert!(
+            done && there && stage.holds(0.3),
+            "on {:?} at {}",
+            stage.shown.last(),
+            stage.time
+        );
+    }
+
+    #[test]
+    #[ignore = "known defect: past the picture's end the clock is the sound's position, behind what the sound output holds"]
+    fn a_seek_onto_the_last_frame_after_steps_puts_the_clock_on_it() {
+        // rows P16, N21, N26: the clock is the time of the frame on screen; four steps from frame 25, then a seek of 1 s onto the last frame, 54 at 2.16 s: past the picture's end mpv's position is the sound's, the sound output's written time less its delay, and the steps started that output (seen: 2.0067 and 1.9642 with 2.5 s of sound, 2.0067 with 6 s; 2.16 with 2.2 s, and without the steps); the black-box `a_step_back_after_a_step_on_the_last_frame_shows_the_frame_before` reads `| 00:01` there in 2 of 16 runs
+        let mut wrong = Vec::new();
+        for audio in [2.5, 6.0] {
+            let mut stage = Stage::new();
+            let file = stage.counter("clip.mp4", 25, 2.2, audio, &[]);
+            stage.open(&file);
+            stage.mpv.seek(&["seek", "1", "absolute+exact"]);
+            assert!(stage.reach(25, 1.0, 10.0));
+            for _ in 0..4 {
+                stage.mpv.step(true);
+            }
+            assert!(idle(&mut stage, 10.0) && stage.reach(29, 1.16, 2.0));
+            stage.mpv.seek(&["seek", "1", "relative+exact"]);
+            let there = idle(&mut stage, 10.0) && stage.reach(54, 2.16, 2.0);
+            if !there {
+                wrong.push(format!(
+                    "{audio} s of sound: on {:?} at {}",
+                    stage.shown.last(),
+                    stage.time
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
     /// Pump until mpv is done with every request asked (at most `seconds`); whether it is.
     fn idle(stage: &mut Stage, seconds: f64) -> bool {
         let start = Instant::now();

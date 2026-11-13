@@ -507,7 +507,7 @@ fn a_step_back_after_a_step_on_the_last_frame_shows_the_frame_before() {
         lands(&mut tty, SHIFT_RIGHT, 25, "| 00:01");
         // four steps in one write, each its frame
         lands(&mut tty, b"....", 29, "| 00:01");
-        // the clock there is mpv's position: with sound past the picture it was the sound's, 0.16 s short of the frame (1.99 for 2.16, seen under load)
+        // the clock there is mpv's position, past the picture's end the sound's, behind what the sound output holds: up to 0.2 s short of the frame (1.996 for 2.16 in 2 of 16 runs idle; src/mpv.rs `a_seek_onto_the_last_frame_after_steps_puts_the_clock_on_it`, ignored)
         lands(&mut tty, SHIFT_RIGHT, 54, "| 00:0");
         tty.send(b".");
         // a window for what must not happen: the picture moving on, or the run ending
