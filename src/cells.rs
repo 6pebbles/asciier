@@ -795,7 +795,7 @@ mod tests {
 
     #[test]
     fn cell_statistics_are_the_python_tools_bit_for_bit() {
-        // rows G7, L6: lib/ascii_density.py cell_light under Pillow 13, as the Python tools ran: FNV-1a over each cell's colour and the bits of its mean and deviation; the tall grids go along y first at both box filters (picture::vertical_first), the wide one along x
+        // rows G7: lib/ascii_density.py cell_light under Pillow 13, as the Python tools ran: FNV-1a over each cell's colour and the bits of its mean and deviation; the tall grids go along y first at both box filters (picture::vertical_first), the wide one along x
         let fnv = |bytes: &[u8]| {
             bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, &byte| {
                 (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3)
