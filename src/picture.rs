@@ -584,6 +584,13 @@ pub fn png(picture: &RgbImage) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// FNV-1a 64 of `bytes`: how the tests name many bytes in one number.
+#[cfg(test)]
+pub(crate) fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    let step = |hash: u64, byte: u8| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+    bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, step)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1574,11 +1581,6 @@ mod tests {
         let pattern = |w: usize, h: usize| -> Vec<u8> {
             (0..w * h * 3).map(|i| (i * 7919 % 251) as u8).collect()
         };
-        let fnv = |bytes: &[u8]| {
-            bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, &byte| {
-                (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3)
-            })
-        };
         for ((w, h), (ow, oh), hash) in [
             ((37, 23), (20, 12), 0x3121_9cfe_4171_c83a),
             ((7, 5), (12, 8), 0x66c0_4872_64a1_0d43),
@@ -1595,7 +1597,7 @@ mod tests {
             ((900, 1600), (640, 508), 0xbdd2_58ba_1235_99df),
         ] {
             assert_eq!(
-                fnv(&box_filter(&pattern(w, h), w, h, ow, oh)),
+                fnv(box_filter(&pattern(w, h), w, h, ow, oh)),
                 hash,
                 "{w} x {h} to {ow} x {oh}"
             );

@@ -823,6 +823,7 @@ mod tests {
     use super::*;
     use crate::look::Look;
     use crate::mpv::tests::{Scratch, Var, env};
+    use crate::picture::fnv;
     use std::io::Write;
     use std::sync::MutexGuard;
 
@@ -1119,11 +1120,6 @@ mod tests {
 
     fn has(out: &[u8], text: &str) -> bool {
         String::from_utf8_lossy(out).contains(text)
-    }
-
-    fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
-        let step = |hash: u64, byte: u8| (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3);
-        bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, step)
     }
 
     /// The frame's top row in a window of 100 columns, the title between `around` dashes on each side of its 51 cells.

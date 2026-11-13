@@ -137,12 +137,7 @@ impl Font {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
-        bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-            (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
-        })
-    }
+    use crate::picture::fnv;
 
     #[test]
     fn cell_is_pillows() {

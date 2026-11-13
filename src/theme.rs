@@ -441,6 +441,7 @@ fn named(cache: &[(String, bool, String)], mut kitten: Command, name: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::picture::fnv;
     use std::f64::consts::PI;
     use std::path::PathBuf;
 
@@ -476,12 +477,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
-    }
-
-    fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
-        bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-            (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
-        })
     }
 
     #[test]
