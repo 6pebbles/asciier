@@ -31,6 +31,12 @@ fn drawn(out: &[u8]) -> Vec<(Option<u32>, u32)> {
     })
 }
 
+/// The status row and the counter's frame as the last whole update in the output left them, in an 80 x 24 window: each update erases the status row first and writes it last, so a look at the screen while one is under way finds the row blank (seen at load 82: `""` read after a window of quiet).
+fn last_drawn(tty: &Tty) -> (String, u32) {
+    let drawn = replay(&tty.out(), SMALL, |screen| (screen.row(24), frame(screen)));
+    drawn.last().cloned().unwrap_or_default()
+}
+
 /// The clip's time a status row shows by its bar, finer than its clock: the bar's cells of its room (`cols` less the text and a space) times `length`; 0 before the bar's first cell.
 fn bar_time(row: &str, cols: usize, length: f64) -> f64 {
     let text = row.trim_end_matches(['━', ' ']).chars().count();
@@ -186,7 +192,7 @@ fn frames_come_at_the_clips_rate_and_the_end_quits() {
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
     // the clip's time then, by the frame on screen: a test thread late under load sees a later frame (a start taken here instead gave 1.36 s from 00:01 to the end in a run at load 45)
-    let (start, from) = (Instant::now(), frame(tty.screen()));
+    let (start, from) = (Instant::now(), last_drawn(&tty).1);
     assert_eq!(tty.exit(), 0);
     let (ran, took) = (
         launched.elapsed().as_secs_f64(),
@@ -352,9 +358,9 @@ fn space_and_p_pause_and_play_on() {
         lands(&mut tty, SHIFT_RIGHT, 25, "| 00:01");
         // a window for what must not happen: the clock or the picture moving on
         std::thread::sleep(Duration::from_millis(600));
-        let status = tty.screen().row(24);
+        let (status, number) = last_drawn(&tty);
         assert!(status.starts_with("| 00:01 / 00:10"), "{status:?}");
-        assert_eq!(frame(tty.screen()), 25);
+        assert_eq!(number, 25);
         tty.send(key);
         tty.until("playing on", |screen| {
             screen.row(24).starts_with("> ") && frame(screen) > 25
@@ -395,7 +401,7 @@ fn space_right_after_the_start_pauses_too() {
     tty.send(b" ");
     // a window for what must not happen: playing on
     std::thread::sleep(Duration::from_secs(2));
-    let status = tty.screen().row(24);
+    let (status, _) = last_drawn(&tty);
     assert!(status.starts_with("| 00:00"), "{status:?}");
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
@@ -408,7 +414,7 @@ fn two_spaces_in_one_batch_leave_it_as_it_was() {
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.0, 10.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
-    let from = frame(tty.screen());
+    let from = last_drawn(&tty).1;
     tty.send(b"  ");
     tty.until("playing on", |screen| {
         screen.row(24).starts_with("> ") && frame(screen) > from + 25
@@ -418,9 +424,9 @@ fn two_spaces_in_one_batch_leave_it_as_it_was() {
     tty.send(b"  ");
     // a window for what must not happen: the clock or the picture moving on
     std::thread::sleep(Duration::from_millis(600));
-    let status = tty.screen().row(24);
+    let (status, number) = last_drawn(&tty);
     assert!(status.starts_with("| 00:00"), "{status:?}");
-    assert_eq!(frame(tty.screen()), 0);
+    assert_eq!(number, 0);
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }
@@ -599,10 +605,7 @@ fn frame_steps_move_one_frame_and_pause() {
     // on the first frame `,` only pauses; a window for what must not happen: the clip moving on
     tty.send(b",");
     std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(
-        (frame(tty.screen()), tty.screen().row(24)),
-        (0, "| 00:00 / 00:10".to_string())
-    );
+    assert_eq!(last_drawn(&tty), ("| 00:00 / 00:10".to_string(), 0));
     lands(&mut tty, SHIFT_RIGHT, 25, "| 00:01");
     for (key, number, status) in [
         (b",", 24, "| 00:00"),
@@ -772,7 +775,7 @@ fn a_step_while_the_sound_plays_on_past_the_picture_only_pauses() {
     });
     // a window for what must not happen: the clip moving on, or the clock going back
     std::thread::sleep(Duration::from_millis(500));
-    let (on, row) = (frame(tty.screen()), tty.screen().row(24));
+    let (row, on) = last_drawn(&tty);
     assert!(
         on == 54 && seconds(&row).is_some_and(|at| at >= 3) && tty.running(),
         "{row:?} on frame {on}"
@@ -885,11 +888,11 @@ fn speed_keys_step_it_between_25_and_400_percent() {
     tty.until("the clock", |screen| {
         screen.row(24).starts_with("> ") && seconds(&screen.row(24)).is_some()
     });
-    let from = seconds(&tty.screen().row(24)).unwrap();
+    let from = seconds(&last_drawn(&tty).0).unwrap();
     tty.until("the next second", |screen| {
         seconds(&screen.row(24)).is_some_and(|at| at > from)
     });
-    let (start, first) = (Instant::now(), seconds(&tty.screen().row(24)).unwrap());
+    let (start, first) = (Instant::now(), seconds(&last_drawn(&tty).0).unwrap());
     tty.until("four seconds on", |screen| {
         seconds(&screen.row(24)).is_some_and(|at| at >= first + 4)
     });
@@ -1062,7 +1065,9 @@ fn the_status_row_shows_mark_clock_length_and_bar() {
     assert_eq!(minutes.exit(), 0);
     cut.until("the clock", |screen| screen.row(5).starts_with("> 00:0"));
     pause(&mut cut);
-    let row = cut.screen().row(5);
+    let row = replay(&cut.out(), narrow, |screen| screen.row(5))
+        .pop()
+        .unwrap();
     assert!(
         row.starts_with("| 00:") && row.ends_with(" / 00") && row.chars().count() == 12,
         "{row:?}"
@@ -1070,7 +1075,7 @@ fn the_status_row_shows_mark_clock_length_and_bar() {
     cut.send(b"q");
     assert_eq!(cut.exit(), 0);
     tty.await_playing();
-    let row = tty.screen().row(24);
+    let (row, _) = last_drawn(&tty);
     assert!(
         row.starts_with("> 00:0") && row.contains(" / 00:20 ━"),
         "{row:?}"
@@ -1120,7 +1125,11 @@ fn a_stream_without_a_length_shows_its_clock_alone() {
     );
     let mut tty = sandbox.launch().arg(&raw).size(SMALL).start();
     tty.await_status("> 00:01");
-    assert_eq!(tty.screen().row(24), "> 00:01");
+    let (row, _) = last_drawn(&tty);
+    assert!(
+        seconds(&row).is_some() && row.chars().count() == 7,
+        "{row:?}"
+    );
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }
@@ -1765,7 +1774,11 @@ fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
     });
     // a window for what must not happen: playing on after the page closed
     std::thread::sleep(Duration::from_millis(600));
-    assert!(tty.screen().row(24).starts_with("| ") && frame(tty.screen()) == shown);
+    let (status, number) = last_drawn(&tty);
+    assert!(
+        status.starts_with("| ") && number == shown,
+        "{status:?} on {number}"
+    );
     // on the last frame
     lands(&mut tty, UP, 199, "| 00:07 / 00:08");
     tty.send(b"r");
