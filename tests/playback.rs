@@ -174,18 +174,22 @@ fn saved(path: &Path) -> (u32, (u32, u32)) {
 
 #[test]
 fn frames_come_at_the_clips_rate_and_the_end_quits() {
-    // rows P2, P14, P16, N26: play_rate and run of bin/ascii-viewer:431 and :2386 at tag python-final: 25 frames a second, exit 0 at the end, past the clip's 3 s; run in this harness the old viewer drew all 25 frames of each second; the status row's bar, room x position / length cells, shows the time of the frame on screen (N26)
+    // rows P2, P14, P16, N26: play_rate and run of bin/ascii-viewer:431 and :2386 at tag python-final: 25 frames a second, exit 0 at the end, past the clip's 3 s: the run lasts more than 2.5 s from its launch, as mpv plays no faster than the clock (taken from the frame on screen instead, which lags mpv under load, the end measured 2.46 s at 166 runnable tasks), and at most 10 s into the clip by that frame; run in this harness the old viewer drew all 25 frames of each second; the status row's bar, room x position / length cells, shows the time of the frame on screen (N26)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 3.0, 3.0, &[]);
+    let launched = Instant::now();
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
     // the clip's time then, by the frame on screen: a test thread late under load sees a later frame (a start taken here instead gave 1.36 s from 00:01 to the end in a run at load 45)
     let (start, from) = (Instant::now(), frame(tty.screen()));
     assert_eq!(tty.exit(), 0);
-    let took = from as f64 / 25.0 + start.elapsed().as_secs_f64();
+    let (ran, took) = (
+        launched.elapsed().as_secs_f64(),
+        from as f64 / 25.0 + start.elapsed().as_secs_f64(),
+    );
     assert!(
-        took > 2.5 && took < 10.0,
-        "ended {took:.2} s into the clip, from frame {from}"
+        ran > 2.5 && took < 10.0,
+        "ended {ran:.2} s after the launch, {took:.2} s into the clip by frame {from}"
     );
     // each draw: the clock by the bar (3/64 s a cell) against the frame it shows, outside the clip's last 0.5 s, where the clock is the sound's past the last frame drawn (seen: frame 70 under the whole bar); frame less clock seen from -0.14 to +0.02 s in 28 runs at load 19 to 48, and from -0.08 to +0.02 s in 38 runs at load 30 to 55 in review
     let rows = replay(&tty.out(), SMALL, |screen| (screen.row(24), frame(screen)));
@@ -1931,20 +1935,15 @@ fn damaged_frames_are_passed_over() {
     let at = bytes.len() * 3 / 10;
     bytes[at..at + 300].fill(0);
     std::fs::write(&video, bytes).unwrap();
+    let launched = Instant::now();
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    tty.until("the first status row", |screen| !screen.row(24).is_empty());
-    // the clip's time then, by the frame on screen: a test thread late under load sees a later frame
-    let (start, from) = (Instant::now(), frame(tty.screen()));
     assert_eq!(tty.exit(), 0);
-    let took = from as f64 / 25.0 + start.elapsed().as_secs_f64();
+    let ran = launched.elapsed().as_secs_f64();
     let mut numbers: Vec<u32> = drawn(&tty.out()).into_iter().map(|(_, n)| n).collect();
     numbers.dedup();
-    // on past the damage, to the clip's end
+    // on past the damage, to the clip's end: the run lasts more than 3.6 s from its launch, as mpv plays no faster than the clock (by the frame on screen at the test's look, which lags mpv under load, an end can measure short)
     assert!(numbers.last() >= Some(&42), "{numbers:?}");
-    assert!(
-        took > 3.6,
-        "ended {took:.2} s into the clip, from frame {from}"
-    );
+    assert!(ran > 3.6, "ended {ran:.2} s after the launch");
 }
 
 #[test]
@@ -2282,18 +2281,12 @@ fn sound_that_outlasts_the_video_plays_on_over_its_last_frame() {
     // rows N21, P14: a 1 s picture with 3 s of sound plays to the sound's end on its last frame (the old viewer ended with the last frame, after 1.3 s here)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 1.0, 3.0, &[]);
+    let launched = Instant::now();
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    tty.until("the first status row with the length", |screen| {
-        screen.row(24).starts_with("> ") && screen.row(24).contains(" / ")
-    });
-    // the clip's time then, by the bar: a test thread late under load sees a later one
-    let (start, from) = (Instant::now(), bar_time(&tty.screen().row(24), 80, 3.0));
     assert_eq!(tty.exit(), 0);
-    let took = from + start.elapsed().as_secs_f64();
-    assert!(
-        took > 2.5,
-        "ended {took:.2} s into the clip, from {from:.2} s"
-    );
+    // the run lasts more than 2.5 s from its launch, as mpv plays no faster than the clock (by the bar at the test's look, which lags mpv under load, an end can measure short)
+    let ran = launched.elapsed().as_secs_f64();
+    assert!(ran > 2.5, "ended {ran:.2} s after the launch");
     // a frame of the picture held while the clock runs on
     let drawn = drawn(&tty.out());
     assert!(
@@ -2311,28 +2304,36 @@ fn video_plays_on_without_sound_and_after_its_sound_ends() {
     let sandbox = Sandbox::new();
     let silent = counter(&sandbox, "silent.mp4", "160x90", 25, 3.0, 0.0, &[]);
     let short = counter(&sandbox, "short.mp4", "160x90", 25, 3.0, 1.0, &[]);
-    let mut ttys = [&silent, &short].map(|video| sandbox.launch().arg(video).size(SMALL).start());
+    let mut launched = Vec::new();
+    let mut ttys = [&silent, &short].map(|video| {
+        launched.push(Instant::now());
+        sandbox.launch().arg(video).size(SMALL).start()
+    });
     // each clip's time when its first clock past 00:00 is seen, by the frame on screen: a test thread late under load sees a later frame
     let mut seen = Vec::new();
     for tty in &mut ttys {
         tty.await_playing();
         seen.push((Instant::now(), frame(tty.screen())));
     }
-    // and how far into the clip each ended
+    // and how far into the clip each ended: more than 2.5 s from the launch, as mpv plays no faster than the clock, and at most 10 s into the clip by that frame, which under load lags mpv (an end taken from it alone measured 2.18 to 2.42 s at load 50 to 77)
     let (mut took, end) = ([None; 2], Instant::now() + PATIENCE);
     while took.contains(&None) && Instant::now() < end {
         for (i, tty) in ttys.iter_mut().enumerate() {
             if took[i].is_none() && !tty.running() {
                 let (at, from) = seen[i];
-                took[i] = Some(from as f64 / 25.0 + at.elapsed().as_secs_f64());
+                let ran = launched[i].elapsed().as_secs_f64();
+                took[i] = Some((ran, from as f64 / 25.0 + at.elapsed().as_secs_f64()));
             }
         }
         std::thread::sleep(Duration::from_millis(5));
     }
     for (tty, took) in ttys.iter_mut().zip(took) {
         assert_eq!(tty.exit(), 0);
-        let took = took.unwrap();
-        assert!(took > 2.5 && took < 10.0, "ended {took:.2} s into the clip");
+        let (ran, took) = took.unwrap();
+        assert!(
+            ran > 2.5 && took < 10.0,
+            "ended {ran:.2} s after the launch, {took:.2} s into the clip"
+        );
         let drawn = drawn(&tty.out());
         // the last second plays on, to the last frames (a debug build among the other tests drops late ones)
         let second = frames_in(&drawn, 2);
