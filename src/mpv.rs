@@ -71,9 +71,10 @@ pub struct Mpv {
     /// The time of the frame the caller last rendered, as far as known (`held` then), and of the one on screen (`shown`).
     rendered: Option<f64>,
     on_screen: Option<f64>,
-    /// The frame shown is the picture's last and the position can be past it: the sound's, playing on or paused there, or a seek's target past the last frame. `end`: that frame's own time, once a seek past the end has given it.
+    /// The frame shown is the picture's last and the position can be past it: the sound's, playing on or paused there, or a seek's target past the last frame. `end`: that frame's own time, once a seek past the end has given it. `runs`: the position ran on in the last look that gave one, with no frame handed over and none let go.
     tail: bool,
     end: Option<f64>,
+    runs: bool,
     /// Requests to pause or play that mpv has not confirmed, held ones too: its reports of `pause` until then can be older than them.
     pausing: u32,
     /// mpv restarts playback, after the file's load or a seek, until `MPV_EVENT_PLAYBACK_RESTART`: meanwhile it holds back a seek asked within 0.3 s of the last one's start (player/playloop.c, execute_queued_seek), whose mark then comes before it runs.
@@ -501,6 +502,7 @@ impl Mpv {
             on_screen: None,
             tail: false,
             end: None,
+            runs: false,
             pausing: 0,
             restarting: true,
             setting: [0; 4],
@@ -854,6 +856,7 @@ impl Mpv {
     fn start_seek(&mut self, args: &[String], anchor: bool) {
         // no step goes from a frame drawn before
         (self.back, self.tail, self.rendered, self.on_screen) = (None, false, None, None);
+        self.runs = false;
         let target = match amount(args) {
             Some((to, true)) => Some(to),
             Some((by, false)) if self.paused && self.pausing == 0 => Some(self.time + by),
@@ -933,7 +936,7 @@ impl Mpv {
     fn settled(&mut self, time: Option<f64>) -> Option<Event> {
         let landed = time.unwrap_or(self.time);
         let moved = landed != self.time;
-        self.time = landed;
+        (self.time, self.runs) = (landed, false);
         self.count(Some(landed));
         match self.busy.take() {
             Some(Busy::Seek {
@@ -1051,9 +1054,11 @@ impl Mpv {
             if self.base.is_some_and(|(_, drops)| drops != self.drops) {
                 self.base = Some((self.time, self.drops));
             }
-            // the position runs on while mpv hands over no frame and lets none go, however seldom the caller looks: past the picture's end the sound plays on
+            // the position runs on while mpv hands over no frame and lets none go, in two looks running, however seldom the caller looks: past the picture's end the sound plays on; in one look alone mpv can have let a frame go that it reports a look later (the stress run's trace mid-clip: the position 2 frames on, the count going from 25 to 40 a look later, and a step taken there for one past the end went 18 frames on)
             let ran = |(at, _): (f64, i64)| self.time > at + 1.5 * self.frame;
-            self.tail |= self.busy.is_none() && self.base.is_some_and(ran);
+            let runs = self.busy.is_none() && self.base.is_some_and(ran);
+            let before = std::mem::replace(&mut self.runs, runs);
+            self.tail |= runs && before;
         }
         self.looked = Instant::now();
         events
@@ -1079,6 +1084,7 @@ impl Mpv {
             self.counted = info.target_time;
             self.fresh = true;
             self.tail &= self.busy.is_some();
+            self.runs = false;
             self.prev = self.seen.take();
             self.seen = given.filter(|_| !self.anew).map(|at| (at, self.drops));
             self.base = self.seen;
@@ -3608,6 +3614,44 @@ pub(crate) mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn a_position_run_on_in_one_look_is_no_end() {
+        // row P15: past the picture's end the position runs on, the sound's, while mpv hands over no frame and lets none go, which tells the last frame (`.` only pauses there); under load one look brought the position 2 frames on mid-clip with no frame, and mpv's report of the frames it let go a look later (the stress run's trace: the count 25 to 40), and that look passed for the end: `.` then went 18 frames on, by mpv's own step; here mpv's reports in that order are handed in, and the end is taken after two looks running on with nothing else, as past the end
+        let mut stage = Stage::new();
+        stage.clip(10.0, 10.0);
+        stage.mpv.seek(&["seek", "1.08", "absolute+exact"]);
+        assert!(stage.reach(27, 1.08, 10.0) && idle(&mut stage, 10.0));
+        stage.settle();
+        let look = |stage: &mut Stage, mut time: f64, mut drops: i64| {
+            let position = Property {
+                name: c"time-pos".as_ptr(),
+                format: DOUBLE,
+                data: &mut time as *mut f64 as *const c_void,
+            };
+            stage.mpv.changed(&position);
+            let dropped = Property {
+                name: c"frame-drop-count".as_ptr(),
+                format: INT64,
+                data: &mut drops as *mut i64 as *const c_void,
+            };
+            stage.mpv.changed(&dropped);
+            stage.mpv.events();
+            stage.mpv.tail
+        };
+        let drops = stage.mpv.drops;
+        // mid-clip: the position 2 frames on, then the frames let go reported
+        let mid = [
+            look(&mut stage, 1.16, drops),
+            look(&mut stage, 1.76, drops + 15),
+        ];
+        // past the end: the position runs on, look after look
+        let end = [
+            look(&mut stage, 1.86, drops + 15),
+            look(&mut stage, 1.96, drops + 15),
+        ];
+        assert_eq!((mid, end), ([false, false], [false, true]));
     }
 
     #[test]
