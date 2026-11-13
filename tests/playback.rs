@@ -1635,26 +1635,27 @@ fn tenths(hundredths: u32) -> String {
     }
 }
 
+/// The frame on screen when the render page came, the page opened after byte `at`: the last drawn before the page's first update.
+fn under_page(out: &[u8], at: usize) -> u32 {
+    let page = find(out, b" Render", at).unwrap();
+    let page = out[..page]
+        .windows(8)
+        .rposition(|w| w == b"\x1b[?2026h")
+        .unwrap();
+    drawn(&out[..page]).last().unwrap().1
+}
+
 #[test]
 fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
-    // rows P22, R3, R16, N5, N23: open_page and close_page of bin/ascii-viewer:2048 and :2112 at tag python-final: the page on the frame at full size, named by its time when it opens (N5: the frame mpv holds, within 3 frames of the one drawn while playing, its time to 0.1 s); of R3's defaults the size, 1920 on the long side, and the crop, the whole frame; R16's export, `s`, the full-size PNG beside the clip under that name; playback pauses meanwhile and goes on after; the page's lines as the old viewer drew them in this harness; on the last frame too (N23: the old viewer could end there, P29)
+    // rows P22, R3, R16, N5, N23: open_page and close_page of bin/ascii-viewer:2048 and :2112 at tag python-final: the page on the frame at full size, named by its time when it opens (N5: the frame mpv holds, within 3 frames of the one drawn while playing, the one on screen when paused, its time to 0.1 s); of R3's defaults the size, 1920 on the long side, and the crop, the whole frame; R16's export, `s`, the full-size PNG beside the clip under that name; playback pauses meanwhile and goes on after; the page's lines as the old viewer drew them in this harness; on the last frame too (N23: the old viewer could end there, P29)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 8.0, 8.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
     let at = tty.send(b"r");
     tty.until("the page", |screen| screen.row(1).starts_with(" Render"));
-    let out = tty.out();
-    let page = find(&out, b" Render", at).unwrap();
-    let page = out[..page]
-        .windows(8)
-        .rposition(|w| w == b"\x1b[?2026h")
-        .unwrap();
-    let (clock, last) = drawn(&out[..page])
-        .into_iter()
-        .rfind(|(clock, _)| clock.is_some())
-        .unwrap();
-    let clock = clock.unwrap();
+    let opened = Instant::now();
+    let last = under_page(&tty.out(), at);
     // the frame comes with the first render (the old page rendered in the background)
     tty.until("the preview's frame", |screen| {
         screen.row(1).contains(" 1920x1080 · 160 columns ")
@@ -1685,37 +1686,48 @@ fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
             .row(7)
             .starts_with("   W          100%   (160 px)")
     );
-    // a window for what must not happen: playing on under the page
-    std::thread::sleep(Duration::from_millis(1500));
     tty.send(b"q");
     tty.until("the menu", |screen| screen.row(1).starts_with(" Render"));
+    // a window for what must not happen, playing on under the page: open 4 s at least, from when the test saw it
+    std::thread::sleep(Duration::from_secs(4).saturating_sub(opened.elapsed()));
+    let open = opened.elapsed().as_secs_f64();
     let closed = tty.send(b"q");
     tty.until("the player", |screen| {
         screen.row(24).starts_with("> ") && seconds(&screen.row(24)).is_some()
     });
-    // the first clock drawn after the page: the screen a test thread late under load reads can be later
-    let after = drawn(&tty.out()[closed..])
+    // the first clock drawn after the page, by its bar, against the frame given to the page: mpv plays on from that frame until the viewer's pause reaches it, as long as the viewer takes to open the page (seen at load 29 to 40: 0.54 to 1.24 s on, the page drawn 1.6 to 2.6 s after `r` and open 7.3 to 11.3 s), while playing on under the page would move the clock on by all the time the page was open: half of it is the bound (one of a second from the clock drawn before `r` failed 3 of 12 runs at load 43 to 45 in review)
+    let after = replay(&tty.out()[closed..], SMALL, |screen| screen.row(24))
         .into_iter()
-        .find_map(|(clock, _)| clock)
+        .find(|row| seconds(row).is_some())
+        .map(|row| bar_time(&row, 80, 8.0))
         .unwrap();
-    assert!(after <= clock + 1, "{clock} s at `r`, {after} s after");
+    let from = grabbed as f64 / 25.0;
+    assert!(
+        after - from < open / 2.0,
+        "frame {grabbed} ({from:.2} s) given to the page, the clock at {after:.2} s after it was open {open:.1} s"
+    );
     tty.until("playing on", |screen| {
-        seconds(&screen.row(24)).is_some_and(|at| at > after)
+        seconds(&screen.row(24)).is_some_and(|at| at > after as u32)
     });
-    // paused: the frame on screen, named by its time; it stays paused. The screen can lag mpv under load (this failed so once under heavy load, the name against the frame read on screen right after the pause): the page's frame is the reference, and the screen must come to it (N5: run in this harness the old viewer's export, drawn anew at the name's time, was not the frame on screen)
+    // paused: the frame on screen, the last drawn before the page (the test's own look right after the pause can be older: at load 40 by 7 to 13 frames, the viewer drawing frames mpv played before its pause after a quiet 300 ms), named by its time; it stays paused (N5: run in this harness the old viewer's export, drawn anew at the name's time, was not the frame on screen in 4 of 6 runs, 75 for 76 and 78 for 77)
     pause(&mut tty);
-    tty.send(b"r");
+    let at = tty.send(b"r");
     tty.until("the page", |screen| screen.row(1).starts_with(" Render"));
+    let shown = under_page(&tty.out(), at);
     let name = page_name(&mut tty);
-    let (held, _) = exported(&mut tty, &sandbox, &name);
-    assert_eq!(name, format!("clip-ascii-{}s.png", tenths(held * 4)));
+    let (taken, _) = exported(&mut tty, &sandbox, &name);
+    assert_eq!(
+        taken, shown,
+        "{name}: frame {taken} for frame {shown} on screen"
+    );
+    assert_eq!(name, format!("clip-ascii-{}s.png", tenths(shown * 4)));
     tty.send(b"q");
-    tty.until("the player on the frame taken", |screen| {
-        screen.row(24).starts_with("| ") && frame(screen) == held
+    tty.until("the player on the frame on screen", |screen| {
+        screen.row(24).starts_with("| ") && frame(screen) == shown
     });
     // a window for what must not happen: playing on after the page closed
     std::thread::sleep(Duration::from_millis(600));
-    assert!(tty.screen().row(24).starts_with("| ") && frame(tty.screen()) == held);
+    assert!(tty.screen().row(24).starts_with("| ") && frame(tty.screen()) == shown);
     // on the last frame
     lands(&mut tty, UP, 199, "| 00:07 / 00:08");
     tty.send(b"r");
