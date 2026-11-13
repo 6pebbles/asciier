@@ -581,13 +581,18 @@ fn a_seek_from_the_stopped_state_counts_from_the_frame_on_screen() {
         if !seek.is_empty() {
             remote.send("Seek", seek);
         }
+        // the counter shows a frame's number mod 256, and the held frame of this 20 s clip can be past 255: frames on from it are counted mod 256 (the review: 5 of 18 copies failed at load 45-55 with no frame past held + 27, by inference a held frame of 229 or more)
+        let on = |number: u32| (number + 256 - held) % 256;
         tty.until("frames after the target", |screen| {
-            screen.row(24).starts_with("> ") && frame(screen) > held + 27
+            screen.row(24).starts_with("> ") && (28..128).contains(&on(frame(screen)))
         });
         let mut after = replay(&tty.out()[from..], SMALL, frame);
         after.dedup();
-        let first = after.iter().find(|&&number| number != held);
-        assert_eq!(first, Some(&(held + 25)), "from frame {held}: {after:?}");
+        let first = after
+            .iter()
+            .find(|&&number| number != held)
+            .map(|&number| on(number));
+        assert_eq!(first, Some(25), "from frame {held}: {after:?}");
         // on from the start at full speed, then at full size: the screen's lag under load would otherwise run the clip out
         says(&mut tty, b"\\", "speed 100%");
         tty.send(DOWN);
