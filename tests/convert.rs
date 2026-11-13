@@ -2586,7 +2586,7 @@ fn ctrl_c_while_the_decoder_writes_nothing_stops_the_reading() {
 
 #[test]
 fn ctrl_c_before_the_first_frame_ends_as_before_the_encoding() {
-    // rows X9, N25: a Ctrl-C while the decoder has given no frame, its pipe open, with the encoder started: N25 ends it as a Ctrl-C before a video's encoding: the encoder, still waiting for its first input, killed before that input closes, so it never opens its output and a file in the way stays as it was; on stderr the progress alone, no path, death by SIGINT; so with either encoder, the trial's pick and libx264 under a VA driver that cannot load; X9's read loop of bin/ascii-convert:471 at tag python-final took this Ctrl-C and closed the encoder's empty input, which made the file in the way over (seen here, 2 of 2): where h264_vaapi encodes, exit 1, ffmpeg's errors and `ffmpeg could not encode the video`, the file 0 bytes; where libx264 does, `stopped at frame 0: <out> holds the part converted`, the path, exit 130, a file of 261 bytes and no frame
+    // rows X9, N25: a Ctrl-C while the decoder has given no frame, its pipe open, with the encoder started (both seen in the wrapper's notes, which the old converter makes too: it started the encoder before its first frame, and printed no progress until then): N25 ends it as a Ctrl-C before a video's encoding: the encoder, still waiting for its first input, killed before that input closes, so it never opens its output and a file in the way stays as it was; on stderr the progress alone, no path, death by SIGINT; so with either encoder, the trial's pick and libx264 under a VA driver that cannot load; X9's read loop of bin/ascii-convert:471 at tag python-final took this Ctrl-C and closed the encoder's empty input, which made the file in the way over (seen here, 2 of 2): where h264_vaapi encodes, exit 1, ffmpeg's errors and `ffmpeg could not encode the video`, the file 0 bytes; where libx264 does, `stopped at frame 0: <out> holds the part converted`, the path, exit 130, a file of 261 bytes and no frame
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "clip.mp4", 0.8, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
@@ -2595,14 +2595,16 @@ fn ctrl_c_before_the_first_frame_ends_as_before_the_encoding() {
         if !driver.is_empty() {
             sandbox.set("LIBVA_DRIVER_NAME", driver);
         }
-        let _ = std::fs::remove_file(sandbox.path("held"));
+        for note in ["held", "encode.args"] {
+            let _ = std::fs::remove_file(sandbox.path(note));
+        }
         std::fs::write(sandbox.path("clip-out.mp4"), "in the way").unwrap();
         let run = Running::start(
             &sandbox,
             &["-W", "320", "-H", "180", "-o", "clip-out.mp4", "clip.mp4"],
         );
         await_file(&sandbox.path("held"));
-        run.await_err("\r0/20 frames");
+        await_file(&sandbox.path("encode.args"));
         run.interrupt();
         let (status, out, err) = run.finish();
         assert_eq!(
