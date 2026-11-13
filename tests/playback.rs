@@ -1560,12 +1560,12 @@ fn the_clock_stands_with_the_frame_held_through_a_gap() {
 
 #[test]
 fn damaged_frames_are_passed_over() {
-    // row P25: Decoder.next_frame of bin/ascii-viewer:468 at tag python-final passes over a frame that does not decode; here 300 bytes zeroed mid-file take frames 32 to 41 (run in this harness the old viewer ended there instead: frames 0 to 30, then exit after 1.5 s)
+    // row P25: Decoder.next_frame of bin/ascii-viewer:468 at tag python-final passes over a frame that does not decode; here 300 bytes zeroed at three tenths of a 4 s clip take frames 32 to 41, which leaves 58 frames past them for a viewer slowed by load (a 2 s clip damaged mid-file left 8, of which such a viewer drew none in some runs); run in this harness the old viewer ended at the damage instead: frames 0 to 30, then exit 0
     let sandbox = Sandbox::new();
-    let video = counter(&sandbox, "hurt.mp4", "160x90", 25, 2.0, 0.0, &[]);
+    let video = counter(&sandbox, "hurt.mp4", "160x90", 25, 4.0, 0.0, &[]);
     let mut bytes = std::fs::read(&video).unwrap();
-    let middle = bytes.len() / 2;
-    bytes[middle..middle + 300].fill(0);
+    let at = bytes.len() * 3 / 10;
+    bytes[at..at + 300].fill(0);
     std::fs::write(&video, bytes).unwrap();
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.until("the first status row", |screen| !screen.row(24).is_empty());
@@ -1578,7 +1578,7 @@ fn damaged_frames_are_passed_over() {
     // on past the damage, to the clip's end
     assert!(numbers.last() >= Some(&42), "{numbers:?}");
     assert!(
-        took > 1.6,
+        took > 3.6,
         "ended {took:.2} s into the clip, from frame {from}"
     );
 }
