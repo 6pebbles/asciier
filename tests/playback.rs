@@ -416,15 +416,18 @@ fn a_step_on_the_last_frame_keeps_its_place() {
         for number in 51..=54 {
             lands(&mut tty, b".", number, "| 00:02");
         }
-        // mpv plays the sound out, silent, then seeks past the end
+        // mpv plays the sound out, silent, then seeks past the end; the status row as the last whole draw left it, as a read under way finds it erased (seen at load 19: the row read blank)
+        let status = |tty: &Tty| replay(&tty.out(), SMALL, |screen| screen.row(24)).pop();
         tty.until("the clock on the last frame", |screen| {
             screen.row(24).matches('━').count() == cells
         });
-        let on_it = tty.screen().row(24);
+        tty.settle(Duration::from_millis(300));
+        let on_it = status(&tty).unwrap();
+        assert_eq!(on_it.matches('━').count(), cells, "{audio}: {on_it:?}");
         tty.send(b".");
         // a window for what must not happen: the clock moving on
         std::thread::sleep(Duration::from_millis(1000));
-        assert_eq!(tty.screen().row(24), on_it, "{audio}");
+        assert_eq!(status(&tty), Some(on_it), "{audio}");
         tty.send(b",");
         let end = Instant::now() + Duration::from_secs(5);
         while frame(tty.screen()) != 53 && Instant::now() < end {
