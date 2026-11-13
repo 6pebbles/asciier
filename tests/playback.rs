@@ -2209,6 +2209,26 @@ fn a_step_on_a_picture_only_pauses() {
 }
 
 #[test]
+fn a_step_takes_an_animated_gif_one_frame_on() {
+    // rows P15, V17: an animated GIF plays as video (V17), where `.` from a pause shows the next frame, as frame_step of bin/ascii-viewer:1441 at tag python-final does on any video; seen before the fix: frame 0 after each `.`, under `| 00:00 / 00:08`, the GIF taken for a picture by mpv's demuxer alone, where a step only pauses (the review's probe)
+    let sandbox = Sandbox::new();
+    let gif = sandbox.path("anim.gif");
+    let picture = format!("nullsrc=s=160x90:r=10:d=8,{COUNTER}");
+    let gray = ["-pix_fmt", "gray", gif.to_str().unwrap()];
+    ffmpeg(
+        &sandbox,
+        &[&["-f", "lavfi", "-i", &picture][..], &gray].concat(),
+    );
+    let mut tty = sandbox.launch().arg(&gif).size(SMALL).start();
+    paused_at_the_start(&mut tty);
+    for number in 1..=3 {
+        lands(&mut tty, b".", number, "| 00:00 / 00:08");
+    }
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
 fn a_picture_mpv_knows_by_its_suffix_shows_until_q() {
     // rows V17, N7: an X-Face picture, which neither the built-in decoders nor FFmpeg's probes take, opens through mpv's picture demuxer by its suffix (mf), 1 s long at mf-fps 1, as a one-frame video held until `q` (it ended after its frame while the rule went by the length; run in this harness the old viewer drew nothing and ended)
     let sandbox = Sandbox::new();

@@ -397,14 +397,13 @@ fn explain(error: c_int) -> String {
     words.to_string_lossy().into_owned()
 }
 
-/// Whether mpv opened a picture, by its demuxer (`file-format`): one of FFmpeg's picture demuxers (`pcx_pipe`, `j2k_pipe`, `fits`, ...), mpv's (`mf`: a picture known by its suffix, 1 s long at mf-fps 1), or FFmpeg's MP4 one without a `length` (HEIC, AVIF; every video in it has one). The length alone does not tell (a Matroska live stream, NUT, raw H.264 or HEVC has none), nor a track's `image` flag (mpv sets it for a one-frame Matroska video and for one HEVC or AV1 frame in MP4).
-fn picture(format: &str, length: Option<f64>) -> bool {
+/// Whether mpv opened a picture, by its demuxer (`file-format`) and the video track's `image` flag: one of FFmpeg's picture demuxers whose streams mpv flags at one frame (`pcx_pipe`, `j2k_pipe`, `image2pipe`, `alias_pix`, `gif`, `ico`: demux_lavf.c is_image), with the flag (an animated GIF has none: it plays as video), one mpv never flags (`image2`, `brender_pix`, `fits`), mpv's (`mf`: a picture known by its suffix, 1 s long at mf-fps 1), or FFmpeg's MP4 one without a `length` (HEIC, AVIF; every video in it has one). The length alone does not tell (a Matroska live stream, NUT, raw H.264 or HEVC has none), nor the flag alone (mpv sets it for a one-frame Matroska video and for one HEVC or AV1 frame in MP4).
+fn picture(format: &str, length: Option<f64>, image: bool) -> bool {
     let mp4 = format.split(',').next() == Some("mov");
-    format.ends_with("_pipe")
-        || matches!(
-            format,
-            "image2" | "image2pipe" | "alias_pix" | "brender_pix" | "fits" | "gif" | "ico" | "mf"
-        )
+    let flagged =
+        format.ends_with("_pipe") || matches!(format, "image2pipe" | "alias_pix" | "gif" | "ico");
+    flagged && image
+        || matches!(format, "image2" | "brender_pix" | "fits" | "mf")
         || mp4 && !length.is_some_and(|length| length > 0.0)
 }
 
@@ -1105,7 +1104,8 @@ impl Mpv {
                 }
                 // mpv holds the frame of a one-frame stream without sound for image-display-duration, 0: a one-frame video ends after its frame, with a length or without one (a Matroska live stream, NUT, raw H.264 or HEVC); a picture stays until `q`; set and waited for, as mpv may reorder an asynchronous request after the play
                 let length = self.get(c"duration").and_then(|length| length.parse().ok());
-                self.still = picture(&format, length);
+                let image = self.get(c"current-tracks/video/image");
+                self.still = picture(&format, length, image.as_deref() == Some("yes"));
                 if self.still {
                     self.option("image-display-duration", "inf");
                 }
@@ -3698,7 +3698,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A picture of the stage named `name`: a PNG of the quadrants, the golden HEIC, or the quadrants as X-Face (48 x 48, which mpv knows by the suffix alone).
+    /// A picture of the stage named `name`: the quadrants as PNG or GIF, the golden HEIC, or the quadrants as X-Face (48 x 48, which mpv knows by the suffix alone).
     fn still(stage: &Stage, name: &str) -> PathBuf {
         let file = stage.file(name);
         let mut args = vec!["-f", "lavfi", "-i", QUADRANTS, "-frames:v", "1"];
@@ -3721,9 +3721,9 @@ pub(crate) mod tests {
 
     #[test]
     fn a_step_on_a_picture_only_pauses() {
-        // rows P15, N7: a picture mpv holds until `q` (N7) has one frame, its first and its last, where `.` and `,` only pause, from playing or paused, and the requests after them go: a grab comes back; mpv's own step plays on there, waiting for a frame after the picture's, and its end never comes (image-display-duration inf); seen before the fix: a step forward still under way 5 s on and every request held behind it, PNG, HEIC and X-Face alike (the review's probe: 3 of 3 in 2 runs)
+        // rows P15, N7: a picture mpv holds until `q` (N7) has one frame, its first and its last, where `.` and `,` only pause, from playing or paused, and the requests after them go: a grab comes back; mpv's own step plays on there, waiting for a frame after the picture's, and its end never comes (image-display-duration inf); seen before the fix: a step forward still under way 5 s on and every request held behind it, PNG, HEIC and X-Face alike (the review's probe: 3 of 3 in 2 runs); a GIF of one frame is a picture too, through FFmpeg's `gif` demuxer, which mpv flags an image at one frame
         let mut wrong = Vec::new();
-        for name in ["still.png", "still.heic", "still.xface"] {
+        for name in ["still.png", "still.heic", "still.xface", "still.gif"] {
             let mut stage = Stage::new();
             let file = still(&stage, name);
             stage.open(&file);
@@ -3762,6 +3762,30 @@ pub(crate) mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn an_animated_gif_steps_frame_by_frame() {
+        // rows P15, V17: an animated GIF plays as video (V17) through FFmpeg's `gif` demuxer, as a GIF of one frame opens, but mpv flags its track no image (demux_lavf.c is_image: one frame at most): `.` from a pause takes it one frame on, as on any clip; seen before the fix: frame 0 after each of three steps, the GIF taken for a picture by its demuxer alone, where a step only pauses (the review's probe on a 30-frame counter GIF)
+        let mut stage = Stage::new();
+        let file = stage.file("anim.gif");
+        let picture = format!("nullsrc=s=160x120:r=10:d=3,{COUNTER}");
+        let gray = ["-pix_fmt", "gray", file.to_str().unwrap()];
+        ffmpeg(&[&["-f", "lavfi", "-i", &picture][..], &gray].concat());
+        assert_eq!(stage.open(&file), (true, false));
+        stage.settle();
+        let mut steps = vec![(stage.shown.last().copied(), stage.time)];
+        for _ in 0..3 {
+            stage.mpv.step(true);
+            let done = idle(&mut stage, 10.0);
+            stage.settle();
+            steps.push((stage.shown.last().copied().filter(|_| done), stage.time));
+        }
+        let frames: Vec<_> = steps.iter().map(|(number, _)| *number).collect();
+        assert_eq!(frames, [0, 1, 2, 3].map(Some), "{steps:?}");
+        let timed =
+            |(n, (_, time)): (usize, &(Option<usize>, f64))| near(*time, n as f64 * 0.1, 0.001);
+        assert!(steps.iter().enumerate().all(timed), "{steps:?}");
     }
 
     #[test]
