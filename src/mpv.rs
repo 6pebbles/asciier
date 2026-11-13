@@ -76,6 +76,8 @@ pub struct Mpv {
     end: Option<f64>,
     /// Requests to pause or play that mpv has not confirmed, held ones too: its reports of `pause` until then can be older than them.
     pausing: u32,
+    /// mpv restarts playback, after the file's load or a seek, until `MPV_EVENT_PLAYBACK_RESTART`: meanwhile it holds back a seek asked within 0.3 s of the last one's start (player/playloop.c, execute_queued_seek), whose mark then comes before it runs.
+    restarting: bool,
     /// The frame of a grab whose time mpv has not given yet.
     taken: Option<Option<RgbImage>>,
     /// A new position comes with a new frame, but past the picture's end, where the sound plays on: `seen`, the position given with the last new frame (`None` while it is to come), and mpv's count of frames let go untaken then; `prev`, the same of the frame before; `base`, that position, or the position at the last look in which mpv had let frames go, and the count then; `first`, the first position of the look under way.
@@ -115,10 +117,11 @@ enum Op {
 /// A request mpv runs over passes, until it is done; then mpv's position is read, and the next request goes.
 #[derive(Debug)]
 enum Busy {
-    /// A seek, or mpv's step back: done once playback restarts after mpv ran it (`ran`, `MPV_EVENT_SEEK`), or at its mark when mpv ran none (it drops a seek it cannot do). `target`: where it aims, when known (absolute, or relative to a paused position); `anchor`: an `Op::Anchor`; `from`: the frame a step forward on a playing clip left, which a step back then seeks to.
+    /// A seek, or mpv's step back: done once playback restarts after mpv ran it (`ran`, `MPV_EVENT_SEEK`), or at its mark when mpv ran none and restarts nothing (it drops a seek it cannot do); a mark that comes while mpv restarts (`waits`) is set again once it has. `target`: where it aims, when known (absolute, or relative to a paused position); `anchor`: an `Op::Anchor`; `from`: the frame a step forward on a playing clip left, which a step back then seeks to.
     Seek {
         mark: i64,
         ran: bool,
+        waits: bool,
         settling: bool,
         target: Option<f64>,
         anchor: bool,
@@ -478,6 +481,7 @@ impl Mpv {
             tail: false,
             end: None,
             pausing: 0,
+            restarting: true,
             taken: None,
             seen: None,
             prev: None,
@@ -553,6 +557,7 @@ impl Mpv {
         // mpv reads a relative name as it likes: `-` is standard input
         let file = std::path::absolute(file)?;
         self.pause(true);
+        self.restarting = true;
         self.send(
             0,
             &[
@@ -783,6 +788,7 @@ impl Mpv {
         self.busy = Some(Busy::Seek {
             mark,
             ran: false,
+            waits: false,
             settling: false,
             target,
             anchor,
@@ -1070,6 +1076,7 @@ impl Mpv {
                 None
             }
             SEEK => {
+                self.restarting = true;
                 match &mut self.busy {
                     Some(Busy::Seek { ran, .. }) => *ran = true,
                     // a seek of mpv's own, a loop's: a step under way ends there, paused
@@ -1084,15 +1091,27 @@ impl Mpv {
                 None
             }
             PLAYBACK_RESTART => {
-                if let Some(Busy::Seek {
-                    ran: true,
-                    settling,
-                    ..
-                }) = &mut self.busy
-                    && !*settling
-                {
-                    *settling = true;
-                    self.settle();
+                self.restarting = false;
+                match &mut self.busy {
+                    Some(Busy::Seek {
+                        ran: true,
+                        settling,
+                        ..
+                    }) if !*settling => {
+                        *settling = true;
+                        self.settle();
+                    }
+                    // its mark came while mpv held the seek back: mpv now runs it, or has dropped it
+                    Some(Busy::Seek {
+                        ran: false,
+                        waits: waits @ true,
+                        mark,
+                        ..
+                    }) => {
+                        (*waits, *mark) = (false, self.marks + 1);
+                        self.set_mark(self.marks + 1);
+                    }
+                    _ => {}
                 }
                 None
             }
@@ -1145,16 +1164,22 @@ impl Mpv {
                 Some(Event::Time(time))
             }
             _ if name == MARK.to_bytes() => {
-                // mpv ran a pass past the request under way: a seek it did not run it dropped; whether a step forward is done, a read of `pause` tells
+                // mpv ran a pass past the request under way: a seek it did not run it dropped, unless it holds it back while it restarts; whether a step forward is done, a read of `pause` tells
+                let restarting = self.restarting;
                 match &mut self.busy {
                     Some(Busy::Seek {
                         mark,
                         ran: false,
+                        waits,
                         settling,
                         ..
                     }) if whole == Some(*mark) && !*settling => {
-                        *settling = true;
-                        self.settle();
+                        if restarting {
+                            *waits = true;
+                        } else {
+                            *settling = true;
+                            self.settle();
+                        }
                     }
                     Some(Busy::Step {
                         mark,
@@ -2584,6 +2609,68 @@ pub(crate) mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn a_seek_mpv_holds_back_while_it_restarts_ends_once_it_ran() {
+        // rows P9, P15: mpv holds a seek back while it restarts after a load or a seek begun under 0.3 s before (MPSEEK_FLAG_DELAY in execute_queued_seek of player/playloop.c), and the seek's mark then comes before it runs: the seek passed for one mpv dropped, its position read before it ran; mpv's clock starts with a process's first instance, so the probes run alone, each in a process of its own; seen before the fix: a seek to 1 s and a step back right after the first open ended on frame 248 at 9.92 s (the step back took the last-frame path), and a seek and a step forward on 25, the step lost
+        let mut wrong = Vec::new();
+        for probe in ["back", "forward"] {
+            let name = format!("mpv::tests::the_first_open_then_a_seek_and_a_step_{probe}");
+            let run = Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", "--exact", &name])
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&run.stdout);
+            if !(run.status.success() && said.contains("1 passed")) {
+                wrong.push(format!("{probe}: {said}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// A seek to 1 s and a step right after the process's first mpv opened a clip: on frame `number` at `time`, paused, and staying so.
+    fn first_open_then(forward: bool, number: usize, time: f64) {
+        let dir = Scratch::new();
+        let file = dir.0.join("first.mp4");
+        let picture = format!("nullsrc=s=160x120:r=25:d=10,{COUNTER}");
+        let mut args = vec![
+            "-f",
+            "lavfi",
+            "-i",
+            &picture,
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=d=10",
+        ];
+        args.extend(["-c:a", "aac"]);
+        args.extend(H264);
+        args.push(file.to_str().unwrap());
+        ffmpeg(&args);
+        let mut stage = Stage::new();
+        stage.open(&file);
+        stage.mpv.seek(&["seek", "1", "absolute+exact"]);
+        stage.mpv.step(forward);
+        let done = idle(&mut stage, 10.0);
+        let there = stage.reach(number, time, 2.0);
+        let on = (stage.shown.last().copied(), stage.time, stage.mpv.paused);
+        assert!(
+            done && there && stage.holds(0.3) && stage.mpv.paused,
+            "{on:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "a probe that `a_seek_mpv_holds_back_while_it_restarts_ends_once_it_ran` runs in a process of its own"]
+    fn the_first_open_then_a_seek_and_a_step_back() {
+        first_open_then(false, 24, 0.96);
+    }
+
+    #[test]
+    #[ignore = "a probe that `a_seek_mpv_holds_back_while_it_restarts_ends_once_it_ran` runs in a process of its own"]
+    fn the_first_open_then_a_seek_and_a_step_forward() {
+        first_open_then(true, 26, 1.04);
     }
 
     #[test]
