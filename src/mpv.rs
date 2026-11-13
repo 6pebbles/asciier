@@ -2621,7 +2621,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_frame_let_go_during_a_step_on_the_last_frame_moves_nothing() {
-        // rows P15, N21: mpv reports a frame it let go untaken a little after it; under load one let go before a step on the last frame was reported during the step, which then passed for one that moved, and `,` after it sought to where the step started, the same frame (seen with three playback groups at once, the count going 7 to 8); here the count rises by one during the step, which goes at once, the seek before it done (held behind the seek, the step took the risen count for its start: with a count that rose taken for a move this test passed 3 of 3 in review); seen with a count that rose taken for a move: frame 49 at 1.77 after `,`
+        // rows P15, N2: mpv reports a frame it let go untaken a little after it; under load one let go before a step on the last frame was reported during the step, which then passed for one that moved, and `,` after it sought to where the step started, the same frame (seen with three playback groups at once, the count going 7 to 8); here the count rises by one during the step, which goes at once, the seek before it done (held behind the seek, the step took the risen count for its start: with a count that rose taken for a move this test passed 3 of 3 in review); seen with a count that rose taken for a move: frame 49 at 1.77 after `,`
         let mut stage = Stage::new();
         stage.clip(2.0, 6.0);
         stage.mpv.seek(&["seek", "1.96", "absolute+exact"]);
@@ -2885,7 +2885,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_step_whose_frame_waits_for_the_one_before_is_done_once_mpv_ran_it() {
-        // rows P15, N5: `..,` from frame 25, the first step's frame left untaken for 150 ms, inside the 200 ms mpv waits for it: the second step's frame waits for it, so that step's mark comes before mpv has run it, while `pause` still reads paused from the first; every report of `pause` during a step comes after its mark, as mpv hands them round-robin; the step is done once a read of `pause` after its mark says paused, or at the next report of a pause after it said playing; seen with the rule before the fix (done at the mark when paused, else at the next report of a pause): frame 248 at 9.92, the clip's end, for 26 at 1.04 (the review's probe: 36 of 36 rounds)
+        // row P15: `..,` from frame 25, the first step's frame left untaken for 150 ms, inside the 200 ms mpv waits for it: the second step's frame waits for it, so that step's mark comes before mpv has run it, while `pause` still reads paused from the first; every report of `pause` during a step comes after its mark, as mpv hands them round-robin; the step is done once a read of `pause` after its mark says paused, or at the next report of a pause after it said playing; seen with the rule before the fix (done at the mark when paused, else at the next report of a pause): frame 248 at 9.92, the clip's end, for 26 at 1.04 (the review's probe: 36 of 36 rounds)
         let mut stage = Stage::new();
         stage.clip(10.0, 10.0);
         let mut wrong = Vec::new();
