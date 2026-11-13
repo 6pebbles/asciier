@@ -461,7 +461,7 @@ fn a_step_back_soon_after_a_step_onto_the_last_frame_shows_the_frame_before() {
 
 #[test]
 fn a_seek_and_a_step_in_one_write_end_paused_as_the_old_viewer_left_them() {
-    // rows P9, P15, N5: seek_to and frame_step of bin/ascii-viewer:1423 and :1441 at tag python-final did each key before the next; run in this harness, read on the screen (the frame `s` takes, after the keys, is mpv's, N5: the old viewer's `s` took 150 for `l.`), paused on frame 25, the old viewer showed `l.` and `.l` 151, `l,` and `,l` 149, `..,` 26, paused; seen before the fix: `l.` and `.l` played on to the clip's end with the mark `|` and the run going on there, `l,` 24, `,l` 125, `..,` 24
+    // rows P9, P15, N5: seek_to and frame_step of bin/ascii-viewer:1423 and :1441 at tag python-final did each key before the next; run in this harness, read on the screen (the frame `s` takes, after the keys, is mpv's, N5: the old viewer's `s` took 150 for `l.`), paused on frame 25, the old viewer showed `l.` and `.l` 151, `l,` and `,l` 149, `..,` 26, `....` 29, paused; seen before the fix: `l.` and `.l` played on to the clip's end with the mark `|` and the run going on there, `l,` 24, `,l` 125, `..,` 24; `....` and `s`, a step taken for done at its mark before mpv had run it: `s` took 28 (the review's trace under load: 2 of 10 copies)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 20.0, 20.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
@@ -473,6 +473,7 @@ fn a_seek_and_a_step_in_one_write_end_paused_as_the_old_viewer_left_them() {
         (b"l,", 149, "| 00:05"),
         (b",l", 149, "| 00:05"),
         (b"..,", 26, "| 00:01"),
+        (b"....", 29, "| 00:01"),
     ] {
         lands(&mut tty, DOWN, 0, "| 00:00");
         lands(&mut tty, SHIFT_RIGHT, 25, "| 00:01");

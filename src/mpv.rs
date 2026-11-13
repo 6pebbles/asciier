@@ -124,10 +124,11 @@ enum Busy {
         anchor: bool,
         from: Option<f64>,
     },
-    /// A step forward: done once mpv has reported its mark and is paused again. `from`: the position it left, paused there when `rested`.
+    /// A step forward. mpv hands property changes over round-robin, from where its last scan stopped, so the mark can come before the step's own report of `pause=no`: once it has, `pause` is read (`asked`, after mpv began the step); paused, the step is done; playing (`running`), it is done at the next report of a pause. `from`: the position it left, paused there when `rested`.
     Step {
         mark: i64,
-        marked: bool,
+        asked: bool,
+        running: bool,
         settling: bool,
         from: f64,
         rested: bool,
@@ -244,6 +245,8 @@ const PAUSE: u64 = 2;
 const OP: u64 = 3;
 /// `reply_userdata` of the position read once a request is done.
 const SETTLED: u64 = 4;
+/// `reply_userdata` of the `pause` read once a step's mark is reported.
+const STEPPED: u64 = 5;
 
 type Callback = extern "C" fn(*mut c_void);
 
@@ -353,6 +356,15 @@ fn double(reply: &RawEvent) -> Option<f64> {
     unsafe {
         let property = &*(reply.data as *const Property);
         (reply.error >= 0 && property.format == DOUBLE).then(|| *(property.data as *const f64))
+    }
+}
+
+/// The value of a `GET_PROPERTY_REPLY` asked for as a flag; `None` on an error.
+fn flag(reply: &RawEvent) -> Option<bool> {
+    // SAFETY: as in `double`.
+    unsafe {
+        let property = &*(reply.data as *const Property);
+        (reply.error >= 0 && property.format == FLAG).then(|| *(property.data as *const c_int) != 0)
     }
 }
 
@@ -714,23 +726,7 @@ impl Mpv {
                     *from = Some(on);
                 }
             }
-            Op::Step => {
-                let rested = self.paused && self.pausing == 0;
-                let mark = self.marks + 1;
-                self.fresh = false;
-                self.busy = Some(Busy::Step {
-                    mark,
-                    marked: false,
-                    settling: false,
-                    from: self.time,
-                    rested,
-                });
-                if !self.order(OP, &["frame-step"]) {
-                    self.busy = None;
-                    return self.next();
-                }
-                self.set_mark(mark);
-            }
+            Op::Step => self.frame_step(self.paused && self.pausing == 0),
             Op::Grab => {
                 let asked = self.send(GRAB, &[c"screenshot-raw".into(), c"video".into()])
                     // SAFETY: the name lives through the call.
@@ -742,6 +738,25 @@ impl Mpv {
                 }
             }
         }
+    }
+
+    /// mpv's step forward, under way until mpv has done it; `rested`: from a pause.
+    fn frame_step(&mut self, rested: bool) {
+        let mark = self.marks + 1;
+        self.fresh = false;
+        self.busy = Some(Busy::Step {
+            mark,
+            asked: false,
+            running: false,
+            settling: false,
+            from: self.time,
+            rested,
+        });
+        if !self.order(OP, &["frame-step"]) {
+            self.busy = None;
+            return self.next();
+        }
+        self.set_mark(mark);
     }
 
     /// Pause or play now; a play forgets where a step forward started.
@@ -1026,6 +1041,24 @@ impl Mpv {
                 ))
             }
             GET_PROPERTY_REPLY if event.userdata == SETTLED => self.settled(double(event)),
+            // `pause` as it was once mpv began the step under way: paused, it is done; playing, a report of the pause comes when it is, as one of the play went before this read
+            GET_PROPERTY_REPLY if event.userdata == STEPPED => {
+                let paused = flag(event).unwrap_or(true);
+                if let Some(Busy::Step {
+                    running, settling, ..
+                }) = &mut self.busy
+                    && !*settling
+                {
+                    if paused {
+                        *settling = true;
+                        self.paused = true;
+                        self.settle();
+                    } else {
+                        *running = true;
+                    }
+                }
+                None
+            }
             SET_PROPERTY_REPLY if event.userdata == PAUSE => {
                 self.pausing = self.pausing.saturating_sub(1);
                 None
@@ -1088,7 +1121,7 @@ impl Mpv {
                 // a step forward plays until its frame: the viewer holds it paused
                 let stepping = matches!(self.busy, Some(Busy::Step { .. }));
                 if let Some(Busy::Step {
-                    marked: true,
+                    running: true,
                     settling,
                     ..
                 }) = &mut self.busy
@@ -1112,7 +1145,7 @@ impl Mpv {
                 Some(Event::Time(time))
             }
             _ if name == MARK.to_bytes() => {
-                // mpv ran a pass past the request under way: a seek it did not run it dropped; a step forward is done once mpv is paused again
+                // mpv ran a pass past the request under way: a seek it did not run it dropped; whether a step forward is done, a read of `pause` tells
                 match &mut self.busy {
                     Some(Busy::Seek {
                         mark,
@@ -1125,12 +1158,16 @@ impl Mpv {
                     }
                     Some(Busy::Step {
                         mark,
-                        marked,
+                        asked,
                         settling,
                         ..
-                    }) if whole == Some(*mark) && !*settling => {
-                        *marked = true;
-                        if self.paused {
+                    }) if whole == Some(*mark) && !*asked && !*settling => {
+                        *asked = true;
+                        // SAFETY: the name lives through the call.
+                        let read = unsafe {
+                            mpv_get_property_async(self.handle, STEPPED, c"pause".as_ptr(), FLAG)
+                        };
+                        if read < 0 {
                             *settling = true;
                             self.settle();
                         }
@@ -1610,6 +1647,65 @@ pub(crate) mod tests {
         fn play_to(&mut self, time: f64) {
             self.mpv.set("pause", "no");
             self.pump(5.0, |e| matches!(e, Event::Time(t) if *t >= time));
+        }
+
+        /// `pump` for `seconds`, every frame drawn and marked shown as the viewer does, but with mpv's reports of `pause` that come while a step forward waits for its mark handed over after the mark, as mpv hands them when its round-robin scan of the properties stopped between the two (seen in a traced viewer under load: the mark, then the step's `pause=no`); the `Grabbed` events.
+        fn pump_mark_first(&mut self, seconds: f64) -> Vec<Event> {
+            let (start, mut held, mut grabbed) = (Instant::now(), Vec::new(), Vec::new());
+            while start.elapsed().as_secs_f64() < seconds {
+                let mpv = &mut self.mpv;
+                let mut events = std::mem::take(&mut mpv.reported);
+                loop {
+                    // SAFETY: mpv keeps the event until the next wait.
+                    let event = unsafe { &*mpv_wait_event(mpv.handle, 0.0) };
+                    if event.id == EVENT_NONE {
+                        break;
+                    }
+                    // SAFETY: the data of a property change is an `mpv_event_property`; `pause` is observed as a flag.
+                    let (name, value) = match event.id {
+                        PROPERTY_CHANGE => unsafe {
+                            let property = &*(event.data as *const Property);
+                            let value =
+                                (property.format == FLAG).then(|| *(property.data as *const c_int));
+                            (Some(CStr::from_ptr(property.name).to_bytes()), value)
+                        },
+                        _ => (None, None),
+                    };
+                    let waiting = matches!(mpv.busy, Some(Busy::Step { asked: false, .. }));
+                    if let (Some(b"pause"), Some(value), true) = (name, value, waiting) {
+                        held.push(value);
+                        continue;
+                    }
+                    events.extend(mpv.report(event));
+                    if name == Some(MARK.to_bytes()) {
+                        for mut value in held.drain(..) {
+                            let pause = Property {
+                                name: c"pause".as_ptr(),
+                                format: FLAG,
+                                data: &mut value as *mut c_int as *const c_void,
+                            };
+                            events.extend(mpv.changed(&pause));
+                        }
+                    }
+                }
+                // SAFETY: the context is valid while not null.
+                let due = unsafe { mpv_render_context_update(mpv.render) } & UPDATE_FRAME != 0;
+                if due {
+                    let first = mpv.first.take();
+                    mpv.count(first.map(|_| mpv.time));
+                    self.draw();
+                    self.mpv.shown();
+                }
+                for event in events {
+                    match event {
+                        Event::Time(time) => self.time = time,
+                        Event::Grabbed(..) => grabbed.push(event),
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            grabbed
         }
     }
 
@@ -2445,6 +2541,46 @@ pub(crate) mod tests {
             if !(done && there && stage.holds(0.3)) {
                 let on = (stage.shown.last(), stage.time);
                 wrong.push(format!("{gap} s apart: {on:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn a_step_is_done_once_mpv_is_paused_after_it_whatever_it_reports_first() {
+        // rows P15, N5: mpv hands property changes over round-robin from where its last scan stopped, so the mark behind a step forward can come before the step's `pause=no`, while `pause` still reads as before the step; a step then passed for done at its mark, before mpv had run it, and read the position it left (the review's trace under load: `..,` typed apart from frame 25 ended on 498, `....s` took 28); here every report of `pause` during a step comes after its mark; seen in this test before the fix: four steps and `s` from frame 25 ended on 28 and `s` took 28, 3 of 3
+        let mut stage = Stage::new();
+        stage.clip(10.0, 10.0);
+        let mut wrong = Vec::new();
+        for round in 0..3 {
+            stage.mpv.seek(&["seek", "1", "absolute+exact"]);
+            assert!(stage.reach(25, 1.0, 10.0), "{round}");
+            for _ in 0..4 {
+                stage.mpv.step(true);
+            }
+            stage.mpv.grab();
+            let mut grabbed = Vec::new();
+            let start = Instant::now();
+            while grabbed.is_empty() && start.elapsed() < Duration::from_secs(10) {
+                grabbed = stage.pump_mark_first(0.01);
+            }
+            let done = (0..1000).any(|_| {
+                stage.pump_mark_first(0.01);
+                stage.mpv.busy.is_none() && stage.mpv.held.is_empty()
+            });
+            let taken = match grabbed.first() {
+                Some(Event::Grabbed(Some(picture), time)) => {
+                    Some((number(picture.as_raw(), 160, 120), *time))
+                }
+                _ => None,
+            };
+            let there = stage.shown.last() == Some(&29) && near(stage.time, 1.16, 0.0005);
+            let named = taken.is_some_and(|(number, time)| {
+                number == 29 && time.is_some_and(|time| near(time, 1.16, 0.0005))
+            });
+            if !(done && there && named && stage.mpv.paused) {
+                let on = (stage.shown.last(), stage.time, stage.mpv.paused);
+                wrong.push(format!("round {round}: {on:?}, `s` took {taken:?}"));
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
