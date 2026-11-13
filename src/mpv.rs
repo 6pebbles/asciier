@@ -1055,7 +1055,9 @@ impl Mpv {
         // the position of a frame comes with it or in the next look
         let first = self.first.take();
         let new = due && self.count(first.map(|_| self.time));
-        events.extend(self.ahead.take().map(Event::Time));
+        // a frame's time found at a render goes in the next look, unless a seek, a step, a pause or a speed came between
+        let ahead = self.ahead.take().filter(|_| self.stamp.is_some());
+        events.extend(ahead.map(Event::Time));
         if let (false, Some(first)) = (new, first) {
             if self.seen.is_none() && !self.doubt {
                 self.seen = Some((first, self.drops));
@@ -3476,6 +3478,18 @@ pub(crate) mod tests {
             apart.len() > 5 && worst < 0.1,
             "frame and frame less clock: {apart:?}"
         );
+    }
+
+    #[test]
+    fn a_frame_time_found_before_a_seek_goes_unused() {
+        // rows P16, N26: a frame's time found at a render, mpv holding its report back, goes in the next look; a seek asked between puts the frame drawn before it out of date, and the clock went to that frame's time while the seek ran (by code reading); here such a time is found, then a seek goes, and the look after it gives no time of its own
+        let mut stage = Stage::new();
+        stage.clip(4.0, 4.0);
+        stage.settle();
+        stage.mpv.ahead = Some(3.0);
+        stage.mpv.seek(&["seek", "1", "absolute+exact"]);
+        let events = stage.mpv.events();
+        assert!(!events.contains(&Event::Time(3.0)), "{events:?}");
     }
 
     #[test]
