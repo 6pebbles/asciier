@@ -1480,7 +1480,7 @@ mod tests {
 
     #[test]
     fn a_gif_reaches_as_far_as_its_first_frame() {
-        // rows S18, S8a, S8: Pillow 13 grows a GIF to its first frame's extent and holds that to the limit (GifImagePlugin _seek, _decompression_bomb_check; seen 2026-11-13, Pillow 13.0.0 through lib/ascii_image.py): on a screen of 8 x 8 px, a first frame of 65288 x 65535 px, of 8 x 8 px at (60000, 60000), or reaching one row past 12470 x 14351 px is too large to open, and identifies (lib/ascii_image.py:76), also behind blocks the decoder refuses and with the file ended before the frame's flags, as is a screen over the limit; one reaching to the limit opens; the decoder knows the screen's size alone and allocates the frame whole, 17 GB for this file of 54 bytes; Pillow measures a file once it has read its first frame: a screen over the limit whose first frame is cut short, and a PNG over it whose acTL is, are refused, no picture to identify
+        // rows S18, S8a, S8: Pillow 13 grows a GIF to its first frame's extent and holds that to the limit (GifImagePlugin _seek, _decompression_bomb_check; seen 2026-11-13, Pillow 13.0.0 through lib/ascii_image.py): on a screen of 8 x 8 px, a first frame of 65288 x 65535 px, of 8 x 8 px at (60000, 60000), or reaching one row past 12470 x 14351 px is too large to open, and identifies (lib/ascii_image.py:76), also behind blocks the decoder refuses and with the file ended before the frame's flags, as is a screen over the limit; one reaching to the limit opens; the decoder knows the screen's size alone and allocates the frame whole, 17 GB for this file of 54 bytes; Pillow measures a file once it has read its first frame: a screen over the limit whose first frame is cut short, and a PNG over it whose acTL is, are refused, no picture to identify; so is a file named .gif without GIF's signature (seen 2026-11-13, Pillow 13.0.0), which is not read by its blocks, though read as a GIF its first frame or its screen is over the limit
         let dir = Dir::new("gif_extent");
         assert_eq!(12470 * 14351, MAX_PIXELS);
         for (name, frame) in [
@@ -1525,6 +1525,16 @@ mod tests {
         let cut = dir.file("cut.gif", cut);
         assert_eq!(kind(&cut), "no image");
         assert!(!identifies(&cut));
+        for (name, screen, frame) in [
+            ("unsigned.gif", (8, 8), big.clone()),
+            ("unsigned-screen.gif", (20000, 20000), gif_frame(0, 0, 8, 8)),
+        ] {
+            let mut file = gif_of(screen, &[&frame]);
+            file[3..6].copy_from_slice(b"00a"); // GIF00a
+            let file = dir.file(name, file);
+            let seen = (kind(&file), identifies(&file));
+            assert_eq!(seen, ("no image", false), "{name}");
+        }
         let actl = png_chunks(&[
             (b"IHDR", ihdr(20000, 20000, 8, 2)),
             (b"acTL", 1u32.to_be_bytes().to_vec()),
