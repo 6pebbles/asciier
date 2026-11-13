@@ -174,7 +174,7 @@ fn saved(path: &Path) -> (u32, (u32, u32)) {
 
 #[test]
 fn frames_come_at_the_clips_rate_and_the_end_quits() {
-    // rows P2, P14: play_rate and run of bin/ascii-viewer:431 and :2386 at tag python-final: 25 frames a second, exit 0 at the end, past the clip's 3 s; run in this harness the old viewer drew all 25 frames of each second
+    // rows P2, P14, P16, N26: play_rate and run of bin/ascii-viewer:431 and :2386 at tag python-final: 25 frames a second, exit 0 at the end, past the clip's 3 s; run in this harness the old viewer drew all 25 frames of each second; the status row's bar, room x position / length cells, shows the time of the frame on screen (N26)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 3.0, 3.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
@@ -187,7 +187,18 @@ fn frames_come_at_the_clips_rate_and_the_end_quits() {
         took > 2.5 && took < 10.0,
         "ended {took:.2} s into the clip, from frame {from}"
     );
-    // no check of each frame against the clock drawn with it: under N26 both are mpv's, reported apart, and under load one ran ahead of the other either way (a mixed-load run drew frame 47 under 00:02, one with three of this file's runs at once frame 55 under 00:01); the_clock_stands_with_the_frame_held_through_a_gap pins the clock
+    // each draw: the clock by the bar (3/64 s a cell) against the frame it shows, outside the clip's last 0.5 s, where the clock is the sound's past the last frame drawn (seen: frame 70 under the whole bar); frame less clock seen from -0.14 to +0.02 s in 28 runs at load 19 to 48, and from -0.08 to +0.02 s in 38 runs at load 30 to 55 in review
+    let rows = replay(&tty.out(), SMALL, |screen| (screen.row(24), frame(screen)));
+    for (row, number) in &rows {
+        let time = *number as f64 / 25.0;
+        if seconds(row).is_some() && time < 2.5 {
+            let clock = bar_time(row, 80, 3.0);
+            assert!(
+                (time - clock).abs() < 0.3,
+                "frame {number} ({time:.2} s) drawn at {clock:.2} s: {row:?}"
+            );
+        }
+    }
     let drawn = drawn(&tty.out());
     // no more frames than the clip's own: a debug build among the other tests drew 1 to 25 of a second's 25, as loaded as the machine was
     let second = frames_in(&drawn, 1);
