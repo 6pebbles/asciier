@@ -7,9 +7,9 @@ use image::RgbImage;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io::Read;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Output, Stdio};
@@ -424,6 +424,60 @@ struct Running {
     out: Arc<Mutex<Vec<u8>>>,
     err: Arc<Mutex<Vec<u8>>>,
     readers: Vec<JoinHandle<()>>,
+    /// The sandbox's folder, its device and inode: the converter works in it, and so does every process it starts.
+    folder: (u64, u64),
+}
+
+/// A process held by a pidfd: a signal through it reaches that process alone, also once its pid is free for another.
+struct Pinned {
+    pid: libc::pid_t,
+    fd: OwnedFd,
+}
+
+impl Pinned {
+    /// Process `pid`, held, when it runs and works in `folder` (device and inode): its folder read once it is held, so the folder is its own.
+    fn working_in(pid: libc::pid_t, folder: (u64, u64)) -> Option<Pinned> {
+        let here = || {
+            std::fs::metadata(format!("/proc/{pid}/cwd"))
+                .is_ok_and(|cwd| (cwd.dev(), cwd.ino()) == folder)
+        };
+        if !here() {
+            return None;
+        }
+        // SAFETY: pidfd_open takes a pid and flags, no memory.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: the descriptor just opened, owned by nothing else.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd as RawFd) };
+        let pinned = Pinned { pid, fd };
+        (here() && pinned.running()).then_some(pinned)
+    }
+
+    /// Whether it has not ended: its pidfd turns readable at the end.
+    fn running(&self) -> bool {
+        let mut poll = libc::pollfd {
+            fd: self.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd, owned here, no waiting.
+        unsafe { libc::poll(&mut poll, 1, 0) != 1 }
+    }
+
+    fn signal(&self, signal: libc::c_int) {
+        // SAFETY: a signal through the pidfd this holds, no siginfo.
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.fd.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+    }
 }
 
 impl Running {
@@ -471,11 +525,13 @@ impl Running {
             collect(Box::new(child.stdout.take().unwrap()), &out),
             collect(Box::new(child.stderr.take().unwrap()), &err),
         ];
+        let folder = std::fs::metadata(&sandbox.dir).unwrap();
         Running {
             child,
             out,
             err,
             readers,
+            folder: (folder.dev(), folder.ino()),
         }
     }
 
@@ -504,16 +560,22 @@ impl Running {
         }
     }
 
-    /// Its end within `PATIENCE`, and its output to the end (children holding its pipes gone too): how it ended, stdout, stderr.
-    fn finish(mut self) -> (ExitStatus, String, String) {
+    /// Its end within `PATIENCE`: how it ended.
+    fn ended(&mut self) -> ExitStatus {
         let end = Instant::now() + PATIENCE;
-        let status = loop {
+        loop {
             if let Some(status) = self.child.try_wait().unwrap() {
-                break status;
+                return status;
             }
             assert!(Instant::now() < end, "still running: {:?}", self.err());
             std::thread::sleep(Duration::from_millis(10));
-        };
+        }
+    }
+
+    /// Its end within `PATIENCE`, and its output to the end (children holding its pipes gone too): how it ended, stdout, stderr.
+    fn finish(mut self) -> (ExitStatus, String, String) {
+        let end = Instant::now() + PATIENCE;
+        let status = self.ended();
         while !self.readers.iter().all(JoinHandle::is_finished) {
             assert!(
                 Instant::now() < end,
@@ -528,46 +590,36 @@ impl Running {
 }
 
 impl Drop for Running {
-    /// After a test that failed part-way: the converter's group and the ffmpeg it started in sessions of their own, ended by SIGTERM, and by SIGKILL what is left of them after 5 s. SIGTERM first lets the old tools' converter end its pool: its multiprocessing resource tracker, in the group, ignores SIGTERM and unlinks the pool's semaphores in /dev/shm once the rest is gone, where SIGKILL left them behind.
+    /// After a test that failed part-way, or a run dropped while it ran: every process that works in the sandbox's folder (the converter, the ffmpeg it started in sessions of their own, the wrappers, the old converter's pool) ended by SIGTERM, and by SIGKILL what is left of them after 5 s; each held by a pidfd once its folder is seen, so no signal reaches a process that took its pid. SIGTERM first lets the old tools' converter end its pool: its multiprocessing resource tracker ignores SIGTERM and unlinks the pool's semaphores in /dev/shm once the rest is gone, where SIGKILL left them behind. A run that ended while its test goes on is left as it is: what it left running is the test's to see (await_gone).
     fn drop(&mut self) {
-        if let Ok(None) = self.child.try_wait() {
-            let pid = self.child.id() as libc::pid_t;
-            let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
-                .unwrap_or_default();
-            // a child's own session group, the child, the group the converter leads
-            let targets: Vec<libc::pid_t> = children
-                .split_whitespace()
-                .flat_map(str::parse::<libc::pid_t>)
-                .flat_map(|child| [-child, child])
-                .chain([-pid])
-                .collect();
-            // SAFETY: a signal (0: none, a test of being there) to a group or process found above, the converter not reaped yet or its group not empty.
-            let send = |target: libc::pid_t, signal| unsafe { libc::kill(target, signal) == 0 };
-            for &target in &targets {
-                send(target, libc::SIGTERM);
-            }
-            let end = Instant::now() + Duration::from_secs(5);
-            let mut ended = None;
-            loop {
-                ended = ended.or(self.child.try_wait().ok().flatten());
-                let left: Vec<libc::pid_t> = targets
-                    .iter()
-                    .copied()
-                    .filter(|&target| send(target, 0))
-                    .collect();
-                if ended.is_some() && left.is_empty() {
-                    break;
-                }
-                if Instant::now() >= end {
-                    for target in left {
-                        send(target, libc::SIGKILL);
-                    }
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let _ = self.child.wait();
+        if !std::thread::panicking() && !matches!(self.child.try_wait(), Ok(None)) {
+            return;
         }
+        let end = Instant::now() + Duration::from_secs(5);
+        let mut held: Vec<Pinned> = Vec::new();
+        loop {
+            let _ = self.child.try_wait(); // the converter reaped once it ends
+            let pids = std::fs::read_dir("/proc").into_iter().flatten().flatten();
+            for pid in pids.filter_map(|entry| entry.file_name().to_str()?.parse().ok()) {
+                if held.iter().any(|seen| seen.pid == pid && seen.running()) {
+                    continue;
+                }
+                if let Some(found) = Pinned::working_in(pid, self.folder) {
+                    found.signal(libc::SIGTERM);
+                    held.push(found);
+                }
+            }
+            held.retain(Pinned::running);
+            if held.is_empty() {
+                break;
+            }
+            if Instant::now() >= end {
+                held.iter().for_each(|left| left.signal(libc::SIGKILL));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = self.child.wait();
     }
 }
 
@@ -2606,7 +2658,7 @@ fn ctrl_c_while_the_decoder_writes_nothing_stops_the_reading() {
 
 #[test]
 fn ctrl_c_before_the_first_frame_ends_as_before_the_encoding() {
-    // rows X9, N25: a Ctrl-C while the decoder has given no frame, its pipe open, with the encoder started (both seen in the wrapper's notes, which the old converter makes too: it started the encoder before its first frame, and printed no progress until then): N25 ends it as a Ctrl-C before a video's encoding: the encoder, still waiting for its first input, killed before that input closes, so it never opens its output and a file in the way stays as it was; on stderr the progress alone, no path, death by SIGINT; so with either encoder, the trial's pick and libx264 under a VA driver that cannot load; X9's read loop of bin/ascii-convert:471 at tag python-final took this Ctrl-C and closed the encoder's empty input, which made the file in the way over (seen here, 2 of 2): where h264_vaapi encodes, exit 1, ffmpeg's errors and `ffmpeg could not encode the video`, the file 0 bytes; where libx264 does, `stopped at frame 0: <out> holds the part converted`, the path, exit 130, a file of 261 bytes and no frame
+    // rows X9, N25: a Ctrl-C while the decoder has given no frame, its pipe open, with the encoder started (both seen in the wrapper's notes, which the old converter makes too: it started the encoder before its first frame, and printed no progress until then): N25 ends it as a Ctrl-C before a video's encoding: the encoder, still waiting for its first input, killed before that input closes, so it never opens its output and a file in the way stays as it was; on stderr the progress alone, no path, death by SIGINT; so with either encoder, the trial's pick and libx264 under a VA driver that cannot load; the old converter took this Ctrl-C where it landed (seen here, h264_vaapi, 14 runs alone: 7 and 7): in X9's read loop of bin/ascii-convert:471 at tag python-final, which killed the decoder and closed the encoder's empty input, so the file in the way was made over: where h264_vaapi encodes, exit 1, ffmpeg's errors and `ffmpeg could not encode the video`, the file 0 bytes; where libx264 does, `stopped at frame 0: <out> holds the part converted`, the path, exit 130, a file of 261 bytes and no frame; or before that loop, no progress printed: its main's handler (:564-565) exited 130, nothing said, the decoder left running and holding the output open, so the status is asserted before the output's end
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "clip.mp4", 0.8, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
@@ -2619,19 +2671,23 @@ fn ctrl_c_before_the_first_frame_ends_as_before_the_encoding() {
             let _ = std::fs::remove_file(sandbox.path(note));
         }
         std::fs::write(sandbox.path("clip-out.mp4"), "in the way").unwrap();
-        let run = Running::start(
+        let mut run = Running::start(
             &sandbox,
             &["-W", "320", "-H", "180", "-o", "clip-out.mp4", "clip.mp4"],
         );
         await_file(&sandbox.path("held"));
         await_file(&sandbox.path("encode.args"));
         run.interrupt();
-        let (status, out, err) = run.finish();
+        let status = run.ended();
+        let ended = (status.code(), status.signal());
         assert_eq!(
-            (status.signal(), out.as_str()),
-            (Some(libc::SIGINT), ""),
-            "{driver:?}: {err:?}"
+            ended,
+            (None, Some(libc::SIGINT)),
+            "{driver:?}: {:?}",
+            run.err()
         );
+        let (_, out, err) = run.finish();
+        assert_eq!(out, "", "{driver:?}: {err:?}");
         let (counts, total) = progress(&err);
         assert_eq!(
             (counts.last(), total.as_str()),
