@@ -82,6 +82,9 @@ pub struct Mpv {
     setting: [u32; 4],
     /// The frame of a grab whose time mpv has not given yet.
     taken: Option<Option<RgbImage>>,
+    /// mpv restarts after a seek of its own, a loop's: until the first frame after it shows, mpv keeps the one before it as the frame a grab takes, while the position is the seek's; a grab answered meanwhile is asked again once playback restarts (`regrab` of them).
+    anew: bool,
+    regrab: usize,
     /// A new position comes with a new frame, but past the picture's end, where the sound plays on: `seen`, the position given with the last new frame (`None` while it is to come), and mpv's count of frames let go untaken then; `prev`, the same of the frame before; `base`, that position, or the position at the last look in which mpv had let frames go, and the count then; `first`, the first position of the look under way.
     seen: Option<(f64, i64)>,
     prev: Option<(f64, i64)>,
@@ -496,6 +499,8 @@ impl Mpv {
             restarting: true,
             setting: [0; 4],
             taken: None,
+            anew: false,
+            regrab: 0,
             seen: None,
             prev: None,
             base: None,
@@ -1097,12 +1102,15 @@ impl Mpv {
                 None
             }
             GET_PROPERTY_REPLY if event.userdata == GRAB => {
+                let taken = self.taken.take().flatten();
+                // the frame mpv kept from before a seek of its own, with the seek's position: asked again once playback restarts
+                if self.anew {
+                    self.regrab += 1;
+                    return None;
+                }
                 // past the picture's end the position is the sound's: the frame mpv holds is the last, of the time given with it
                 let time = self.held().filter(|_| self.tail);
-                Some(Event::Grabbed(
-                    self.taken.take().flatten(),
-                    time.or_else(|| double(event)),
-                ))
+                Some(Event::Grabbed(taken, time.or_else(|| double(event))))
             }
             // each request reads once it is done (`settling`): a read whose request a loop's seek ended (`MPV_EVENT_SEEK`) comes before any read of the request that went next, and is no longer of one under way
             GET_PROPERTY_REPLY if event.userdata == SETTLED => {
@@ -1150,6 +1158,7 @@ impl Mpv {
             }
             SEEK => {
                 self.restarting = true;
+                self.anew |= !matches!(self.busy, Some(Busy::Seek { .. }));
                 match &mut self.busy {
                     Some(Busy::Seek { ran, .. }) => *ran = true,
                     // a seek of mpv's own, a loop's: a step under way ends there, paused
@@ -1165,6 +1174,10 @@ impl Mpv {
             }
             PLAYBACK_RESTART => {
                 self.restarting = false;
+                self.anew = false;
+                for _ in 0..std::mem::take(&mut self.regrab) {
+                    self.held.push_front(Op::Grab);
+                }
                 match &mut self.busy {
                     Some(Busy::Seek {
                         ran: true,
@@ -1186,6 +1199,7 @@ impl Mpv {
                     }
                     _ => {}
                 }
+                self.next();
                 None
             }
             // SAFETY: the data of this event is an `mpv_event_property`.
@@ -3408,6 +3422,49 @@ pub(crate) mod tests {
         );
         // a client busy while mpv plays on: its later reports of `time-pos` are later frames'
         grab(&mut stage, Duration::from_millis(300));
+    }
+
+    #[test]
+    fn a_grab_answered_as_a_loop_restarts_is_asked_again() {
+        // rows N5, P21: a frame taken is named by its own time; at a seek of mpv's own, a loop's (`MPV_EVENT_SEEK` with nothing of the viewer's under way), mpv keeps the frame before it as its current one, which `screenshot-raw` takes, until the first frame after the seek shows, while the position is the seek's at once (player/video.c, vo.c forget_frames: "we always want to be able to redraw it"): a grab mpv took up then was named by the next round's time (the stress run: `clip-ascii-0s.png` holding frame 247 of a looping 10 s clip, once in 21 runs under load); such an answer, before playback restarts, is no frame's: the grab is asked again once it has; here mpv's events of that order are handed in, then mpv answers the grab asked again
+        let mut stage = Stage::new();
+        stage.clip(1.0, 1.0);
+        stage.settle();
+        let event = |id: c_int, userdata: u64, data: *const c_void| RawEvent {
+            id,
+            error: 0,
+            userdata,
+            data,
+        };
+        stage.mpv.report(&event(SEEK, 0, std::ptr::null()));
+        // the frame before the seek, the last, and the position after it
+        stage.mpv.taken = Some(Some(RgbImage::from_pixel(160, 120, image::Rgb([235; 3]))));
+        let mut at = 0.0f64;
+        let position = Property {
+            name: c"time-pos".as_ptr(),
+            format: DOUBLE,
+            data: &mut at as *mut f64 as *const c_void,
+        };
+        let answered = stage.mpv.report(&event(
+            GET_PROPERTY_REPLY,
+            GRAB,
+            &position as *const Property as *const c_void,
+        ));
+        stage
+            .mpv
+            .report(&event(PLAYBACK_RESTART, 0, std::ptr::null()));
+        let events = stage.pump(5.0, |e| matches!(e, Event::Grabbed(..)));
+        let taken = match events.last() {
+            Some(Event::Grabbed(Some(picture), Some(time))) => {
+                Some((number(picture.as_raw(), 160, 120), *time))
+            }
+            _ => None,
+        };
+        assert!(
+            answered.is_none() && taken == Some((0, stage.time)),
+            "answered at once {answered:?}, then {taken:?} at {}",
+            stage.time
+        );
     }
 
     #[test]
