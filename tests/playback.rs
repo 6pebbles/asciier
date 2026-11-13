@@ -64,13 +64,18 @@ fn taken(tty: &mut Tty, sandbox: &Sandbox) -> u32 {
     saved(&sandbox.path(name)).0
 }
 
-/// Pause as soon as the first frame is written, then go to the start: under load a clip of a few seconds ends before a key sent once it plays on (seen: the viewer gone before the key, the terminal echoing it after the restore). The pause can land on frame 0, where Left changes nothing on screen, so a draw after it is waited for: keys sent sooner can reach the viewer in the same read and add up with it (V14), Left and two Shift+Right landing on 0 (the review's probe of this shape: 7 of 8 copies at load 38-54).
+/// Pause as soon as the first frame is written, then go to the start: under load a clip of a few seconds ends before a key sent once it plays on (seen: the viewer gone before the key, the terminal echoing it after the restore). Keys sent before the viewer read the ones before can reach it in the same read and add up with them (V14): Left and two Shift+Right landed on 0 (the review's probe of this shape: 7 of 8 copies at load 38-54, and the stress run's 5 of 44). The pause can land on frame 0, where Left changes nothing on screen and a redraw of frame 0 tells nothing of it, so the screen is moved off frame 0 first, by Shift+Right; Left then lands on 0 from there, alone or with it.
 fn paused_at_the_start(tty: &mut Tty) {
     assert!(tty.wait(0, PATIENCE, |out| !written_rows(out).is_empty()));
     tty.send(b" ");
     tty.await_status("| ");
     // frames decoded before the pause still land
     tty.settle(Duration::from_millis(300));
+    let at = tty.send(SHIFT_RIGHT);
+    let off = |screen: &Screen| frame(screen) != 0 && screen.row(24).starts_with("| ");
+    if !tty.wait(at, PATIENCE, |out| replay(out, SMALL, off).contains(&true)) {
+        tty.fail("no draw off frame 0 after Shift+Right");
+    }
     let at = tty.send(LEFT);
     let start = |screen: &Screen| frame(screen) == 0 && screen.row(24).starts_with("| 00:00");
     if !tty.wait(at, PATIENCE, |out| {
