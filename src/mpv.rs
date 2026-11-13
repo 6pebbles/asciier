@@ -1739,8 +1739,8 @@ pub(crate) mod tests {
             self.pump(5.0, |e| matches!(e, Event::Time(t) if *t >= time));
         }
 
-        /// `pump` for `seconds`, every frame drawn and marked shown as the viewer does, but with mpv's reports of `pause` that come while a step forward waits for its mark handed over after the mark, as mpv hands them when its round-robin scan of the properties stopped between the two (seen in a traced viewer under load: the mark, then the step's `pause=no`); the `Grabbed` events.
-        fn pump_mark_first(&mut self, seconds: f64) -> Vec<Event> {
+        /// `pump` for `seconds`, every frame drawn and marked shown as the viewer does (left untaken unless `take`), but with mpv's reports of `pause` that come while a step forward waits for its mark handed over after the mark, as mpv hands them when its round-robin scan of the properties stopped between the two (seen in a traced viewer under load: the mark, then the step's `pause=no`); the `Grabbed` events.
+        fn pump_mark_first(&mut self, seconds: f64, take: bool) -> Vec<Event> {
             let (start, mut held, mut grabbed) = (Instant::now(), Vec::new(), Vec::new());
             while start.elapsed().as_secs_f64() < seconds {
                 let mpv = &mut self.mpv;
@@ -1779,7 +1779,8 @@ pub(crate) mod tests {
                     }
                 }
                 // SAFETY: the context is valid while not null.
-                let due = unsafe { mpv_render_context_update(mpv.render) } & UPDATE_FRAME != 0;
+                let due =
+                    take && unsafe { mpv_render_context_update(mpv.render) } & UPDATE_FRAME != 0;
                 if due {
                     let first = mpv.first.take();
                     mpv.count(first.map(|_| mpv.time));
@@ -2729,7 +2730,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_step_is_done_once_mpv_is_paused_after_it_whatever_it_reports_first() {
-        // rows P15, N5: mpv hands property changes over round-robin from where its last scan stopped, so the mark behind a step forward can come before the step's `pause=no`, while `pause` still reads as before the step; a step then passed for done at its mark, before mpv had run it, and read the position it left (the review's trace under load: `..,` typed apart from frame 25 ended on 498, `....s` took 28); here every report of `pause` during a step comes after its mark; seen in this test before the fix: four steps and `s` from frame 25 ended on 28 and `s` took 28, 3 of 3
+        // rows P15, N5: mpv hands property changes over round-robin from where its last scan stopped, so the mark behind a step forward can come before the step's `pause=no`, while `pause` still reads as before the step; a step then passed for done at its mark, before mpv had run it, and read the position it left (the review's trace under load: `..,` typed apart from frame 25 ended on 498, `....s` took 28); here every report of `pause` during a step comes after its mark: four steps and `s` from frame 25 end on 29, and `s` takes 29; on the steps group's branch before the tail guard of 310f5d4 the rule before the fix failed here (28 for 29, 3 of 3), on this head it passes (the review: 27 of 27), so `a_step_whose_frame_waits_for_the_one_before_is_done_once_mpv_ran_it` is the fix's proof
         let mut stage = Stage::new();
         stage.clip(10.0, 10.0);
         let mut wrong = Vec::new();
@@ -2743,10 +2744,10 @@ pub(crate) mod tests {
             let mut grabbed = Vec::new();
             let start = Instant::now();
             while grabbed.is_empty() && start.elapsed() < Duration::from_secs(10) {
-                grabbed = stage.pump_mark_first(0.01);
+                grabbed = stage.pump_mark_first(0.01, true);
             }
             let done = (0..1000).any(|_| {
-                stage.pump_mark_first(0.01);
+                stage.pump_mark_first(0.01, true);
                 stage.mpv.busy.is_none() && stage.mpv.held.is_empty()
             });
             let taken = match grabbed.first() {
@@ -2762,6 +2763,34 @@ pub(crate) mod tests {
             if !(done && there && named && stage.mpv.paused) {
                 let on = (stage.shown.last(), stage.time, stage.mpv.paused);
                 wrong.push(format!("round {round}: {on:?}, `s` took {taken:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn a_step_whose_frame_waits_for_the_one_before_is_done_once_mpv_ran_it() {
+        // rows P15, N5: `..,` from frame 25, the first step's frame left untaken for 150 ms, inside the 200 ms mpv waits for it: the second step's frame waits for it, so that step's mark comes before mpv has run it, while `pause` still reads paused from the first; every report of `pause` during a step comes after its mark, as mpv hands them round-robin; the step is done once a read of `pause` after its mark says paused, or at the next report of a pause after it said playing; seen with the rule before the fix (done at the mark when paused, else at the next report of a pause): frame 248 at 9.92, the clip's end, for 26 at 1.04 (the review's probe: 36 of 36 rounds)
+        let mut stage = Stage::new();
+        stage.clip(10.0, 10.0);
+        let mut wrong = Vec::new();
+        for round in 0..4 {
+            stage.mpv.seek(&["seek", "1", "absolute+exact"]);
+            assert!(stage.reach(25, 1.0, 10.0), "{round}");
+            stage.mpv.step(true);
+            stage.mpv.step(true);
+            stage.mpv.step(false);
+            stage.pump_mark_first(0.15, false);
+            let done = (0..1000).any(|_| {
+                stage.pump_mark_first(0.01, true);
+                stage.mpv.busy.is_none() && stage.mpv.held.is_empty()
+            });
+            // a window for what must not happen: playing on
+            stage.pump_mark_first(0.3, true);
+            let there = stage.shown.last() == Some(&26) && near(stage.time, 1.04, 0.0005);
+            if !(done && there && stage.mpv.paused) {
+                let on = (stage.shown.last(), stage.time, stage.mpv.paused);
+                wrong.push(format!("round {round}: done {done}, on {on:?}"));
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
