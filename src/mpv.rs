@@ -4153,7 +4153,7 @@ pub(crate) mod tests {
 
     #[test]
     fn frames_let_go_count_from_the_time_of_the_frame_seen() {
-        // row N5: past the picture's end the name is the frame mpv holds, counted from the last frame handed over: the last of the frames mpv let go since, else that frame at the earlier of the position given with it and the time after the frame before (a position a look late can be past the frame's own); the frames let go counted from the position given, so a late position and a frame let go reported late, after the last frame, named frame 49 by 2.003 s and 2.019 s (the stress run, at load 78 and 107: 1.963 and 1.979 given with it, 1.92 with frame 48); here those reports are put in place
+        // row N5: past the picture's end the name is the frame mpv holds, counted from the last frame handed over: the last of the frames mpv let go since, else that frame at the earlier of the position given with it and the time after the frame before (a position a look late can be past the frame's own); the frames let go counted from the position given, so a late position and a frame let go reported late, after the last frame, named frame 49 by 2.003 s and 2.019 s (the stress run, at load 78 and 107: by code reading, 1.963 and 1.979 given with it); here such positions are put in place, after frame 48 at its own time
         let mut stage = Stage::new();
         stage.clip(2.0, 6.0);
         let mpv = &mut stage.mpv;
