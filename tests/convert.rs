@@ -426,7 +426,7 @@ struct Running {
     readers: Vec<JoinHandle<()>>,
     /// The sandbox's folder, its device and inode: the converter works in it, and so does every process it starts.
     folder: (u64, u64),
-    /// Whether `ended` has reaped the converter: its pid, the id of the group it led, may then be another's.
+    /// Whether the converter has been reaped, by `ended` or `running`: its pid, the id of the group it led, may then be another's.
     reaped: bool,
 }
 
@@ -542,7 +542,7 @@ impl Running {
         String::from_utf8_lossy(&self.err.lock().unwrap()).into_owned()
     }
 
-    /// Ctrl-C as a terminal sends it: SIGINT to the process group; back once the converter has taken it, or has ended. Refused once `ended` has reaped the converter.
+    /// Ctrl-C as a terminal sends it: SIGINT to the process group; back once the converter has taken it, or has ended. Refused once the converter is reaped.
     fn interrupt(&self) {
         assert!(!self.reaped, "Ctrl-C after the converter was reaped");
         let pid = self.child.id();
