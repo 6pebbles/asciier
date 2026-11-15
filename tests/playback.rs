@@ -601,7 +601,7 @@ fn frame_steps_move_one_frame_and_pause() {
     // frames 0 to 254, all under the counter's wrap; a clip of 2.2 s ended before `.` landed at load 55 (the review: 2 of 18 copies)
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.2, 10.2, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    // `.` once playback runs on steadily: from frame 25, past start-up, where frames left out are the rule under load, and once a playing update shows the frame after the one before it, at most 6 s on; sent at frame 3, a step 3 frames past passed by the limit's sign in 3 of 8 runs at load 22 to 33 (the review's variant)
+    // `.` once playback runs on steadily: from frame 25, past start-up, where frames left out are the rule under load, and once a playing update shows the frame after the one before it, from frame 75 on in any case; sent at frame 3, a step 3 frames past passed by the limit's sign in 3 of 8 runs at load 22 to 33 (the review's variant)
     let before = std::cell::Cell::new(None);
     tty.until_drawn("a steady playing update", 0, |screen| {
         let on = frame(screen);
@@ -611,7 +611,7 @@ fn frame_steps_move_one_frame_and_pause() {
         } else {
             None
         };
-        playing && on >= 25 && (last == Some(on.wrapping_sub(1)) || on > 150)
+        playing && on >= 25 && (last == Some(on.wrapping_sub(1)) || on >= 75)
     });
     let sent = Instant::now();
     tty.send(b".");
@@ -650,7 +650,8 @@ fn frame_steps_move_one_frame_and_pause() {
             .collect::<Vec<_>>()
     );
     tty.until("the frame after it", |screen| frame(screen) == held);
-    lands(&mut tty, LEFT, 0, "| 00:00");
+    // to the start from anywhere under a minute: Left, 5 s back, missed it from a pause past 5 s (this test's first form beside a load round: 9 of 11 runs at load 70 to 100)
+    lands(&mut tty, DOWN, 0, "| 00:00");
     // on the first frame `,` only pauses; a window for what must not happen: the clip moving on
     tty.send(b",");
     std::thread::sleep(Duration::from_millis(500));
