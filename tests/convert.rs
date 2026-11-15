@@ -555,6 +555,13 @@ impl Running {
         }
     }
 
+    /// Whether the converter runs on; one that has ended is reaped, as by `ended`.
+    fn running(&mut self) -> bool {
+        let ended = self.child.try_wait().unwrap().is_some();
+        self.reaped |= ended;
+        !ended
+    }
+
     /// Its end within `PATIENCE`: how it ended.
     fn ended(&mut self) -> ExitStatus {
         let end = Instant::now() + PATIENCE;
@@ -1312,7 +1319,7 @@ fn ctrl_c_while_a_picture_is_written_prints_no_path() {
     let fd = png.as_raw_fd();
     // SAFETY: fcntl on a descriptor this test owns.
     assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, 4096) }, 4096);
-    let run = Running::start(&sandbox, &["-c", "40", "-o", "out.png", "pic.png"]);
+    let mut run = Running::start(&sandbox, &["-c", "40", "-o", "out.png", "pic.png"]);
     let end = Instant::now() + PATIENCE;
     loop {
         let mut held: libc::c_int = 0;
@@ -1321,6 +1328,7 @@ fn ctrl_c_while_a_picture_is_written_prints_no_path() {
         if held == 4096 {
             break;
         }
+        assert!(run.running(), "ended, {held} bytes: {:?}", run.err());
         assert!(Instant::now() < end, "{held} bytes: {:?}", run.err());
         std::thread::sleep(Duration::from_millis(10));
     }
