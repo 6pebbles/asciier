@@ -1175,9 +1175,14 @@ fn a_stream_without_a_length_shows_its_clock_alone() {
         ],
     );
     let mut tty = sandbox.launch().arg(&raw).size(SMALL).start();
-    tty.await_status("> 00:01");
-    // the row of the last update, playing: the mark and the clock alone
-    let (row, _) = last_drawn(&tty);
+    // an update playing past the first second: a look at the live screen for `> 00:01`, a row shown a second, missed it under load and the 4 s clip ended (beside a load round: 1 of 11 runs at load 70 to 100)
+    let at = tty.until_drawn("the clock past 00:00", 0, |screen| {
+        let row = screen.row(24);
+        row.starts_with("> ") && seconds(&row).is_some_and(|at| at >= 1)
+    });
+    // that update's row: the mark and the clock alone
+    let rows = replay(&tty.out()[..at], SMALL, |screen| screen.row(24));
+    let row = rows.last().cloned().unwrap_or_default();
     assert!(
         row.starts_with("> ") && seconds(&row).is_some() && row.chars().count() == 7,
         "{row:?}"
