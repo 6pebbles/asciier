@@ -1166,13 +1166,13 @@ impl Mpv {
     fn held(&self) -> Option<f64> {
         // mpv counts anew from a seek
         let (at, drops) = self.seen?;
-        Some(match self.prev {
-            _ if self.drops > drops => at + self.frame * (self.drops - drops) as f64,
+        let seen = match self.prev {
             Some((before, dropped)) => {
                 at.min(before + self.frame * (1 + drops - dropped).max(1) as f64)
             }
             None => at,
-        })
+        };
+        Some(seen + self.frame * (self.drops - drops).max(0) as f64)
     }
 
     /// One of mpv's events as the viewer's, if it is one.
@@ -4149,6 +4149,26 @@ pub(crate) mod tests {
             look(&mut stage, 1.96, drops + 15),
         ];
         assert_eq!((mid, end), ([false, false], [false, true]));
+    }
+
+    #[test]
+    fn frames_let_go_count_from_the_time_of_the_frame_seen() {
+        // row N5: past the picture's end the name is the frame mpv holds, counted from the last frame handed over: the last of the frames mpv let go since, else that frame at the earlier of the position given with it and the time after the frame before (a position a look late can be past the frame's own); the frames let go counted from the position given, so a late position and a frame let go reported late, after the last frame, named frame 49 by 2.003 s and 2.019 s (the stress run, at load 78 and 107: 1.963 and 1.979 given with it, 1.92 with frame 48); here those reports are put in place
+        let mut stage = Stage::new();
+        stage.clip(2.0, 6.0);
+        let mpv = &mut stage.mpv;
+        assert!(near(mpv.frame, 0.04, 1e-9));
+        let mut named = Vec::new();
+        for (given, drops) in [(1.963, 5), (1.979, 5), (1.963, 6), (1.979, 7)] {
+            (mpv.prev, mpv.seen, mpv.drops) = (Some((1.92, 5)), Some((given, 5)), drops);
+            named.push(mpv.held());
+        }
+        let own = [1.96, 1.96, 2.0, 2.04];
+        let right = named
+            .iter()
+            .zip(own)
+            .all(|(named, own)| named.is_some_and(|named| near(named, own, 1e-9)));
+        assert!(right, "{named:?} for {own:?}");
     }
 
     #[test]
