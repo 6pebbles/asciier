@@ -426,6 +426,8 @@ struct Running {
     readers: Vec<JoinHandle<()>>,
     /// The sandbox's folder, its device and inode: the converter works in it, and so does every process it starts.
     folder: (u64, u64),
+    /// Whether `ended` has reaped the converter: its pid, the id of the group it led, may then be another's.
+    reaped: bool,
 }
 
 /// A process held by a pidfd: a signal through it reaches that process alone, also once its pid is free for another.
@@ -532,6 +534,7 @@ impl Running {
             err,
             readers,
             folder: (folder.dev(), folder.ino()),
+            reaped: false,
         }
     }
 
@@ -548,10 +551,11 @@ impl Running {
         }
     }
 
-    /// Ctrl-C as a terminal sends it: SIGINT to the process group; back once the converter has taken it, or has ended.
+    /// Ctrl-C as a terminal sends it: SIGINT to the process group; back once the converter has taken it, or has ended. Refused once `ended` has reaped the converter.
     fn interrupt(&self) {
+        assert!(!self.reaped, "Ctrl-C after the converter was reaped");
         let pid = self.child.id();
-        // SAFETY: a signal to the group the child leads, which is not reaped while self holds it.
+        // SAFETY: a signal to the group the child leads: not reaped (above), the child holds its pid, so the group is its own.
         unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGINT) };
         let end = Instant::now() + PATIENCE;
         while sigint_pending(pid) {
@@ -565,6 +569,7 @@ impl Running {
         let end = Instant::now() + PATIENCE;
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
+                self.reaped = true;
                 return status;
             }
             assert!(Instant::now() < end, "still running: {:?}", self.err());
