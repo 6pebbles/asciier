@@ -75,15 +75,16 @@ pub struct Mpv {
     tail: bool,
     end: Option<f64>,
     runs: bool,
-    /// Requests to pause or play that mpv has not confirmed, held ones too: its reports of `pause` until then can be older than them.
+    /// Requests to pause or play that mpv has not confirmed, held ones too: its reports of `pause` until then can be older than them; `asked`: the last one sent, a pause.
     pausing: u32,
+    asked: bool,
     /// mpv restarts playback, after the file's load or a seek, until `MPV_EVENT_PLAYBACK_RESTART`: meanwhile it holds back a seek asked within 0.3 s of the last one's start (player/playloop.c, execute_queued_seek), whose mark then comes before it runs.
     restarting: bool,
     /// As `pausing`, for the properties of `HOLDS`: sets of each that mpv has not confirmed yet.
     setting: [u32; 4],
     /// The frame of a grab whose time mpv has not given yet.
     taken: Option<Option<RgbImage>>,
-    /// mpv restarts after a seek of its own, a loop's: until the first frame after it shows, mpv keeps the one before it as the frame a grab takes, while the position is the seek's; a grab answered meanwhile is asked again once playback restarts (`regrab` of them); a frame handed over meanwhile, the one before the seek or the first after it, has no time known (`doubt`).
+    /// mpv restarts after a seek of its own, a loop's: until the first frame after it shows, mpv keeps the one before it as the frame a grab takes, while the position is the seek's; a grab answered meanwhile is asked again once playback restarts (`regrab` of them); a frame handed over meanwhile, the one before the seek or the first after it, has no time known (`doubt`). mpv kept the sound it queued before the seek (player/playloop.c, MPSEEK_FLAG_NOFLUSH) and restarts once that has played out, which a pause holds back (player/audio.c: "blocked, waiting for old audio to play"): requests wait for the restart, as for one under way.
     anew: bool,
     regrab: usize,
     doubt: bool,
@@ -509,6 +510,7 @@ impl Mpv {
             end: None,
             runs: false,
             pausing: 0,
+            asked: false,
             restarting: true,
             setting: [0; 4],
             taken: None,
@@ -716,14 +718,14 @@ impl Mpv {
         });
     }
 
-    /// Send `op` now, or hold it until mpv has done the request under way and those held before it. Held, a pause or play takes the place of one held last, and a seek joins one held last as mpv joins them: a relative one adds to it, an absolute one replaces it.
+    /// Send `op` now, or hold it until mpv has done the request under way, or restarted after a seek of its own (`anew`), and those held before it. Held, a pause or play takes the place of one held last, and a seek joins one held last as mpv joins them: a relative one adds to it, an absolute one replaces it.
     fn request(&mut self, op: Op) {
         if let Op::Pause { .. } = op {
             self.pausing += 1;
             self.reported
                 .retain(|event| !matches!(event, Event::Pause(_)));
         }
-        if self.busy.is_none() && self.held.is_empty() {
+        if self.busy.is_none() && !self.anew && self.held.is_empty() {
             return self.go(op);
         }
         match (self.held.back(), &op) {
@@ -748,9 +750,9 @@ impl Mpv {
         self.held.push_back(op);
     }
 
-    /// The request under way is done: the held ones go, up to one that mpv runs over passes.
+    /// The request under way is done: the held ones go, up to one that mpv runs over passes, unless mpv restarts after a seek of its own.
     fn next(&mut self) {
-        while self.busy.is_none() {
+        while self.busy.is_none() && !self.anew {
             let Some(op) = self.held.pop_front() else {
                 return;
             };
@@ -774,12 +776,7 @@ impl Mpv {
                 self.pausing += 1;
                 self.put_pause(true);
             }
-            // at a seek of mpv's own, a loop's, the frame on screen is the one before it or the first after it, of no time known (seen: frame 49 of a looping 2 s clip counted at the seek's 0 s, and the step from it showed frame 1): the step only pauses, and mpv's seek goes on to the first frame after it
-            Op::Step if self.anew => {
-                self.pausing += 1;
-                self.put_pause(true);
-            }
-            // playing, mpv steps from the frame it holds, which a caller drawing late is frames past: the clip pauses and the frame after the one drawn shows; past the picture's end, the sound playing on, there is none, and mpv's step only pauses
+            // playing, mpv steps from the frame it holds, which a caller drawing late is frames past: the clip pauses and the frame after the one drawn shows; past the picture's end, the sound playing on, there is none, and mpv's step only pauses; the seek is a set of the position, which mpv runs at once: when a loop's seek came first, a seek command would wait for that restart (`seek_now`), and the restart for the sound queued before it, which the pause holds back
             Op::Step
                 if !self.paused
                     && self.pausing == 0
@@ -792,11 +789,7 @@ impl Mpv {
                 self.pausing += 1;
                 self.put_pause(true);
                 // an exact seek shows the first frame at most 5 ms before its target
-                let to = on + self.frame - 0.004;
-                self.start_seek(
-                    &["seek".into(), format!("{to}"), "absolute+exact".into()],
-                    false,
-                );
+                self.seek_now(on + self.frame - 0.004);
                 if let Some(Busy::Seek {
                     from, kept: held, ..
                 }) = &mut self.busy
@@ -856,7 +849,7 @@ impl Mpv {
         if !paused {
             self.back = None;
         }
-        self.stamp = None;
+        (self.stamp, self.asked) = (None, paused);
         if !self.put(PAUSE, "pause", if paused { "yes" } else { "no" }) {
             self.pausing = self.pausing.saturating_sub(1);
         }
@@ -864,14 +857,27 @@ impl Mpv {
 
     /// A seek or mpv's step back (`command`'s arguments), under way until mpv has done it.
     fn start_seek(&mut self, args: &[String], anchor: bool) {
-        // no step goes from a frame drawn before
-        (self.back, self.tail, self.rendered, self.on_screen) = (None, false, None, None);
-        (self.runs, self.stamp) = (false, None);
         let target = match amount(args) {
             Some((to, true)) => Some(to),
             Some((by, false)) if self.paused && self.pausing == 0 => Some(self.time + by),
             _ => None,
         };
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.seeking(target, anchor, |mpv| mpv.order(OP, &args));
+    }
+
+    /// An exact seek to `to` as a set of the position, under way until mpv has done it: mpv runs it at its next pass, where it holds a seek command back while it restarts within 0.3 s of the last seek's start (player/playloop.c, execute_queued_seek).
+    fn seek_now(&mut self, to: f64) {
+        self.seeking(Some(to), false, |mpv| {
+            mpv.put(OP, "time-pos", &format!("{to}"))
+        });
+    }
+
+    /// A seek of `target` (when known) under way once `send` asked mpv for it.
+    fn seeking(&mut self, target: Option<f64>, anchor: bool, send: impl FnOnce(&Self) -> bool) {
+        // no step goes from a frame drawn before
+        (self.back, self.tail, self.rendered, self.on_screen) = (None, false, None, None);
+        (self.runs, self.stamp) = (false, None);
         let mark = self.marks + 1;
         self.fresh = false;
         self.busy = Some(Busy::Seek {
@@ -884,8 +890,7 @@ impl Mpv {
             from: None,
             kept: None,
         });
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        if !self.order(OP, &args) {
+        if !send(self) {
             self.busy = None;
             return self.next();
         }
@@ -1226,24 +1231,43 @@ impl Mpv {
                 None
             }
             // mpv refused the seek or the step under way
-            COMMAND_REPLY if event.userdata == OP && event.error < 0 => {
+            COMMAND_REPLY | SET_PROPERTY_REPLY if event.userdata == OP && event.error < 0 => {
                 self.busy = None;
                 self.next();
                 None
             }
             SEEK => {
                 (self.restarting, self.stamp) = (true, None);
-                self.anew |= !matches!(self.busy, Some(Busy::Seek { .. }));
+                let own = !matches!(self.busy, Some(Busy::Seek { .. }));
                 match &mut self.busy {
                     Some(Busy::Seek { ran, .. }) => *ran = true,
-                    // a seek of mpv's own, a loop's: a step under way ends there, paused
+                    // a seek of mpv's own, a loop's, drops a step under way and plays on: the step went from the last frame, as in the tail mpv's step pauses at once, and once mpv has restarted the clip goes back there, paused, by a seek past the end, which shows it at its own time (a seek onto it leaves the position at the sound's)
                     Some(Busy::Step { .. }) => {
-                        (self.busy, self.tail) = (None, false);
+                        self.busy = None;
+                        self.held.push_front(Op::Anchor);
+                        self.held.push_front(Op::Pause {
+                            paused: true,
+                            seeks: false,
+                        });
                         self.pausing += 1;
-                        self.put_pause(true);
-                        self.next();
                     }
-                    None => (self.tail, self.back) = (false, None),
+                    None => {}
+                }
+                if own {
+                    self.anew = true;
+                    // no step goes from a frame drawn before it
+                    (self.tail, self.back, self.rendered, self.on_screen) =
+                        (false, None, None, None);
+                    // a pause on its way lands in the restart and holds it back: mpv plays until it has restarted, and the pause goes again then
+                    let held = self.held.iter().filter(|op| matches!(op, Op::Pause { .. }));
+                    if self.asked && self.pausing > held.count() as u32 {
+                        self.pausing += 2;
+                        self.put_pause(false);
+                        self.held.push_front(Op::Pause {
+                            paused: true,
+                            seeks: false,
+                        });
+                    }
                 }
                 None
             }
@@ -1785,16 +1809,82 @@ pub(crate) mod tests {
             }
         }
 
-        /// The events until mpv has been quiet for 0.2 s.
+        /// The events until mpv has been quiet for 0.2 s, or 20 s have passed: a clip that plays on is never quiet, and the test's own checks then tell.
         fn settle(&mut self) -> Vec<Event> {
-            let mut seen = Vec::new();
-            loop {
+            let (start, mut seen) = (Instant::now(), Vec::new());
+            while start.elapsed() < Duration::from_secs(20) {
                 let more = self.pump(0.2, |_| false);
                 if more.is_empty() {
-                    return seen;
+                    break;
                 }
                 seen.extend(more);
             }
+            seen
+        }
+
+        /// Events for at most `seconds`, every frame drawn and marked shown as the viewer does, until `until` holds at the end of a look; whether it did.
+        fn watch(&mut self, seconds: f64, mut until: impl FnMut(&Stage) -> bool) -> bool {
+            let start = Instant::now();
+            loop {
+                for event in self.mpv.events() {
+                    match event {
+                        Event::Frame => {
+                            self.draw();
+                            self.mpv.shown();
+                        }
+                        Event::Time(time) => self.time = time,
+                        Event::Length(length) => self.length = length,
+                        _ => {}
+                    }
+                }
+                if until(self) {
+                    return true;
+                }
+                if start.elapsed().as_secs_f64() >= seconds {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        /// As `watch`, until mpv reports a seek of its own, a loop's; `before` runs right before that report is handed in, as the viewer acting before it saw the seek, which mpv takes after it; what `before` gave, if a seek came within `seconds`.
+        fn at_own_seek<R>(
+            &mut self,
+            seconds: f64,
+            before: impl FnOnce(&mut Stage) -> R,
+        ) -> Option<R> {
+            let start = Instant::now();
+            while start.elapsed().as_secs_f64() < seconds {
+                loop {
+                    // SAFETY: mpv keeps the event until the next wait.
+                    let event = unsafe { &*mpv_wait_event(self.mpv.handle, 0.0) };
+                    if event.id == EVENT_NONE {
+                        break;
+                    }
+                    if event.id == SEEK && self.mpv.busy.is_none() {
+                        let done = before(self);
+                        self.mpv.report(event);
+                        return Some(done);
+                    }
+                    let reported = self.mpv.report(event);
+                    self.waiting.extend(reported);
+                }
+                // frames as `events` counts them, a frame's position with it or in the next look
+                let mpv = &mut self.mpv;
+                // SAFETY: the context is valid while not null.
+                let due = unsafe { mpv_render_context_update(mpv.render) } & UPDATE_FRAME != 0;
+                let first = mpv.first.take();
+                let new = due && mpv.count(first.map(|_| mpv.time));
+                if let (false, Some(first), None, false) = (new, first, mpv.seen, mpv.doubt) {
+                    (mpv.seen, mpv.base) = (Some((first, mpv.drops)), Some((first, mpv.drops)));
+                }
+                if due {
+                    self.draw();
+                    self.mpv.shown();
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            None
         }
 
         /// A command, then the events until mpv is quiet again.
@@ -2718,10 +2808,12 @@ pub(crate) mod tests {
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
-    /// Pump until mpv is done with every request asked (at most `seconds`); whether it is.
+    /// Pump until mpv is done with every request asked, a pause or play once mpv confirmed it (at most `seconds`); whether it is.
     fn idle(stage: &mut Stage, seconds: f64) -> bool {
         let start = Instant::now();
-        let busy = |stage: &Stage| stage.mpv.busy.is_some() || !stage.mpv.held.is_empty();
+        let busy = |stage: &Stage| {
+            stage.mpv.busy.is_some() || !stage.mpv.held.is_empty() || stage.mpv.pausing > 0
+        };
         while busy(stage) && start.elapsed().as_secs_f64() < seconds {
             stage.pump(0.01, |_| false);
         }
@@ -3657,42 +3749,161 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_step_as_a_loop_restarts_shows_the_first_frame_or_the_last() {
-        // row P15: `.` on a playing clip shows the frame after the one on screen, or only pauses on the last; at a seek of mpv's own, a loop's, mpv keeps the frame before it, the last, until the first after it shows, while the position is the seek's at once: the last frame was counted at the seek's 0 s, and `.` sent as it was drawn went from there to frame 1 (seen in this test before the fix: 5 of 6 rounds, and the review's probe 3 of 3); now a frame handed over before playback restarts has no time known, and a step then only pauses, mpv's seek going on to frame 0
+    /// A looping 2 s counter clip with 2 s of sound, playing.
+    fn looping() -> Stage {
+        let mut stage = Stage::new();
+        stage.clip(2.0, 2.0);
+        stage.settle();
+        stage.mpv.set("loop-file", "inf");
+        stage.mpv.pause(false);
+        stage
+    }
+
+    /// What a viewer asks next, each awaited, the clip paused on the frame drawn last: a grab, `,`, `space`, a playing `.`; what of them went wrong.
+    fn requests_go(stage: &mut Stage, case: &str) -> Vec<String> {
         let mut wrong = Vec::new();
-        for round in 0..6 {
+        let on = stage.shown.last().copied().unwrap_or(0);
+        // rows P21, P22, N5: `s` and `r` take the frame on screen when paused, named by its time; past the picture's end, the position the sound's, by the last frame as counted (within its span)
+        let by = if stage.mpv.tail { 0.041 } else { 0.001 };
+        stage.mpv.grab();
+        let events = stage.pump(5.0, |e| matches!(e, Event::Grabbed(..)));
+        let taken = match events.last() {
+            Some(Event::Grabbed(Some(picture), Some(time))) => {
+                Some((number(picture.as_raw(), 160, 120), *time))
+            }
+            _ => None,
+        };
+        if !taken.is_some_and(|(number, time)| number == on && near(time, on as f64 * 0.04, by)) {
+            wrong.push(format!("{case}: a grab on {on} took {taken:?}"));
+        }
+        // row P15: `,` shows the frame before, and on frame 0 only pauses
+        let before = on.saturating_sub(1);
+        stage.mpv.step(false);
+        let back = idle(stage, 10.0) && stage.reach(before, before as f64 * 0.04, 2.0);
+        if !(back && stage.mpv.paused) {
+            let at = (stage.shown.last(), stage.time, stage.mpv.paused);
+            wrong.push(format!("{case}: `,` from {on} left {at:?}"));
+        }
+        // row P8: `space` plays on from the frame on screen
+        let drawn = stage.shown.len();
+        stage.mpv.pause(false);
+        let next = |stage: &Stage| stage.shown[drawn..].iter().copied().find(|n| *n != before);
+        let on_from = stage.watch(5.0, |stage| next(stage).is_some())
+            && next(stage).is_some_and(|n| (1..10).contains(&((n + 50 - before) % 50)));
+        if !on_from {
+            wrong.push(format!(
+                "{case}: play from {before} drew {:?}",
+                &stage.shown[drawn..]
+            ));
+        }
+        // row P15: a playing `.` ends paused
+        stage.mpv.step(true);
+        if !(idle(stage, 10.0) && stage.holds(0.3) && stage.mpv.paused) {
+            let at = (stage.shown.last(), stage.time, stage.mpv.paused);
+            wrong.push(format!("{case}: a playing `.` left {at:?}"));
+        }
+        wrong
+    }
+
+    #[test]
+    fn requests_at_a_loops_restart_each_go() {
+        // rows P8, P15, P21, P22: at a seek of mpv's own, a loop's, mpv keeps the sound it queued before it and restarts playback once that has played out (player/audio.c: "blocked, waiting for old audio to play"); paused meanwhile, it restarts nothing, and the requests behind the pause waited for it: `s` saved nothing, `r` held every key but Ctrl-C, `,` and a play never went (the review's probe: 4 of 8 rounds after `.`, 6 of 6 after `space`); a request now waits for the restart, which comes within about 0.1 s while playing, and a pause sent before the viewer saw the seek is undone until it; each case: `.` or `space` at the first look in mpv's seek, a pause that reaches mpv after it, then a grab, `,`, `space` and `.`, each done; `.` there shows a frame one or two after the one on screen, the last or the first after the seek, as on a frame mid-clip
+        type Ask<'a> = &'a dyn Fn(&mut Mpv);
+        let cases: [(&str, bool, Ask); 3] = [
+            ("`.` in the seek", false, &|mpv| mpv.step(true)),
+            ("`space` in the seek", false, &|mpv| mpv.pause(true)),
+            ("a pause sent before the seek", true, &|mpv| mpv.pause(true)),
+        ];
+        let mut wrong = Vec::new();
+        for (case, early, ask) in cases {
+            let mut stage = looping();
+            // the frame on screen at the key: the last or the first after the seek; a loaded test that drew neither tries the next loop
+            let start = Instant::now();
+            let mut on = None;
+            while on.is_none() && start.elapsed() < Duration::from_secs(30) {
+                if early {
+                    on = stage
+                        .at_own_seek(5.0, |stage| ask(&mut stage.mpv))
+                        .and(stage.shown.last().copied());
+                } else if stage.watch(5.0, |stage| stage.mpv.anew) {
+                    let last = stage.shown.last().copied();
+                    on = last.filter(|n| [49, 0].contains(n));
+                    if on.is_some() {
+                        ask(&mut stage.mpv);
+                    } else {
+                        stage.watch(5.0, |stage| !stage.mpv.anew);
+                    }
+                }
+            }
+            let Some(on) = on else {
+                wrong.push(format!(
+                    "{case}: no loop's seek with the last or first frame on screen"
+                ));
+                continue;
+            };
+            let done = idle(&mut stage, 10.0) && stage.holds(0.3) && stage.mpv.paused;
+            let to = stage.shown.last().copied();
+            let stepped = !case.starts_with("`.`")
+                || to.is_some_and(|to| [1, 2].contains(&((to + 50 - on) % 50)));
+            if !(done && stepped) {
+                let at = (to, stage.time, stage.mpv.paused);
+                wrong.push(format!("{case}: on {on}, then {at:?}"));
+                continue;
+            }
+            wrong.extend(requests_go(&mut stage, case));
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn a_step_on_the_last_frame_of_a_looping_clip_only_pauses() {
+        // row P15: `.` on the last frame only pauses (frame_step of bin/ascii-viewer:1441 at tag python-final: no frame after it, the clip stays paused there); from a pause it is mpv's step, which plays into the loop's seek, and that seek drops it; playing, it seeks past the frame's time and checks the landing by mpv's step, which does the same; the step was then paused inside mpv's restart, which never came, and every request after it waited (the review's probe; here before the fix: frame 0 at 0 s); now, once mpv has restarted, a seek past the end shows the last frame again at its own time; each case, then a grab, `,`, `space` and `.`, each done: `.` from a pause on it, and a playing `.` on it that reaches mpv after the loop's seek, where a seek command waits for the restart and the restart for the pause (playing on it, mpv's seek comes as the frame shows)
+        let mut wrong = Vec::new();
+        for case in ["from a pause", "reaching mpv in its seek"] {
             let mut stage = Stage::new();
             stage.clip(2.0, 2.0);
             stage.settle();
             stage.mpv.set("loop-file", "inf");
-            stage.mpv.pause(false);
-            let (start, mut stepped) = (Instant::now(), false);
-            while !stepped && start.elapsed() < Duration::from_secs(8) {
-                for event in stage.mpv.events() {
-                    match event {
-                        Event::Frame => {
-                            stage.draw();
-                            stage.mpv.shown();
-                            if stage.shown.last() == Some(&49) && !stepped {
-                                stepped = true;
-                                stage.mpv.step(true);
-                            }
+            let sent = if case == "reaching mpv in its seek" {
+                // a playing step sent on the last frame, drawn as mpv handed it over just before its seek, its time known (a position can come a look after its frame), before the viewer saw the seek
+                stage.mpv.pause(false);
+                let (start, mut sent) = (Instant::now(), false);
+                while !sent && start.elapsed() < Duration::from_secs(30) {
+                    let last = |stage: &mut Stage| {
+                        stage.draw();
+                        stage.mpv.shown();
+                        let last = stage.shown.last() == Some(&49);
+                        if last {
+                            stage.mpv.on_screen.get_or_insert(1.96);
+                            stage.mpv.step(true);
                         }
-                        Event::Time(time) => stage.time = time,
-                        _ => {}
-                    }
+                        last
+                    };
+                    sent = stage.at_own_seek(5.0, last).unwrap_or(false);
                 }
-                std::thread::sleep(Duration::from_millis(1));
+                sent
+            } else {
+                stage.mpv.seek(&["seek", "1.96", "absolute+exact"]);
+                let there = idle(&mut stage, 10.0) && stage.reach(49, 1.96, 5.0);
+                if there {
+                    stage.mpv.step(true);
+                }
+                there
+            };
+            // the last frame at its own time, or a seek that reached mpv after the loop's leaves it at the sound's position (the tail: N2, N5)
+            let there = sent
+                && idle(&mut stage, 10.0)
+                && stage.watch(5.0, |stage| {
+                    stage.shown.last() == Some(&49) && stage.mpv.busy.is_none()
+                })
+                && stage.holds(0.3)
+                && (1.9595..2.0).contains(&stage.time);
+            if !(there && stage.mpv.paused) {
+                let at = (stage.shown.last(), stage.time, stage.mpv.paused);
+                wrong.push(format!("{case}: sent {sent}, then {at:?}"));
+                continue;
             }
-            let done = idle(&mut stage, 10.0);
-            stage.settle();
-            let on = (stage.shown.last().copied(), stage.time, stage.mpv.paused);
-            let there = matches!(on, (Some(0), time, true) if near(time, 0.0, 0.0005))
-                || matches!(on, (Some(49), _, true));
-            if !(stepped && done && there) {
-                wrong.push(format!("round {round}: stepped {stepped}, on {on:?}"));
-            }
+            wrong.extend(requests_go(&mut stage, case));
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
