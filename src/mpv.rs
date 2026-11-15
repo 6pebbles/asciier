@@ -3891,16 +3891,20 @@ pub(crate) mod tests {
                 there
             };
             // the last frame at its own time, or a seek that reached mpv after the loop's leaves it at the sound's position (the tail: N2, N5)
-            let there = sent
-                && idle(&mut stage, 10.0)
-                && stage.watch(5.0, |stage| {
+            let (sent_at, done) = (Instant::now(), sent && idle(&mut stage, 10.0));
+            // in mpv's seek a seek command waited for mpv to wake past its 0.3 s hold-back (seen: about 1 s more than a set of the position, 32 of 32 runs)
+            let took = sent_at.elapsed();
+            let quick = case != "reaching mpv in its seek" || took < Duration::from_millis(600);
+            let there =
+                done && stage.watch(5.0, |stage| {
                     stage.shown.last() == Some(&49) && stage.mpv.busy.is_none()
-                })
-                && stage.holds(0.3)
-                && (1.9595..2.0).contains(&stage.time);
-            if !(there && stage.mpv.paused) {
+                }) && stage.holds(0.3)
+                    && (1.9595..2.0).contains(&stage.time);
+            if !(there && quick && stage.mpv.paused) {
                 let at = (stage.shown.last(), stage.time, stage.mpv.paused);
-                wrong.push(format!("{case}: sent {sent}, then {at:?}"));
+                wrong.push(format!(
+                    "{case}: sent {sent}, done in {took:?}, then {at:?}"
+                ));
                 continue;
             }
             wrong.extend(requests_go(&mut stage, case));
