@@ -75,13 +75,14 @@ fn caught<T>(work: impl FnOnce() -> T) -> Option<T> {
     crate::term::guard(std::panic::AssertUnwindSafe(work)).ok()
 }
 
-/// A raster still's frames as Pillow's n_frames counts a well-formed file's (lib/ascii_image.py:61), up to 2, nothing decoded: a GIF by its blocks, an APNG and a WebP by their chunks, 1 for any other format; `Not::Image` where they cannot be counted, `Not::TooLarge` for a GIF whose screen, grown to its first frame, and for a PNG or a QOI whose header is over `MAX_PIXELS`, measured before their decoders, which refuse some such headers as no picture; a damaged file can count otherwise in Pillow (N6, N7).
+/// A raster still's frames as Pillow's n_frames counts a well-formed file's (lib/ascii_image.py:61), up to 2, nothing decoded: a GIF by its blocks, an APNG and a WebP by their chunks, 1 for any other format; `Not::Image` where they cannot be counted, `Not::TooLarge` for a GIF whose screen, grown to its first frame, and for a PNG, a QOI or an AVIF whose header is over `MAX_PIXELS`, measured before their decoders, which give up on some such headers as no picture or decode an AVIF whole to learn its size; a damaged file can count otherwise in Pillow (N6, N7).
 fn frames(path: &Path, format: Option<ImageFormat>) -> std::result::Result<u32, Not> {
     let mut file = BufReader::new(File::open(path).map_err(|_| Not::Image)?);
     let counted = match format {
         Some(ImageFormat::Gif) => return gif_frames(&mut file),
         Some(ImageFormat::Png) => return png_frames(&mut file),
         Some(ImageFormat::Qoi) => return qoi_frames(&mut file),
+        Some(ImageFormat::Avif) => return avif_frames(&mut file),
         Some(ImageFormat::WebP) => webp_frames(&mut file),
         _ => Ok(1),
     };
@@ -236,6 +237,51 @@ fn qoi_frames(file: &mut impl Read) -> std::result::Result<u32, Not> {
         true => Err(Not::TooLarge),
         false => Ok(1),
     }
+}
+
+/// An AVIF's one frame, measured by the sizes its container declares, the ispe properties in its meta box, as Pillow 13 measures one (AvifImagePlugin, libavif's parse), before the decoder, which learns a size only from the picture dav1d decodes whole: one over `MAX_PIXELS`, `Not::TooLarge`; the decoded picture's own size is measured after it.
+fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
+    let (mut at, mut end) = (0, file.seek(SeekFrom::End(0))?);
+    let mut path = [b"meta", b"iprp", b"ipco"].into_iter(); // the boxes that hold the properties
+    let mut want = path.next();
+    while at + 8 <= end {
+        file.seek(SeekFrom::Start(at))?;
+        let mut head = [0; 8];
+        file.read_exact(&mut head)?;
+        let (mut size, mut body) = (
+            u32::from_be_bytes([head[0], head[1], head[2], head[3]]).into(),
+            at + 8,
+        );
+        if size == 1 {
+            let mut large = [0; 8];
+            file.read_exact(&mut large)?;
+            (size, body) = (u64::from_be_bytes(large), at + 16);
+        } else if size == 0 {
+            size = end - at; // to the end
+        }
+        if size < body - at {
+            break; // no box
+        }
+        let kind = &head[4..];
+        if want.is_some_and(|wanted| kind == wanted) {
+            let full = u64::from(kind == b"meta") * 4; // a full box's version and flags
+            (at, end, want) = (body + full, end.min(at.saturating_add(size)), path.next());
+            continue;
+        }
+        if want.is_none() && kind == b"ispe" {
+            let mut sides = [0; 12]; // the version and flags, the width, the height
+            file.seek(SeekFrom::Start(body))?;
+            file.read_exact(&mut sides)?;
+            let side = |at: usize| {
+                u32::from_be_bytes([sides[at], sides[at + 1], sides[at + 2], sides[at + 3]])
+            };
+            if too_large((side(4), side(8))) {
+                return Err(Not::TooLarge);
+            }
+        }
+        at = at.saturating_add(size);
+    }
+    Ok(1)
 }
 
 /// A WebP's frames as libwebp counts a well-formed one's for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP; libwebp's demuxer leaves out a frame without an image and refuses a file cut short, so a damaged WebP can count otherwise in Pillow (N6, N7). An error for a VP8X whose EXIF, ICCP or XMP chunk runs past the file's end, which Pillow's libwebp refuses: the decoder takes such a chunk whole by the size it declares, up to 4 GiB allocated before the read fails (the EXIF for the orientation); the chunks walked as image-webp walks them, as far as the RIFF's length takes it.
@@ -1576,6 +1622,19 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn an_avif_is_measured_by_its_container_before_it_is_decoded() {
+        // row S18: Pillow 13 measures an AVIF by the size its container declares, the primary item's ispe property, before any picture is decoded (AvifImagePlugin, libavif's parse): tests/golden/picture-quarters.avif declaring 15000 x 15000 px is too large to open and identifies (lib/ascii_image.py:76, :95 at tag python-final; seen 2026-11-15, Pillow 13.0.0); the decoder learns a size only from the picture dav1d decodes whole, here 16 x 8 px
+        let dir = Dir::new("avif_extent");
+        let mut avif = include_bytes!("../tests/golden/picture-quarters.avif").to_vec();
+        let at = avif.windows(4).position(|kind| kind == b"ispe").unwrap() + 8; // past the kind, the version and flags
+        let sides = [15000u32.to_be_bytes(), 15000u32.to_be_bytes()].concat();
+        avif[at..at + 8].copy_from_slice(&sides);
+        let file = dir.file("big.avif", avif);
+        assert_eq!((kind(&file), identifies(&file)), ("too large", true));
+        assert!(matches!(original_png(&file, 0), Err(NoCopy::TooLarge)));
     }
 
     #[test]
