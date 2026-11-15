@@ -2692,7 +2692,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_end_pauses_on_the_last_frame() {
-        // no inventory row of its own: the end the viewer quits at (row P14's); mpv pauses there, and the end is reported once it has, with the position at the length; mpv hands its reports over round-robin, so the pause, the last position and the end come in any order within a look, and the last position can come a look after the end (asked in that order, the stress run: 3 of 203 traced at load 7 to 16)
+        // no inventory row of its own: the end the viewer quits at, P14's; mpv pauses there, and the end is reported once it has, with the position at the length; mpv hands its reports over round-robin, so the pause, the last position and the end come in any order within a look, and the last position can come a look after the end (asked in that order, the stress run: 3 of 203 traced at load 7 to 16)
         let mut stage = Stage::new();
         stage.clip(2.0, 2.0);
         stage.after(&["seek", "1.5", "absolute+exact"]);
