@@ -3638,9 +3638,40 @@ pub(crate) mod tests {
         panic!("mpv did not answer for {name:?}");
     }
 
+    /// Properties as doubles, asked for in one batch, read the asynchronous way (`None`: mpv has no value); what mpv reports meanwhile waits for the stage's next pump.
+    fn read_doubles(stage: &mut Stage, names: &[&CStr]) -> Vec<Option<f64>> {
+        const ASKED: u64 = 100;
+        for (n, name) in names.iter().enumerate() {
+            // SAFETY: the name lives through the call.
+            unsafe {
+                mpv_get_property_async(stage.mpv.handle, ASKED + n as u64, name.as_ptr(), DOUBLE)
+            };
+        }
+        let (mut read, mut left) = (vec![None; names.len()], names.len());
+        let end = Instant::now() + Duration::from_secs(10);
+        while left > 0 && Instant::now() < end {
+            // SAFETY: mpv keeps the event until the next wait.
+            let event = unsafe { &*mpv_wait_event(stage.mpv.handle, 0.1) };
+            let asked = ASKED..ASKED + names.len() as u64;
+            match event.id {
+                GET_PROPERTY_REPLY if asked.contains(&event.userdata) => {
+                    read[(event.userdata - ASKED) as usize] = double(event);
+                    left -= 1;
+                }
+                EVENT_NONE => {}
+                _ => {
+                    let reported = stage.mpv.report(event);
+                    stage.waiting.extend(reported);
+                }
+            }
+        }
+        assert_eq!(left, 0, "mpv did not answer for {names:?}");
+        read
+    }
+
     #[test]
     fn a_seek_back_into_the_sound_plays_it_again() {
-        // row P6: start_audio and seek_to of bin/ascii-viewer:1339 and :1423 at tag python-final: when mpv's sound was over before the picture, the picture played on and the next seek started a fresh mpv, the sound again from the target; one mpv plays both here: of 2 s of picture and 1 s of sound, played to 1.5 s, the sound over (mpv's audio-pts is unavailable once the output holds the sound's end: seen 0.18 s before the end of a 0.5 s sound), a seek to 0.1 s and 0.3 s of play: the sound runs again with the picture
+        // row P6: start_audio and seek_to of bin/ascii-viewer:1339 and :1423 at tag python-final: when mpv's sound was over before the picture, the picture played on and the next seek started a fresh mpv, the sound again from the target; one mpv plays both here: of 2 s of picture and 1 s of sound, played to 1.5 s, the sound over (mpv's audio-pts is unavailable once the output holds the sound's end: seen 0.18 s before the end of a 0.5 s sound), a seek to 0.1 s and 0.3 s of play: the sound runs again with the picture, by mpv's own difference of the sound and the frame it shows (avsync): mpv's picture stays on the frame drawn last while the sound runs on, and the test draws none while it reads, so the sound runs ahead of the position read by as long as the read is late (the stress run: 0.10 and 0.14 s ahead at load 24; its probe reading all three in one batch: up to 0.099 s at load 47 to 101, the A-V difference within 0.019 s throughout)
         let mut stage = Stage::new();
         let file = stage.counter("clip.mp4", 25, 2.0, 1.0, &[]);
         assert_eq!(stage.open(&file), (true, true));
@@ -3656,12 +3687,17 @@ pub(crate) mod tests {
         let mut heard = Vec::new();
         for at in [0.2, 0.4] {
             stage.pump(5.0, |e| matches!(e, Event::Time(t) if *t >= at && *t < 1.0));
-            heard.push((stage.time, read_double(&mut stage, c"audio-pts")));
+            heard.push(read_doubles(
+                &mut stage,
+                &[c"time-pos", c"audio-pts", c"avsync"],
+            ));
         }
-        let ran = heard
-            .iter()
-            .all(|(time, sound)| sound.is_some_and(|sound| near(sound, *time, 0.05)));
-        assert!(ran && heard[0].1 < heard[1].1, "{heard:?}");
+        let with = |read: &Vec<Option<f64>>| match read[..] {
+            [Some(time), Some(sound), Some(apart)] => sound > time - 0.05 && apart.abs() < 0.05,
+            _ => false,
+        };
+        let ran = heard.iter().all(with) && heard[0][1] < heard[1][1];
+        assert!(ran, "time-pos, audio-pts, avsync: {heard:?}");
     }
 
     #[test]
