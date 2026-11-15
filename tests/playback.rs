@@ -799,13 +799,21 @@ fn a_step_back_after_a_step_on_the_last_frame_shows_the_frame_before() {
     }
 }
 
+/// Wait until an update of an 80 x 24 window shows the clip playing at 3 s or later, past the picture's end of a clip of 2.2 s at most: a look at the live screen for `> 00:03` missed a row shown for a second under load, and the clip played to its end (the stress runs: 2 of 14 copies at load 14 to 52, 1 of 10 at 71); a picture behind the sound jumps to the sound's position, a second or so skipped (seen at load 86: 00:02, then 00:04).
+fn sound_on(tty: &Tty) {
+    tty.until_drawn("the clock at 3 s or later", 0, |screen| {
+        let row = screen.row(24);
+        row.starts_with("> ") && seconds(&row).is_some_and(|at| at >= 3)
+    });
+}
+
 #[test]
 fn a_step_while_the_sound_plays_on_past_the_picture_only_pauses() {
     // rows P15, N5, N21: past the picture's end the sound plays on over the last frame, frame 54 of this 2.2 s clip with 12 s of sound (under load the screen was seconds behind mpv); `.` there only pauses, the clock where the sound was, `s` takes that frame, and `,` shows frame 53 (frame_step of bin/ascii-viewer:1441 at tag python-final; N21: the old viewer ended with the picture); seen before the fix: the playing step's seek to the frame after the one on screen went past the last frame and put the clock back short of the frame, the bar falling from 27 cells to 21 with 6 s of sound, and `s` named the frame `clip-ascii-2s.png` (the review; with 2.6 s of sound `,` kept frame 54 in 1 of 2 runs); here without the fix the clock read `| 00:01` or `| 00:02` after `.` (3 of 3); the name's time is the position mpv gave with the frame, a look late under load (`a_frame_taken_while_the_sound_plays_on_is_named_by_its_time`; src/mpv.rs `a_step_while_the_sound_plays_on_past_the_picture_only_pauses` pins it to a frame)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 12.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    tty.await_status("> 00:03");
+    sound_on(&tty);
     tty.send(b".");
     // the screen can lag mpv under load: it must come to the last frame, paused (seen at load 59 without the wait: frame 52 on screen 0.5 s after the pause)
     tty.until("the last frame, paused", |screen| {
@@ -1860,7 +1868,7 @@ fn a_frame_taken_while_the_sound_plays_on_is_named_by_its_time() {
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.0, 12.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    tty.await_status("> 00:03");
+    sound_on(&tty);
     let at = tty.send(b"s");
     let start = tty.expect(at, b"\x1b[7m saved ");
     let end = tty.expect(start, b" \x1b[0m") - 5;
