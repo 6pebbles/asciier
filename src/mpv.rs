@@ -140,7 +140,7 @@ enum Op {
 /// A request mpv runs over passes, until it is done; then mpv's position is read, and the next request goes. `op`: its number among the seeks and steps sent, which mpv's answer to it has once it comes.
 #[derive(Debug)]
 enum Busy {
-    /// A seek, or mpv's step back: done once playback restarts after mpv ran it (`ran`, `MPV_EVENT_SEEK`), or at its mark when mpv ran none and restarts nothing (it drops a seek it cannot do); a mark that comes while mpv restarts (`waits`) is set again once it has. `target`: where it aims, when known (absolute, or relative to a paused position); `anchor`: an `Op::Anchor`; `back`: mpv's step back; `from`: the frame a step forward on a playing clip left, which a step back then seeks to, and `kept`, the frame mpv then held.
+    /// A seek, or mpv's step back: done once playback restarts after mpv ran it (`ran`, `MPV_EVENT_SEEK`), or at its mark when mpv ran none and restarts nothing (it drops a seek it cannot do); a mark that comes while mpv restarts (`waits`) is set again once it has. `target`: where it aims, when known (absolute, or relative to a paused position); `anchor`: an `Op::Anchor`; `back`: mpv's step back; `from`: the frame a step forward on a playing clip left, which a step back then seeks to, and `kept`, the frame mpv then held; `steps`: that step's own seek.
     Seek {
         mark: i64,
         op: u64,
@@ -152,6 +152,7 @@ enum Busy {
         back: bool,
         from: Option<f64>,
         kept: Option<f64>,
+        steps: bool,
     },
     /// A step forward. mpv hands property changes over round-robin, from where its last scan stopped, so the mark can come before the step's own report of `pause=no`: once it has, `pause` is read (`asked`, after mpv began the step); paused, the step is done; playing (`running`), it is done at the next report of a pause. `from`: the position it left, paused there when `rested`; `checks`: of an `Op::Check`, the frame the playing step left.
     Step {
@@ -813,10 +814,13 @@ impl Mpv {
                 // an exact seek shows the first frame at most 5 ms before its target
                 self.seek_now(on + self.frame - 0.004);
                 if let Some(Busy::Seek {
-                    from, kept: held, ..
+                    from,
+                    kept: held,
+                    steps,
+                    ..
                 }) = &mut self.busy
                 {
-                    (*from, *held) = (Some(on), kept);
+                    (*from, *held, *steps) = (Some(on), kept, true);
                 }
             }
             Op::Step => self.frame_step(self.paused && self.pausing == 0, None),
@@ -915,6 +919,7 @@ impl Mpv {
             back: false,
             from: None,
             kept: None,
+            steps: false,
         });
         if !send(self) {
             self.busy = None;
@@ -986,6 +991,7 @@ impl Mpv {
                 anchor,
                 from,
                 kept,
+                steps,
                 ..
             }) => {
                 if anchor {
@@ -995,10 +1001,9 @@ impl Mpv {
                 let short = target.is_some_and(|target| landed < target - 0.006);
                 let past = self.end.is_some_and(|end| landed > end + 0.001);
                 self.tail = anchor || short || past;
-                // the playing step's seek past the last frame shows that frame again, the one mpv held, and can leave the position at its target, the sound's (seen: 1.99599 for 1.996), where a frame of its own sits 4 ms short of the next frame's time, but by chance: mpv's step then tells which
-                let blank = from.is_some()
-                    && !self.tail
-                    && target.is_some_and(|target| (landed - target).abs() < 0.001);
+                // the playing step's seek lands on the next frame, 4 ms past its target; past the last frame it shows that frame again, the one mpv held, and leaves the position at the sound's, at the target or a few ms short of it (seen: 1.99599 and 1.9924 for 1.996), where a frame of its own sits only by chance, a variable rate's, up to 5 ms short (hr-seek's tolerance, player/video.c): mpv's step then tells which
+                let blank =
+                    steps && !self.tail && target.is_some_and(|target| landed < target + 0.001);
                 let seen = match self.end {
                     Some(end) if self.tail => end,
                     _ if from.is_some() && (short || blank) => kept.unwrap_or(landed),
@@ -3090,6 +3095,7 @@ pub(crate) mod tests {
             back: false,
             from: None,
             kept: None,
+            steps: false,
         });
         let event = stage.mpv.report(&reply(SETTLED, &position));
         let seek = format!("{:?}", stage.mpv.busy);
@@ -3425,6 +3431,62 @@ pub(crate) mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn a_playing_step_landing_just_short_of_its_target_is_checked() {
+        // rows P15, N5, N21: the playing step's seek from the last frame goes past it, where mpv shows that frame again and the position is the sound's, which can stop a few ms short of the target (the review: 1.9924 for 1.996 in 3 of 24 traced runs at load 8 to 49); that passed for a frame of its own, though one lands 4 ms past its target: `s` named frame 49 by the sound's position, 1.99 s, and `,` sought back onto 49; here mpv is put on the last frame past its time, the sound's tail, and that landing of the playing step's seek is handed in: `s` names frame 49 by its time and `,` shows frame 48 (seen before the fix: named 1.9924, `,` on 49)
+        let mut stage = Stage::new();
+        stage.clip(2.0, 6.0);
+        stage.mpv.seek(&["seek", "1.9924", "absolute+exact"]);
+        assert!(idle(&mut stage, 10.0) && stage.reach(49, stage.time, 2.0));
+        let reply = |property: &Property| RawEvent {
+            id: GET_PROPERTY_REPLY,
+            error: 0,
+            userdata: SETTLED,
+            data: property as *const Property as *const c_void,
+        };
+        let mut at = 1.9924f64;
+        let position = Property {
+            name: c"time-pos".as_ptr(),
+            format: DOUBLE,
+            data: &mut at as *mut f64 as *const c_void,
+        };
+        stage.mpv.busy = Some(Busy::Seek {
+            mark: stage.mpv.marks,
+            op: stage.mpv.ops,
+            ran: true,
+            waits: false,
+            settling: true,
+            target: Some(1.996),
+            anchor: false,
+            back: false,
+            from: Some(1.96),
+            kept: Some(1.96),
+            steps: true,
+        });
+        let event = stage.mpv.report(&reply(&position));
+        stage.waiting.extend(event);
+        let done = idle(&mut stage, 10.0) && stage.holds(0.3);
+        stage.mpv.grab();
+        let events = stage.pump(5.0, |e| matches!(e, Event::Grabbed(..)));
+        let taken = match events.last() {
+            Some(Event::Grabbed(Some(picture), Some(time))) => {
+                Some((number(picture.as_raw(), 160, 120), *time))
+            }
+            _ => None,
+        };
+        let named = taken.is_some_and(|(number, time)| number == 49 && near(time, 1.96, 0.001));
+        stage.mpv.step(false);
+        let back = idle(&mut stage, 10.0)
+            && stage.shown.last() == Some(&48)
+            && near(stage.time, 1.92, 0.0005);
+        assert!(
+            done && named && back,
+            "done {done}, `s` took {taken:?}, `,` on {:?} at {}",
+            stage.shown.last(),
+            stage.time
+        );
     }
 
     #[test]
