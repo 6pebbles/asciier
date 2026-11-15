@@ -706,13 +706,9 @@ fn a_step_on_the_last_frame_keeps_its_place() {
         std::thread::sleep(Duration::from_millis(1000));
         assert_eq!(status(&tty), Some(on_it), "{audio}");
         tty.send(b",");
-        let end = Instant::now() + Duration::from_secs(5);
-        while frame(tty.screen()) != 53 && Instant::now() < end {
-            let at = tty.len();
-            tty.wait(at, Duration::from_millis(100), |out| !out.is_empty());
-        }
-        let status = tty.screen().row(24);
-        assert_eq!(frame(tty.screen()), 53, "{audio}: `,` after it, {status:?}");
+        // the step back's chain, a pause, a seek past the end and mpv's step back, each with its draw, took over 5 s at load 85 (beside a load round: 1 of 11 runs)
+        let what = format!("frame 53 after `,`, {audio} s of sound");
+        tty.until(&what, |screen| frame(screen) == 53);
         tty.send(b"q");
         assert_eq!(tty.exit(), 0);
     }
