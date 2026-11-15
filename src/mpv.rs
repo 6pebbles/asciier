@@ -3905,14 +3905,27 @@ pub(crate) mod tests {
             mpv.tail = true;
             mpv.step(true)
         };
+        // mpv pauses itself at the first frame after the seek when the step reached it before that frame, which depends on how soon the frame decodes (1 of 4 rounds idle here); a pause sent with the step, unknown to the viewer, stands for that pause
+        let paused = |mpv: &mut Mpv| {
+            unknown(mpv);
+            mpv.command(&["set", "pause", "yes"]);
+        };
+        let paused_in_tail = |mpv: &mut Mpv| {
+            tail(mpv);
+            mpv.command(&["set", "pause", "yes"]);
+        };
         let cases: [(&str, bool, Ask); 7] = [
             ("`.` in the seek", false, &|mpv| mpv.step(true)),
             ("`space` in the seek", false, &|mpv| mpv.pause(true)),
             ("a pause sent before the seek", true, &|mpv| mpv.pause(true)),
             ("mpv's step sent before the seek", true, &unknown),
-            ("mpv's step sent before the seek", true, &unknown),
             ("mpv's step in the tail sent before the seek", true, &tail),
-            ("mpv's step in the tail sent before the seek", true, &tail),
+            ("mpv's step sent before the seek, paused", true, &paused),
+            (
+                "mpv's step in the tail sent before the seek, paused",
+                true,
+                &paused_in_tail,
+            ),
         ];
         let mut wrong = Vec::new();
         for (case, early, ask) in cases {
