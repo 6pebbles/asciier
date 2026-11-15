@@ -1961,18 +1961,23 @@ fn gap_clip(sandbox: &Sandbox, seconds: u32, after: u32) -> std::path::PathBuf {
 
 #[test]
 fn a_gap_in_a_variable_rate_clip_holds_the_frame_before_it() {
-    // row P24: Decoder.read of bin/ascii-viewer:479 at tag python-final holds the last frame across a gap; run in this harness the old viewer showed frames up to 9, then 35 to 49 of a 2 s clip with frames 10 to 34 left out. Here frames 10 to 109 of 6 s are left out: frames 1 to 9 are due by 0.36 s, 110 at 4.4 s, so the frame before the gap stays 4 s; the hold is timed from the test's first sight of a frame before the gap, which under load comes late in the hold (the 1 s gap of the 2 s clip measured 0.40 to 0.66 s at 111 to 215 runnable tasks, the first frame drawn there 6 or 9), so half the gap is the bound
+    // row P24: Decoder.read of bin/ascii-viewer:479 at tag python-final holds the last frame across a gap; run in this harness the old viewer showed frames up to 9, then 35 to 49 of a 2 s clip with frames 10 to 34 left out. Here frames 10 to 109 of 6 s are left out: frames 1 to 9 are due by 0.36 s, 110 at 4.4 s, so the frame before the gap stays 4 s; the hold is timed by when the updates came, from the first that shows a frame before the gap to the first after it, as the test's own first sight of one before the gap came late in the hold under load (1.06 s at load 73, the stress run; the 1 s gap of the 2 s clip measured 0.40 to 0.66 s at 111 to 215 runnable tasks), so half the gap is the bound
     let sandbox = Sandbox::new();
     let gap = gap_clip(&sandbox, 6, 110);
     let mut tty = sandbox.launch().arg(&gap).size(SMALL).start();
-    tty.until("the frames before the gap", |screen| {
-        (1..10).contains(&frame(screen))
-    });
-    let held = Instant::now();
-    tty.until("the frames after it", |screen| frame(screen) >= 110);
-    let took = held.elapsed();
-    assert!(took > Duration::from_secs(2), "held for {took:?}");
     assert_eq!(tty.exit(), 0);
+    let draws = updates(&tty, 0);
+    let came = |shows: &dyn Fn(u32) -> bool| {
+        let first = draws.iter().find(|(_, number, _)| shows(*number));
+        first.map(|(came, ..)| *came)
+    };
+    let before = came(&|number| (1..10).contains(&number));
+    let after = came(&|number| number >= 110);
+    let took = before.zip(after).map(|(before, after)| after - before);
+    assert!(
+        took.is_some_and(|took| took > Duration::from_secs(2)),
+        "held for {took:?}"
+    );
     let mut numbers: Vec<u32> = drawn(&tty.out()).into_iter().map(|(_, n)| n).collect();
     numbers.dedup();
     let after = numbers.iter().position(|number| *number >= 110).unwrap();
