@@ -353,6 +353,8 @@ impl Launch<'_> {
 
 struct Shared {
     out: Mutex<Vec<u8>>,
+    /// When each read of the output came: the output's length after it, and the time.
+    came: Mutex<Vec<(usize, Instant)>>,
     grew: Condvar,
     stop: AtomicBool,
 }
@@ -451,6 +453,11 @@ fn reader(
         let mut out = shared.out.lock().unwrap();
         let before = out.len().saturating_sub(16);
         out.extend_from_slice(&buf[..n as usize]);
+        shared
+            .came
+            .lock()
+            .unwrap()
+            .push((out.len(), Instant::now()));
         if due.is_none()
             && let Some((_, delay)) = &reply
             && out[before..].windows(8).any(|w| w == b"\x1b_Gi=31,")
@@ -551,6 +558,7 @@ impl Tty {
         drop(command);
         let shared = Arc::new(Shared {
             out: Mutex::new(Vec::new()),
+            came: Mutex::new(Vec::new()),
             grew: Condvar::new(),
             stop: AtomicBool::new(false),
         });
@@ -612,6 +620,38 @@ impl Tty {
                 .wait_timeout(out, left.min(Duration::from_millis(50)))
                 .unwrap()
                 .0;
+        }
+    }
+
+    /// When the byte at `at` of the output was read from the terminal: the program wrote it then or a little before (the reader polls every 10 ms); `None` before it came.
+    pub fn came(&self, at: usize) -> Option<Instant> {
+        let came = self.shared.came.lock().unwrap();
+        came.iter()
+            .find(|(end, _)| *end > at)
+            .map(|(_, when)| *when)
+    }
+
+    /// Wait until a whole synchronized update that ends past byte `from` leaves the screen as `test` wants, the updates replayed in order from the start: one shown between two looks at the live screen counts (a viewer drawing late under load can show a status row for one look at most); the output's length past that update's end. Fails the test after `PATIENCE`.
+    pub fn until_drawn(&self, what: &str, from: usize, test: impl Fn(&Screen) -> bool) -> usize {
+        let end = Instant::now() + PATIENCE;
+        let mut screen = Screen::new(self.size.rows as usize, self.size.cols as usize);
+        let mut fed = 0;
+        loop {
+            let out = self.out();
+            while let Some(start) = find(&out, b"\x1b[?2026h", fed) {
+                let Some(close) = find(&out, b"\x1b[?2026l", start) else {
+                    break;
+                };
+                screen.feed(&out[fed..close + 8]);
+                fed = close + 8;
+                if fed > from && test(&screen) {
+                    return fed;
+                }
+            }
+            if Instant::now() > end {
+                self.fail(&format!("no update showed {what}"));
+            }
+            self.wait(out.len(), Duration::from_millis(100), |out| !out.is_empty());
         }
     }
 
