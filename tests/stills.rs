@@ -739,6 +739,29 @@ fn h_and_l_step_through_the_folders_images_by_name() {
 }
 
 #[test]
+fn a_step_passes_over_a_size_its_decoder_gives_up_on_as_too_large() {
+    // rows S7, S18: step of bin/ascii-viewer:1888 at tag python-final: a file over 179 megapixels is passed over with `; <name> too large`, also a QOI over 400 megapixels and a PNG of the largest sides a PNG's header holds, whose decoders give up on such headers, as Pillow measures them (identifies and open_picture of lib/ascii_image.py:67 and :105)
+    let sandbox = Sandbox::new();
+    let big = sandbox.folder("big");
+    save(&gradient(40, 30), &big.join("0.png"));
+    let sides = [20025u32.to_be_bytes(), 20025u32.to_be_bytes()].concat();
+    let qoi = [&b"qoif"[..], &sides, &[4, 0], &[0, 0, 0, 0, 0, 0, 0, 1]].concat();
+    std::fs::write(big.join("1.qoi"), qoi).unwrap();
+    save(&gradient(40, 30), &big.join("2.png"));
+    png_header(&big.join("3.png"), 0x7FFF_FFFF, 0x7FFF_FFFF);
+    let mut tty = drawn(&sandbox, &big.join("0.png"), SMALL);
+    for (keys, text) in [
+        (b"l", "2.png  3/4; 1.qoi too large"),
+        (b"l", "0.png  1/4; 3.png too large"),
+        (b"h", "2.png  3/4; 3.png too large"),
+        (b"h", "0.png  1/4; 1.qoi too large"),
+    ] {
+        says(&mut tty, keys, text);
+    }
+    quit(&mut tty);
+}
+
+#[test]
 fn steps_at_the_edges_of_the_listing() {
     // row S7a: step and show_next of bin/ascii-viewer:1888 and :1850 at tag python-final: a still that is no entry (a PNG named .raw) counts from the first entry, so `l` shows the second and `h` the last; without entries nothing happens; a lone image opens again, `a.png  1/1`; when no entry opens, nothing changes and nothing is said
     let sandbox = Sandbox::new();

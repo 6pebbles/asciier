@@ -1213,19 +1213,28 @@ fn cells_in_color0_and_spaces_stay_blank() {
 
 #[test]
 fn a_still_over_the_pixel_limit_is_refused() {
-    // row C9: bin/ascii-convert:526 at tag python-final (tests/test_convert.py:156): exit 1, `<name> is too large to open (over 179 megapixels)` (twice Pillow's limit, lib/ascii_image.py:23), no picture and no video made of it
+    // rows C9, N1: bin/ascii-convert:526 at tag python-final (tests/test_convert.py:156): exit 1, `<name> is too large to open (over 179 megapixels)` (twice Pillow's limit, lib/ascii_image.py:23), no picture and no video made of it; so too for a PNG of the largest sides a PNG's header holds and a QOI over 400 megapixels, whose decoders give up on such headers, as Pillow measures them (seen 2026-11-15 with the old converter, Pillow 13.0.0); N1: after `asciier: `, the old converter's `ascii-convert: `
     let sandbox = Sandbox::new();
     png_header(&sandbox.path("huge.png"), 20_000, 10_000);
-    let ran = convert(&sandbox, &["huge.png"]);
-    assert_eq!(
-        (ran.code, ran.stdout.as_str(), ran.stderr.as_str()),
-        (
-            Some(1),
-            "",
-            "asciier: huge.png is too large to open (over 179 megapixels)\n"
-        )
-    );
-    assert!(!sandbox.path("huge-ascii.png").exists() && !sandbox.path("huge-ascii.mp4").exists());
+    png_header(&sandbox.path("side.png"), 0x7FFF_FFFF, 0x7FFF_FFFF);
+    std::fs::write(sandbox.path("over.qoi"), qoi_header(20025, 20025)).unwrap();
+    for name in ["huge.png", "side.png", "over.qoi"] {
+        let ran = convert(&sandbox, &[name]);
+        let message = format!("asciier: {name} is too large to open (over 179 megapixels)\n");
+        assert_eq!(
+            (ran.code, ran.stdout.as_str(), ran.stderr.as_str()),
+            (Some(1), "", message.as_str())
+        );
+        let stem = name.split_once('.').unwrap().0;
+        let made = ["png", "mp4"].map(|kind| sandbox.path(format!("{stem}-ascii.{kind}")).exists());
+        assert_eq!(made, [false, false], "{name}");
+    }
+}
+
+/// A QOI's header of `w` x `h` px of RGBA, then the end marker: no pixels.
+fn qoi_header(w: u32, h: u32) -> Vec<u8> {
+    let sides = [w.to_be_bytes(), h.to_be_bytes()].concat();
+    [&b"qoif"[..], &sides, &[4, 0], &[0, 0, 0, 0, 0, 0, 0, 1]].concat()
 }
 
 #[test]

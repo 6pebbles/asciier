@@ -63,17 +63,25 @@ fn too_large((w, h): (u32, u32)) -> bool {
     w as u64 * h as u64 > MAX_PIXELS
 }
 
+/// A file that cannot be read as far as a walk goes holds no picture.
+impl From<std::io::Error> for Not {
+    fn from(_: std::io::Error) -> Not {
+        Not::Image
+    }
+}
+
 /// `work`'s result; `None` when it panicked: a decoder's or resvg's panic is a file that does not open, with no message and the terminal left as it is.
 fn caught<T>(work: impl FnOnce() -> T) -> Option<T> {
     crate::term::guard(std::panic::AssertUnwindSafe(work)).ok()
 }
 
-/// A raster still's frames as Pillow's n_frames counts a well-formed file's (lib/ascii_image.py:61), up to 2, nothing decoded: a GIF by its blocks, an APNG and a WebP by their chunks, 1 for any other format; `Not::Image` where they cannot be counted, `Not::TooLarge` for a GIF whose screen, grown to its first frame, is over `MAX_PIXELS`; a damaged file can count otherwise in Pillow (N6, N7).
+/// A raster still's frames as Pillow's n_frames counts a well-formed file's (lib/ascii_image.py:61), up to 2, nothing decoded: a GIF by its blocks, an APNG and a WebP by their chunks, 1 for any other format; `Not::Image` where they cannot be counted, `Not::TooLarge` for a GIF whose screen, grown to its first frame, and for a PNG or a QOI whose header is over `MAX_PIXELS`, measured before their decoders, which refuse some such headers as no picture; a damaged file can count otherwise in Pillow (N6, N7).
 fn frames(path: &Path, format: Option<ImageFormat>) -> std::result::Result<u32, Not> {
     let mut file = BufReader::new(File::open(path).map_err(|_| Not::Image)?);
     let counted = match format {
         Some(ImageFormat::Gif) => return gif_frames(&mut file),
-        Some(ImageFormat::Png) => png_frames(&mut file),
+        Some(ImageFormat::Png) => return png_frames(&mut file),
+        Some(ImageFormat::Qoi) => return qoi_frames(&mut file),
         Some(ImageFormat::WebP) => webp_frames(&mut file),
         _ => Ok(1),
     };
@@ -165,18 +173,27 @@ fn gif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
 /// Bytes of a PNG's profile Pillow 13 inflates at most: it refuses a file whose profile holds more (PngImagePlugin MAX_TEXT_CHUNK, _safe_zlib_decompress).
 const MAX_TEXT_CHUNK: u64 = 1 << 20;
 
-/// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two; an error for an acTL under 8 bytes and for a profile over `MAX_TEXT_CHUNK`, files Pillow refuses, and for a file without image data, which Pillow counts as one frame where IEND ends it (N6, N7). The profile measured is the png crate's, the first iCCP within its bounds, which it inflates whole while the decoder is made.
-fn png_frames(file: &mut (impl BufRead + Seek)) -> std::io::Result<u32> {
-    let (mut at, mut frames, mut control, mut profile) = (8, None, false, true); // past the signature
+/// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two; `Not::Image` for an acTL under 8 bytes and for a profile over `MAX_TEXT_CHUNK`, files Pillow refuses, and for a file without image data, which Pillow counts as one frame where IEND ends it (N6, N7); `Not::TooLarge` for a header over `MAX_PIXELS`, measured at the image data as Pillow measures it, where the png crate gives up on the largest headers as no picture. The profile measured is the png crate's, the first iCCP within its bounds, which it inflates whole while the decoder is made.
+fn png_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not> {
+    let (mut at, mut size, mut frames, mut control, mut profile) = (8, None, None, false, true); // past the signature
     loop {
         file.seek(SeekFrom::Start(at))?;
         let mut head = [0; 8];
         file.read_exact(&mut head)?;
         let length = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
         match &head[4..] {
+            b"IDAT" | b"fdAT" if size.is_some_and(too_large) => return Err(Not::TooLarge),
             b"IDAT" | b"fdAT" => return Ok(frames.map_or(1, |n| n + u32::from(!control))),
+            b"IHDR" if size.is_none() => {
+                let mut sides = [0; 8];
+                file.by_ref().take(length.into()).read_exact(&mut sides)?;
+                let side = |at: usize| {
+                    u32::from_be_bytes([sides[at], sides[at + 1], sides[at + 2], sides[at + 3]])
+                };
+                size = Some((side(0), side(4)));
+            }
             b"fcTL" => control = true,
-            b"acTL" if length < 8 => return Err(std::io::ErrorKind::InvalidData.into()),
+            b"acTL" if length < 8 => return Err(Not::Image),
             b"acTL" => {
                 let mut count = [0; 4];
                 file.read_exact(&mut count)?;
@@ -189,7 +206,7 @@ fn png_frames(file: &mut (impl BufRead + Seek)) -> std::io::Result<u32> {
             b"iCCP" if profile && length <= 0x7FFF_FFFF => {
                 profile = false;
                 if profile_too_long(file.by_ref().take(length.into()))? {
-                    return Err(std::io::ErrorKind::InvalidData.into());
+                    return Err(Not::Image);
                 }
             }
             _ => {}
@@ -208,6 +225,17 @@ fn profile_too_long(mut data: impl BufRead) -> std::io::Result<bool> {
     let mut profile = flate2::bufread::ZlibDecoder::new(data).take(MAX_TEXT_CHUNK + 1);
     let inflated = std::io::copy(&mut profile, &mut std::io::sink());
     Ok(inflated.is_ok_and(|bytes| bytes > MAX_TEXT_CHUNK))
+}
+
+/// A QOI's one frame, its header measured before the decoder, which refuses one over 400 megapixels as no picture, where Pillow 13 measures it (QoiImagePlugin _open, then Image.open's measure): over `MAX_PIXELS`, `Not::TooLarge`.
+fn qoi_frames(file: &mut impl Read) -> std::result::Result<u32, Not> {
+    let mut head = [0; 12]; // qoif, the width, the height
+    file.read_exact(&mut head)?;
+    let side = |at: usize| u32::from_be_bytes([head[at], head[at + 1], head[at + 2], head[at + 3]]);
+    match too_large((side(4), side(8))) {
+        true => Err(Not::TooLarge),
+        false => Ok(1),
+    }
 }
 
 /// A WebP's frames as libwebp counts a well-formed one's for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP; libwebp's demuxer leaves out a frame without an image and refuses a file cut short, so a damaged WebP can count otherwise in Pillow (N6, N7).
@@ -1495,6 +1523,47 @@ mod tests {
         let full = dir.file("full.png", png_header(12470, 14351));
         assert_eq!(kind(&full), "no image");
         assert!(identifies(&full));
+    }
+
+    #[test]
+    fn a_size_its_decoder_gives_up_on_is_too_large() {
+        // row S18: Pillow 13 measures a PNG or a QOI by its header once it has read to the image data (PngImagePlugin and QoiImagePlugin _open, then Image.open's _decompression_bomb_check): over the limit it is too large to open and identifies all the same (lib/ascii_image.py:76, :95 at tag python-final; seen 2026-11-15, Pillow 13.0.0: a PNG of 2147483647 x 2147483647 px, the largest a PNG's header holds, of 8 bits a channel, and QOIs of 20025 x 20025 px and of 4294967295 x 4294967295 px); the png crate gives up on that PNG's header (its limits, though none were set) and the qoi crate on one over 400 megapixels, as no picture, before a size is measured
+        let dir = Dir::new("decoder_gives_up");
+        let side = png_chunks(&[
+            (b"IHDR", ihdr(0x7FFF_FFFF, 0x7FFF_FFFF, 8, 2)),
+            (b"IDAT", zlib(b"")),
+            (b"IEND", vec![]),
+        ]);
+        let qoi = |side: u32| {
+            let sides = [side.to_be_bytes(), side.to_be_bytes()].concat();
+            [
+                &b"qoif"[..],
+                &sides,
+                &[4, 0],
+                &[0; 8],
+                &[0, 0, 0, 0, 0, 0, 0, 1],
+            ]
+            .concat()
+        };
+        for (name, data) in [
+            ("side.png", side),
+            ("over.qoi", qoi(20025)),
+            ("most.qoi", qoi(u32::MAX)),
+        ] {
+            let file = dir.file(name, data);
+            let Opened::TooLarge(why) = open(&file) else {
+                panic!("{name}: {}", kind(&file))
+            };
+            assert_eq!(
+                why,
+                format!("{name} is too large to open (over 179 megapixels)")
+            );
+            assert!(identifies(&file), "{name}");
+            assert!(
+                matches!(original_png(&file, 0), Err(NoCopy::TooLarge)),
+                "{name}"
+            );
+        }
     }
 
     #[test]
