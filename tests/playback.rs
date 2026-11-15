@@ -1125,9 +1125,10 @@ fn a_stream_without_a_length_shows_its_clock_alone() {
     );
     let mut tty = sandbox.launch().arg(&raw).size(SMALL).start();
     tty.await_status("> 00:01");
+    // the row of the last update, playing: the mark and the clock alone
     let (row, _) = last_drawn(&tty);
     assert!(
-        seconds(&row).is_some() && row.chars().count() == 7,
+        row.starts_with("> ") && seconds(&row).is_some() && row.chars().count() == 7,
         "{row:?}"
     );
     tty.send(b"q");
