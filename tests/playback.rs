@@ -547,8 +547,11 @@ fn seeks_move_by_their_steps_and_stop_at_both_ends() {
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
     pause(&mut tty);
-    let steps: [(&[u8], u32); 15] = [
-        (LEFT, 0), // from about 1 s: held at the start
+    let steps: [(&[u8], u32); 17] = [
+        // the pause lands where mpv is as it reads the key, under load seconds in (the stress run: 5.4 to 9.4 s, `space` read 8.2 to 14.6 s after the launch at load 127 to 173), so Down first, held at the start
+        (DOWN, 0),
+        (SHIFT_RIGHT, 10),
+        (LEFT, 0), // from 1 s: held at the start
         (SHIFT_RIGHT, 10),
         (RIGHT, 60),
         (b"l", 110),
@@ -575,7 +578,7 @@ fn seeks_move_by_their_steps_and_stop_at_both_ends() {
 
 #[test]
 fn frame_steps_move_one_frame_and_pause() {
-    // rows P15, N2: frame_step of bin/ascii-viewer:1441 at tag python-final: `.` a frame on, `,` a frame back, then paused, a playing clip paused first, one or two frames after the one on screen at the key; `,` on the first frame and `.` on the last only pause; the clock follows the frame; `,` right after a seek is mpv's back step (N2); seen before `.` on a playing clip went from the frame drawn: 1 of 8 runs at load 20 one or two frames on, the others 5 to 21, mpv stepping from the frame it held, past the one drawn under load
+    // rows P15, N2: frame_step of bin/ascii-viewer:1441 at tag python-final: `.` a frame on, `,` a frame back, then paused, a playing clip paused first, one or two frames after the one on screen at the key (a few more under the accepted limit); `,` on the first frame and `.` on the last only pause; the clock follows the frame; `,` right after a seek is mpv's back step (N2); seen before `.` on a playing clip went from the frame drawn: 1 of 8 runs at load 20 one or two frames on, the others 5 to 21, mpv stepping from the frame it held, past the one drawn under load
     let sandbox = Sandbox::new();
     // frames 0 to 254, all under the counter's wrap; a clip of 2.2 s ended before `.` landed at load 55 (the review: 2 of 18 copies)
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.2, 10.2, &[]);
@@ -826,13 +829,11 @@ fn steps_typed_apart_each_take_their_frame() {
 
 #[test]
 fn steps_take_one_source_frame_above_30_frames_a_second() {
-    // row N3: `.` and `,` step one frame of a 60 fps source; the old viewer stepped on its 30 fps grid, two of them
+    // row N3: `.` and `,` step one frame of a 60 fps source; the old viewer stepped on its 30 fps grid, two of them; paused at the start, as the 3 s clip ended before a pause sent once it played on (the stress run: 1 of 10 at load 85)
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "fast.mp4", "160x90", 60, 3.0, 0.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    tty.await_playing();
-    pause(&mut tty);
-    lands(&mut tty, LEFT, 0, "| 00:00");
+    paused_at_the_start(&mut tty);
     for (key, number) in [(b".", 1), (b".", 2), (b",", 1)] {
         lands(&mut tty, key, number, "| 00:00");
     }
@@ -917,16 +918,10 @@ fn volume_keys_step_by_2_up_to_mpv_confs_volume_max() {
     let video = clip(&sandbox, "clip.mp4", 20.0, "160x90", 25);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
-    tty.until("00:02", |screen| screen.row(24).starts_with("> 00:02"));
-    let start = Instant::now();
-    tty.until("00:05", |screen| screen.row(24).starts_with("> 00:05"));
-    let took = start.elapsed();
-    // at 200 % it would take 1.5 s
-    assert!(
-        took > Duration::from_millis(2200),
-        "3 s of the clip in {took:?}"
-    );
     pause(&mut tty);
+    // the speed mpv reports, which the speed keys step from: 100 % (with speed=2 read, `]` would say 220 %); timed by the clock seen on the live screen, 3 s of the clip came in 2.09 s under load, the first sighting late (the stress run)
+    says(&mut tty, b"]", "speed 110%");
+    says(&mut tty, b"\\", "speed 100%");
     for (key, volume) in [
         (b"0", 102),
         (b"*", 104),
@@ -974,22 +969,21 @@ fn the_volume_toast_rounds_mpvs_volume() {
 
 #[test]
 fn mute_and_volume_hold_through_seeks_and_loops() {
-    // rows P7, P12: start_audio and launch_mpv of bin/ascii-viewer:1313 at tag python-final hand volume and mute to each mpv started for a seek or a loop; `m` toasts `muted` and `unmuted`
+    // rows P7, P12: start_audio and launch_mpv of bin/ascii-viewer:1313 at tag python-final hand volume and mute to each mpv started for a seek or a loop; `m` toasts `muted` and `unmuted`; paused at the start, as the 3 s clip ended before a pause sent once it played on (the stress run: 2 of 10 at load 83 to 89), and the loop's last second and its start again taken from every update, as a look at the live screen under load missed either
     let sandbox = Sandbox::new();
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 3.0, 3.0, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    tty.await_playing();
-    pause(&mut tty);
+    paused_at_the_start(&mut tty);
     says(&mut tty, b"m", "muted");
     says(&mut tty, b"0", "volume 102");
     lands(&mut tty, DOWN, 0, "");
     says(&mut tty, b"L", "loop on");
-    tty.send(b" ");
+    let at = tty.send(b" ");
     // round the end and on from the start
-    tty.until("the last second", |screen| {
+    let at = tty.until_drawn("the last second", at, |screen| {
         seconds(&screen.row(24)) == Some(2)
     });
-    tty.until("the start again", |screen| {
+    tty.until_drawn("the start again", at, |screen| {
         seconds(&screen.row(24)) == Some(0)
     });
     pause(&mut tty);
