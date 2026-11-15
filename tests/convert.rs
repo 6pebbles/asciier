@@ -542,15 +542,6 @@ impl Running {
         String::from_utf8_lossy(&self.err.lock().unwrap()).into_owned()
     }
 
-    /// Wait until stderr holds `text`; fails the test after `PATIENCE`.
-    fn await_err(&self, text: &str) {
-        let end = Instant::now() + PATIENCE;
-        while !self.err().contains(text) {
-            assert!(Instant::now() < end, "no {text:?} in {:?}", self.err());
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
     /// Ctrl-C as a terminal sends it: SIGINT to the process group; back once the converter has taken it, or has ended. Refused once `ended` has reaped the converter.
     fn interrupt(&self) {
         assert!(!self.reaped, "Ctrl-C after the converter was reaped");
@@ -2592,7 +2583,7 @@ fn a_childs_lines_on_stderr_fall_between_the_progress_lines() {
 
 #[test]
 fn ctrl_c_writes_the_frames_in_flight_and_finishes_the_file() {
-    // rows X9, X8, X4, N24: tests/test_convert.py:305 at tag python-final: the encoder held after 10 frames until the reading stops, then Ctrl-C (SIGINT to the group): the frames read are written whole but those Ctrl-C found in the pipes (4 at most), the file is finished and plays them, on stderr the progress then `stopped at frame <n>: <out> holds the part converted` and nothing else (the old converter killed the decoder at once: no complaint of a broken pipe from it), the path printed, then death by SIGINT (N25; the old converter exited 130); nothing left running; X4 memory bounded, N24 8 in flight (AGENTS.md, 2026-11-11): at most 10 frames past the 10 held, 8 waiting and one each in the reader's and the painter's hands
+    // rows X9, X8, X4, N24: tests/test_convert.py:305 at tag python-final: the encoder held after 10 frames of RGB (seen in its input: the old converter printed its count only as it read a frame, bin/ascii-convert:475, and fed rgb0, 7.5 of its frames before the hold) until the reading stops, then Ctrl-C (SIGINT to the group): the frames read are written whole but those Ctrl-C found in the pipes (4 at most), the file is finished and plays them, on stderr the progress, its 10 held among the counts of 250, then `stopped at frame <n>: <out> holds the part converted` and nothing else (the old converter killed the decoder at once: no complaint of a broken pipe from it), the path printed, then death by SIGINT (N25; the old converter exited 130); nothing left running; X4 memory bounded, N24 8 in flight (AGENTS.md, 2026-11-11): at most 10 frames past the 10 held, 8 waiting and one each in the reader's and the painter's hands
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "long.mp4", 10.0, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
@@ -2602,7 +2593,7 @@ fn ctrl_c_writes_the_frames_in_flight_and_finishes_the_file() {
         &sandbox,
         &["-W", "320", "-H", "180", "-o", "long-out.mp4", "long.mp4"],
     );
-    run.await_err("\r10/250 frames");
+    settled(&sandbox.path("encode.raw"), 10 * FRAME);
     let read = settled(&sandbox.path("decode.ppm"), 20 * PPM_FRAME) / PPM_FRAME;
     run.interrupt();
     std::fs::write(sandbox.path("go"), "").unwrap();
@@ -2615,7 +2606,8 @@ fn ctrl_c_writes_the_frames_in_flight_and_finishes_the_file() {
     let (shown, said) = err
         .split_once("stopped at frame ")
         .unwrap_or_else(|| panic!("{err:?}"));
-    progress(shown);
+    let (counts, total) = progress(shown);
+    assert!(counts.contains(&10) && total == "250", "{err:?}");
     let done: usize = said
         .strip_suffix(": long-out.mp4 holds the part converted\n")
         .unwrap_or_else(|| panic!("{err:?}"))
@@ -2634,7 +2626,7 @@ fn ctrl_c_writes_the_frames_in_flight_and_finishes_the_file() {
 
 #[test]
 fn ctrl_c_while_the_decoder_writes_nothing_stops_the_reading() {
-    // rows X9, N25: convert_video of bin/ascii-convert:461 at tag python-final: Ctrl-C reached the old converter in its read of the decoder's pipe (KeyboardInterrupt), so a decoder that writes nothing held no Ctrl-C up: it ended within 3 s of one SIGINT with X9's message (reviewer's probe); a decoder that gives 5 of 20 frames, then nothing with its pipe open, and one Ctrl-C once the 5 are written: the decoder killed, the file finished with the 5, on stderr the progress then `stopped at frame 5: <out> holds the part converted`, the path printed, death by SIGINT, nothing left running
+    // rows X9, N25: convert_video of bin/ascii-convert:461 at tag python-final: Ctrl-C reached the old converter in its read of the decoder's pipe (KeyboardInterrupt), so a decoder that writes nothing held no Ctrl-C up: it ended within 3 s of one SIGINT with X9's message (reviewer's probe); a decoder that gives 5 of 20 frames, then nothing with its pipe open, and one Ctrl-C once the 5 are written (seen in the encoder's input: the old converter printed its count only as it read a frame, bin/ascii-convert:475): the decoder killed, the file finished with the 5, on stderr the progress then `stopped at frame 5: <out> holds the part converted`, the path printed, death by SIGINT, nothing left running
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "clip.mp4", 0.8, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
@@ -2644,7 +2636,7 @@ fn ctrl_c_while_the_decoder_writes_nothing_stops_the_reading() {
         &["-W", "320", "-H", "180", "-o", "clip-out.mp4", "clip.mp4"],
     );
     await_file(&sandbox.path("held"));
-    run.await_err("\r5/20 frames");
+    settled(&sandbox.path("encode.raw"), 5 * FRAME);
     run.interrupt();
     let (status, out, err) = run.finish();
     assert_eq!(
