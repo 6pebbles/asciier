@@ -3325,7 +3325,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_playing_step_on_a_variable_rate_clip_takes_the_next_frame() {
-        // rows P15, N2: `.` on a playing clip pauses and shows the frame after the one on screen, by a seek 4 ms short of that frame's time as the frame rate gives it; a seek landing at its target can be past the picture's end, where the position is the sound's, or a frame of its own that sits there, which mpv's step then tells apart; frames 44, 32 and 44 ms apart here (25 a second on average): from a frame before a 32 ms gap the target falls on the next frame's time, and mpv's step moved on from it (the review's probe: `.` on frame 34 ended on 36, 3 of 3); `,` then shows the frame `.` left; every frame drawn is marked shown, as the viewer does, and the frame on screen is taken at its own time: under load mpv's position given with a frame was the next one's (the accepted limit of a playing `.` a few frames past, owner 2026-11-13; the stress run: 9 of 22 traced rounds at load 42 to 77 ended a frame on)
+        // rows P15, N2: `.` on a playing clip pauses and shows the frame after the one on screen, by a seek 4 ms short of that frame's time as the frame rate gives it; a seek landing at its target can be past the picture's end, where the position is the sound's, or a frame of its own that sits there, which mpv's step then tells apart; frames 44, 32 and 44 ms apart here (25 a second on average): from a frame before a 32 ms gap the target falls on the next frame's time, and mpv's step moved on from it (the review's probe: `.` on frame 34 ended on 36, 3 of 3); `,` then shows the frame `.` left; every frame drawn is marked shown, as the viewer does, and the time of the frame on screen is put right only where the code's is off its own, the accepted limit's sign (a playing `.` a few frames past, owner 2026-11-13): under load mpv's position given with a frame was the next one's (the stress run: 9 of 22 traced rounds at load 42 to 77 ended a frame on); the rounds put right are counted
         let mut stage = Stage::new();
         let file = stage.file("vfr.mp4");
         let times = "(floor(N/3)*0.12+if(eq(mod(N\\,3)\\,1)\\,0.044\\,if(eq(mod(N\\,3)\\,2)\\,0.076\\,0)))/TB";
@@ -3344,7 +3344,7 @@ pub(crate) mod tests {
         args.push(file.to_str().unwrap());
         ffmpeg(&args);
         stage.open(&file);
-        let mut wrong = Vec::new();
+        let (mut wrong, mut put) = (Vec::new(), 0);
         for round in 0..9 {
             stage.mpv.seek(&["seek", "1", "absolute+exact"]);
             assert!(idle(&mut stage, 10.0), "{round}");
@@ -3362,7 +3362,11 @@ pub(crate) mod tests {
                             if on >= 32 && on % 3 == round / 3 && stepped.is_none() {
                                 stepped = Some(on);
                                 let pattern = [0.0, 0.044, 0.076][on % 3];
-                                stage.mpv.on_screen = Some((on / 3) as f64 * 0.12 + pattern);
+                                let own = (on / 3) as f64 * 0.12 + pattern;
+                                if !stage.mpv.on_screen.is_some_and(|at| near(at, own, 0.005)) {
+                                    stage.mpv.on_screen = Some(own);
+                                    put += 1;
+                                }
                                 stage.mpv.step(true);
                             }
                         }
@@ -3386,7 +3390,10 @@ pub(crate) mod tests {
                 ));
             }
         }
-        assert!(wrong.is_empty(), "{wrong:#?}");
+        assert!(
+            wrong.is_empty(),
+            "{wrong:#?}, the frame's time put right in {put} of 9 rounds"
+        );
     }
 
     #[test]
