@@ -1461,7 +1461,7 @@ mod tests {
 
     #[test]
     fn over_the_limit_is_too_large_not_unopenable() {
-        // rows S18, S8a: tests/test_image.py:116 at tag python-final: a still over twice Pillow's MAX_IMAGE_PIXELS is not opened, too large with `<name> is too large to open (over 179 megapixels)` (lib/ascii_image.py:23, :95), and identifies all the same (lib/ascii_image.py:76); here also its copy refused as too large, and one at the limit given to the decoder
+        // row S18: tests/test_image.py:116 at tag python-final: a still over twice Pillow's MAX_IMAGE_PIXELS is not opened, too large with `<name> is too large to open (over 179 megapixels)` (lib/ascii_image.py:23, :95), and identifies all the same (lib/ascii_image.py:76); here also its copy refused as too large, and one at the limit given to the decoder
         let dir = Dir::new("too_large");
         // 2 * 5 * 29 * 43 = 12470 and 113 * 127 = 14351: their product is MAX_PIXELS
         assert_eq!(12470 * 14351, MAX_PIXELS);
