@@ -105,8 +105,9 @@ pub struct Mpv {
     surface: Vec<u8>,
     /// mpv's `volume-max`, read when a file opened.
     volume_max: f64,
-    /// The file is a picture, held until `q` (`picture`): a single frame, the first and the last.
+    /// The file is a picture, held until `q` (`picture`): a single frame, the first and the last; `sound`: it plays sound.
     still: bool,
+    sound: bool,
 }
 
 /// A request on the frame shown, the position or the pause. Requests that reach mpv together run in one pass, where it merges or drops them: a seek and a step forward leave it playing, a step back takes the place of a seek waiting to run or adds itself to it as a second, a step back during a seek is dropped, a play before a seek has run counts that seek from the frame then due. So each goes once mpv has done the one before (`Busy`), as the old viewer did each key before the next.
@@ -544,6 +545,7 @@ impl Mpv {
             surface: Vec::new(),
             volume_max: 130.0,
             still: false,
+            sound: false,
         };
         let conf =
             std::env::var_os("HOME").map(|home| Path::new(&home).join(".config/mpv/mpv.conf"));
@@ -1191,10 +1193,9 @@ impl Mpv {
                     self.option("image-display-duration", "inf");
                 }
                 let plays = |track| self.get(track).is_some_and(|id| id != "no");
-                Some(Event::Loaded {
-                    video: plays(c"vid"),
-                    audio: plays(c"aid"),
-                })
+                let (video, audio) = (plays(c"vid"), plays(c"aid"));
+                self.sound = audio;
+                Some(Event::Loaded { video, audio })
             }
             END_FILE => {
                 // SAFETY: the data of this event is an `mpv_event_end_file`.
@@ -1314,10 +1315,10 @@ impl Mpv {
                     // no step goes from a frame drawn before it
                     (self.tail, self.back, self.rendered, self.on_screen) =
                         (false, None, None, None);
-                    // a pause on its way lands in the restart and holds it back: mpv plays until it has restarted, and the pause goes again then; a seek of the viewer's still to run drops the sound queued before (player/playloop.c mp_seek, no NOFLUSH), and with it the hold
+                    // a pause on its way lands in the restart and holds it back: mpv plays until it has restarted, and the pause goes again then; a seek of the viewer's still to run drops the sound queued before (player/playloop.c mp_seek, no NOFLUSH), and with it the hold; without sound nothing holds the restart back (player/audio.c), where a one-frame clip loops a hundred times a second and a pause undone at each loop never landed
                     let seeks = matches!(self.busy, Some(Busy::Seek { .. }));
                     let held = self.held.iter().filter(|op| matches!(op, Op::Pause { .. }));
-                    if !seeks && self.asked && self.pausing > held.count() as u32 {
+                    if self.sound && !seeks && self.asked && self.pausing > held.count() as u32 {
                         self.pausing += 2;
                         self.put_pause(false);
                         self.held.push_front(Op::Pause {
@@ -4411,6 +4412,35 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(held, Vec::<String>::new(), "held, no end within 2 s");
+    }
+
+    #[test]
+    fn a_pause_lands_on_a_one_frame_clip_that_loops_without_sound() {
+        // row P8: a pause pauses; a one-frame clip without sound, looping, seeks to its start a hundred times a second or more, each a seek of mpv's own, and a pause still on its way at one was undone until the restart and sent again, then undone at the next (the review's probe: 3 of 3 rounds held the second pause with mpv playing); without sound nothing holds the restart back, and the pause now lands
+        let mut stage = Stage::new();
+        let file = stage.file("one.mp4");
+        let mut args = vec!["-f", "lavfi", "-i", QUADRANTS, "-frames:v", "1"];
+        args.extend(H264);
+        args.push(file.to_str().unwrap());
+        ffmpeg(&args);
+        assert_eq!(stage.open(&file), (true, false));
+        stage.settle();
+        stage.mpv.set("loop-file", "inf");
+        let mut wrong = Vec::new();
+        for round in 0..3 {
+            stage.mpv.pause(false);
+            // a window for the loops to run
+            stage.pump(0.3, |_| false);
+            stage.mpv.pause(true);
+            let done = idle(&mut stage, 5.0) && stage.mpv.paused && stage.holds(0.3);
+            if !done {
+                wrong.push(format!(
+                    "round {round}: paused {}, held {:?}, pausing {}",
+                    stage.mpv.paused, stage.mpv.held, stage.mpv.pausing
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
