@@ -1747,17 +1747,49 @@ fn under_page(out: &[u8], at: usize) -> u32 {
     drawn(&out[..page]).last().unwrap().1
 }
 
+/// The playing updates before the render page came, the page opened after byte `at`, in an 80 x 24 window: when each came and the counter's frame.
+fn playing_under_page(tty: &Tty, at: usize) -> Vec<(Instant, u32)> {
+    let out = tty.out();
+    let page = find(&out, b" Render", at).unwrap();
+    let mut screen = Screen::new(24, 80);
+    let (mut fed, mut seen) = (0, Vec::new());
+    while let Some(start) = find(&out[..page], b"\x1b[?2026h", fed) {
+        let Some(close) = find(&out[..page], b"\x1b[?2026l", start) else {
+            break;
+        };
+        screen.feed(&out[fed..close + 8]);
+        fed = close + 8;
+        if screen.row(24).starts_with("> ") {
+            seen.push((tty.came(close).unwrap(), frame(&screen)));
+        }
+    }
+    seen
+}
+
 #[test]
 fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
-    // rows P22, R3, R16, N5, N23: open_page and close_page of bin/ascii-viewer:2048 and :2112 at tag python-final: the page on the frame at full size, named by its time when it opens (N5: the frame mpv holds, within 3 frames of the one drawn while playing, the one on screen when paused, its time to 0.1 s); of R3's defaults the size, 1920 on the long side, and the crop, the whole frame; R16's export, `s`, the full-size PNG beside the clip under that name; playback pauses meanwhile and goes on after; the page's lines as the old viewer drew them in this harness; on the last frame too (N23: the old viewer could end there, P29)
+    // rows P22, R3, R16, N5, N23: open_page and close_page of bin/ascii-viewer:2048 and :2112 at tag python-final: the page on the frame at full size, named by its time when it opens (N5: the frame mpv holds, within 3 frames of the one drawn while playing, the one on screen when paused, its time to 0.1 s); of R3's defaults the size, 1920 on the long side, and the crop, the whole frame; R16's export, `s`, the full-size PNG beside the clip under that name; playback pauses meanwhile and goes on after; the page's lines as the old viewer drew them in this harness; on the last frame too (N23: the old viewer could end there, P29); frames 0 to 254, all under the counter's wrap: of 8 s, the clip ended before the pause sent after the page closed (the stress run: 2 of 12 runs at load 88 to 114)
     let sandbox = Sandbox::new();
-    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 8.0, 8.0, &[]);
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.2, 10.2, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
     tty.await_playing();
     let at = tty.send(b"r");
     tty.until("the page", |screen| screen.row(1).starts_with(" Render"));
     let opened = Instant::now();
     let last = under_page(&tty.out(), at);
+    // the accepted limit of 2026-11-15 (N5's, the fifth): a viewer drawing more than 3 frames apart from mpv under heavy load leaves mpv's frame, which the page takes when mpv answers, past the one on screen (the stress run: 4 past at load 91; round 6: 24 past at load 63); that shows in the last two frames drawn before the page, more than 3 apart or over 3 frames' time apart, and lets the page's frame go past by the frames mpv played meanwhile, as `frame_steps_move_one_frame_and_pause` lets a playing `.`; within 3 of it otherwise
+    let few = match playing_under_page(&tty, at)[..] {
+        [.., (before, earlier), (latest, _)] => {
+            let (apart, skipped) = (latest - before, last.saturating_sub(earlier));
+            let played = (apart.as_secs_f64() * 25.0).ceil() as u32;
+            if apart > Duration::from_millis(120) || skipped > 3 {
+                skipped.max(played)
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    };
     // the frame comes with the first render (the old page rendered in the background)
     tty.until("the preview's frame", |screen| {
         screen.row(1).contains(" 1920x1080 · 160 columns ")
@@ -1770,13 +1802,13 @@ fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
         "{}",
         screen.text()
     );
-    // the page's export holds the frame it was given: within 3 of the one on screen
+    // the page's export holds the frame it was given: within 3 of the one on screen, more only under the limit's sign
     let name = page_name(&mut tty);
     let (grabbed, size) = exported(&mut tty, &sandbox, &name);
     assert_eq!(size, (1920, 1080));
     assert!(
-        grabbed.abs_diff(last) <= 3,
-        "{name}: frame {grabbed} for frame {last} on screen"
+        grabbed.abs_diff(last) <= 3 + few,
+        "{name}: frame {grabbed} for frame {last} on screen, past it by {few} more at most"
     );
     tty.send(&b"j".repeat(8));
     tty.send(ENTER);
@@ -1801,7 +1833,7 @@ fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
     let after = replay(&tty.out()[closed..], SMALL, |screen| screen.row(24))
         .into_iter()
         .find(|row| seconds(row).is_some())
-        .map(|row| bar_time(&row, 80, 8.0))
+        .map(|row| bar_time(&row, 80, 10.2))
         .unwrap();
     let from = grabbed as f64 / 25.0;
     assert!(
@@ -1835,11 +1867,11 @@ fn r_opens_the_page_on_the_frame_and_closing_it_plays_on() {
         "{status:?} on {number}"
     );
     // on the last frame
-    lands(&mut tty, UP, 199, "| 00:07 / 00:08");
+    lands(&mut tty, UP, 254, "| 00:10 / 00:10");
     tty.send(b"r");
     tty.until("the page", |screen| screen.row(1).starts_with(" Render"));
     tty.send(b"q");
-    tty.until("the player", |screen| screen.row(24).starts_with("| 00:07"));
+    tty.until("the player", |screen| screen.row(24).starts_with("| 00:10"));
     assert!(tty.running());
     tty.send(b"q");
     assert_eq!(tty.exit(), 0);
