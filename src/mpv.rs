@@ -95,10 +95,9 @@ pub struct Mpv {
     first: Option<f64>,
     /// When `events` last returned.
     looked: Instant,
-    /// The clip plays on from a frame whose position mpv gave with it: that position and the frame's target time (ns of mpv's clock), by which a later frame's time follows at mpv's `speed`; `told`: when mpv last gave a position; `ahead`: a frame's time so found, past that position, to hand on.
+    /// The clip plays on from a frame whose position mpv gave with it: that position and the frame's target time (ns of mpv's clock), by which a later frame's time follows at mpv's `speed`; `ahead`: a frame's time so found, past that position, to hand on.
     stamp: Option<(f64, i64)>,
     speed: f64,
-    told: Instant,
     ahead: Option<f64>,
     /// What mpv renders into, 63 bytes longer than the picture: it starts at a multiple of 64.
     surface: Vec<u8>,
@@ -325,6 +324,7 @@ unsafe extern "C" {
     fn mpv_render_context_get_info(render: *mut c_void, param: Param) -> c_int;
     fn mpv_render_context_render(render: *mut c_void, params: *mut Param) -> c_int;
     fn mpv_render_context_free(render: *mut c_void);
+    fn mpv_get_time_ns(mpv: *mut c_void) -> i64;
 }
 
 /// Set before `mpv_initialize`, after mpv.conf's audio options: these win.
@@ -524,7 +524,6 @@ impl Mpv {
             looked: Instant::now(),
             stamp: None,
             speed: 1.0,
-            told: Instant::now(),
             ahead: None,
             surface: Vec::new(),
             volume_max: 130.0,
@@ -689,12 +688,15 @@ impl Mpv {
         self.request(if forward { Op::Step } else { Op::Back });
     }
 
-    /// Set a property, not waited for. For speed, volume, mute and loop-file, as `pause` does for its own: reports of the property that `open` heard, and those mpv makes before it confirms this request, are not handed on.
+    /// Set a property, not waited for. For speed, volume, mute and loop-file, as `pause` does for its own: reports of the property that `open` heard, and those mpv makes before it confirms this request, are not handed on. A frame's time found by the speed before goes unused, as at a pause: mpv's report of the new speed can be held back with its position.
     pub fn set(&mut self, name: &str, value: &str) {
         let Some(held) = HOLDS.iter().position(|hold| *hold == name) else {
             self.put(0, name, value);
             return;
         };
+        if name == "speed" {
+            (self.stamp, self.ahead) = (None, None);
+        }
         self.reported.retain(|event| {
             let kind = match event {
                 Event::Speed(_) => 0,
@@ -1099,20 +1101,19 @@ impl Mpv {
             && info.target_time != 0
             && info.target_time != self.counted;
         if new {
-            // under load mpv held its reports back for about 1 s while it handed frames over (the review's trace: frame 22 drawn under the clock of frame 5's 0.2 s): a frame handed over without its position, on from one with it, is that one's time and the time between their targets, at most the time since mpv's last report, when it is more than a frame and a half past that report
+            // under load mpv held its reports back for about 1 s while it handed frames over (the review's trace: frame 22 drawn under the clock of frame 5's 0.2 s): a frame handed over without its position, on from one with it, is that one's time and the time between their targets, never past the time mpv's clock has reached, when it is more than a frame and a half past mpv's last report; a report read late, its position then older than it reads, does not hold the clock back (the review: 0.112 s behind, the time since the read taken as the time since the report)
             let on = !self.paused
                 && self.pausing == 0
                 && self.busy.is_none()
                 && !self.tail
                 && !self.anew;
+            // SAFETY: a read of mpv's clock, which waits for nothing.
+            let now = unsafe { mpv_get_time_ns(self.handle) };
             let after = |(at, target): (f64, i64)| {
-                at + (info.target_time - target) as f64 * 1e-9 * self.speed
+                at + (info.target_time.min(now) - target) as f64 * 1e-9 * self.speed
             };
             let since = self.stamp.filter(|_| on && given.is_none()).map(after);
-            let most = self.time + self.told.elapsed().as_secs_f64() * self.speed;
-            self.ahead = since
-                .filter(|at| *at > self.time + 1.5 * self.frame)
-                .map(|at| at.min(most));
+            self.ahead = since.filter(|at| *at > self.time + 1.5 * self.frame);
             self.stamp = match given {
                 Some(at) => on.then_some((at, info.target_time)),
                 None => self.stamp.filter(|_| on),
@@ -1347,7 +1348,6 @@ impl Mpv {
             b"time-pos" => {
                 let time = number?;
                 (self.time, self.first) = (time, self.first.or(Some(time)));
-                self.told = Instant::now();
                 Some(Event::Time(time))
             }
             _ if name == MARK.to_bytes() => {
@@ -3540,36 +3540,57 @@ pub(crate) mod tests {
 
     #[test]
     fn a_frame_handed_over_while_mpv_holds_its_reports_back_is_timed_by_its_target() {
-        // rows P16, N26: the clock is the time of the frame on screen, mpv's position; under load mpv held back every report of what the viewer observes for about 1 s while it handed frames over (the review's trace: frame 22 drawn under the clock of frame 5, 0.2 s, in frames_come_at_the_clips_rate_and_the_end_quits); here mpv reports nothing for 0.6 s, the properties unobserved, while the frames are drawn: each frame's time follows from the last one with a position by their target times (seen without it: the clock 0.6 s behind the frame)
+        // rows P16, N26: the clock is the time of the frame on screen, mpv's position; under load mpv held back every report of what the viewer observes for about 1 s while it handed frames over (the review's trace: frame 22 drawn under the clock of frame 5, 0.2 s, in frames_come_at_the_clips_rate_and_the_end_quits); here mpv reports nothing for 0.6 s, the properties unobserved, while the frames are drawn: each frame's time follows from the last one with a position by their target times (seen without it: the clock 0.6 s behind the frame); also with that last position read late, 0.12 s older than mpv's clock at the read, which held the clock back by as much where the time since the read stood for the time since the report (the review: 0.112 s behind, 1 of 35 runs under load); and with a speed asked at the stall's start, where the speed before ran the clock ahead of the frame and back once the reports came (the review: 0.31 s at 0.5): the clock then waits for mpv's report
         unsafe extern "C" {
             fn mpv_unobserve_property(mpv: *mut c_void, userdata: u64) -> c_int;
         }
-        let mut stage = Stage::new();
-        stage.clip(4.0, 4.0);
-        stage.settle();
-        stage.mpv.pause(false);
-        stage.pump(5.0, |e| matches!(e, Event::Time(t) if *t >= 1.0));
-        // SAFETY: the handle is valid; every property is observed with 0.
-        unsafe { mpv_unobserve_property(stage.mpv.handle, 0) };
-        let (start, mut apart) = (Instant::now(), Vec::new());
-        while start.elapsed() < Duration::from_millis(600) {
-            if stage.pump(0.0, |_| false).contains(&Event::Frame) {
-                let number = *stage.shown.last().unwrap();
-                apart.push((number, number as f64 * 0.04 - stage.time));
+        let cases = [
+            ("as mpv reports", 0.0, None),
+            ("the last position read late", 0.12, None),
+            ("speed 0.5 asked", 0.0, Some("0.5")),
+            ("speed 2 asked", 0.0, Some("2")),
+        ];
+        let mut wrong = Vec::new();
+        for (case, late, speed) in cases {
+            let mut stage = Stage::new();
+            stage.clip(4.0, 4.0);
+            stage.settle();
+            stage.mpv.pause(false);
+            stage.pump(5.0, |e| matches!(e, Event::Time(t) if *t >= 1.0));
+            // a position read late reads older than mpv's clock then
+            stage.mpv.time -= late;
+            if let Some(speed) = speed {
+                stage.mpv.set("speed", speed);
             }
-            std::thread::sleep(Duration::from_millis(1));
+            // SAFETY: the handle is valid; every property is observed with 0.
+            unsafe { mpv_unobserve_property(stage.mpv.handle, 0) };
+            let (start, mut apart) = (Instant::now(), Vec::new());
+            while start.elapsed() < Duration::from_millis(600) {
+                if stage.pump(0.0, |_| false).contains(&Event::Frame) {
+                    let number = *stage.shown.last().unwrap();
+                    apart.push((number, number as f64 * 0.04 - stage.time));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            for (name, format) in OBSERVED {
+                // SAFETY: the name lives through the call.
+                unsafe { mpv_observe_property(stage.mpv.handle, 0, name.as_ptr(), format) };
+            }
+            // the reports again: the clock goes on from where it stood
+            let stood = stage.time;
+            let resumed = times(&stage.pump(0.5, |_| false));
+            let back = resumed.iter().copied().fold(stood, f64::min) - stood;
+            let worst = apart.iter().fold(0.0f64, |worst, (_, by)| match speed {
+                None => worst.max(by.abs()),
+                Some(_) => worst.max(-by),
+            });
+            if !(apart.len() > 5 && worst < 0.1 && back > -0.05) {
+                wrong.push(format!(
+                    "{case}: frame and frame less clock: {apart:?}; then from {stood} {resumed:?}"
+                ));
+            }
         }
-        for (name, format) in OBSERVED {
-            // SAFETY: the name lives through the call.
-            unsafe { mpv_observe_property(stage.mpv.handle, 0, name.as_ptr(), format) };
-        }
-        let worst = apart
-            .iter()
-            .fold(0.0f64, |worst, (_, by)| worst.max(by.abs()));
-        assert!(
-            apart.len() > 5 && worst < 0.1,
-            "frame and frame less clock: {apart:?}"
-        );
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
