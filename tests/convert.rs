@@ -2249,7 +2249,7 @@ fn turned_video_comes_out_upright() {
 
 #[test]
 fn every_frame_is_drawn_as_that_frame_alone() {
-    // rows X4, N24: tests/test_convert.py:281 at tag python-final: each frame fed to the encoder is byte for byte the serial drawing of the frame decoded, in decode order, as many as decoded, and the file holds them all; the serial drawing here is the converter's own of that frame as a still of the same size; N24: cells on a thread of their own, painting and writing on the main one (AGENTS.md, 2026-11-11)
+    // rows X4, N31: tests/test_convert.py:281 at tag python-final: each frame fed to the encoder is byte for byte the serial drawing of the frame decoded, in decode order, as many as decoded, and the file holds them all; the serial drawing here is the converter's own of that frame as a still of the same size; N31: cells on a thread of their own, painting and writing on the main one (AGENTS.md, 2026-11-11)
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "clip.mp4", 0.4, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
@@ -2591,7 +2591,7 @@ fn a_childs_lines_on_stderr_fall_between_the_progress_lines() {
 
 #[test]
 fn ctrl_c_writes_the_frames_in_flight_and_finishes_the_file() {
-    // rows X9, X8, X4, N24, N25: tests/test_convert.py:305 at tag python-final: the encoder held after 10 frames of RGB (seen in its input: the old converter printed its count only as it read a frame, bin/ascii-convert:475, and fed rgb0, 7.5 of its frames before the hold) until the reading stops, then Ctrl-C (SIGINT to the group): the frames read are written whole but those Ctrl-C found in the pipes (4 at most), the file is finished and plays them, on stderr the progress, its 10 held among the counts of 250, then `stopped at frame <n>: <out> holds the part converted` and nothing else (the old converter killed the decoder at once: no complaint of a broken pipe from it), the path printed, then death by SIGINT (N25; the old converter exited 130); nothing left running; X4 memory bounded, N24 8 in flight (AGENTS.md, 2026-11-11): at most 10 frames past the 10 held, 8 waiting and one each in the reader's and the painter's hands
+    // rows X9, X8, X4, N31, N25: tests/test_convert.py:305 at tag python-final: the encoder held after 10 frames of RGB (seen in its input: the old converter printed its count only as it read a frame, bin/ascii-convert:475, and fed rgb0, 7.5 of its frames before the hold) until the reading stops, then Ctrl-C (SIGINT to the group): the frames read are written whole but those Ctrl-C found in the pipes (4 at most), the file is finished and plays them, on stderr the progress, its 10 held among the counts of 250, then `stopped at frame <n>: <out> holds the part converted` and nothing else (the old converter killed the decoder at once: no complaint of a broken pipe from it), the path printed, then death by SIGINT (N25; the old converter exited 130); nothing left running; X4 memory bounded, N31 8 in flight (AGENTS.md, 2026-11-11): at most 10 frames past the 10 held, 8 waiting and one each in the reader's and the painter's hands
     let mut sandbox = Sandbox::new();
     clip(&sandbox, "long.mp4", 10.0, "160x90", 25);
     wrap_ffmpeg(&mut sandbox);
