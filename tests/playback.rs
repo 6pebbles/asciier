@@ -639,7 +639,7 @@ fn frame_steps_move_one_frame_and_pause() {
         }
         _ => 0,
     };
-    // the frame mpv holds then, which the screen comes to
+    // the frame mpv holds then, which `s` takes and the screen comes to (N5: the old viewer's `s` drew a frame anew at its time; run in this harness, `.` sent on frame 25 showed 27 and its `s` took 28, 3 of 3)
     let held = taken(&mut tty, &sandbox);
     assert!(
         held > on && held <= on + 2 + few,
