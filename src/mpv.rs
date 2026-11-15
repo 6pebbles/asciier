@@ -2499,7 +2499,7 @@ pub(crate) mod tests {
 
     #[test]
     fn speed_volume_and_mute_are_reported() {
-        // rows P10, P11: speed and volume set on mpv come back reported, and the clip plays at the speed (the keys and their toasts: tests/playback.rs)
+        // rows P10, P11: speed and volume set on mpv come back reported, and the clip plays at the speed (the keys and their toasts: tests/playback.rs), the pace by mpv's own schedule: frames drawn one after the other, their times apart against their target times apart, the middle of those (timed by the wall clock the pace fell to 0.75 under load, mpv starved: the stress run, 3 of 67 traced at load 42 to 77)
         let mut stage = Stage::new();
         stage.clip(2.0, 2.0);
         stage.settle();
@@ -2515,10 +2515,29 @@ pub(crate) mod tests {
             Some(&Event::Volume(38.0))
         );
         stage.play_to(0.2);
-        let (start, from) = (Instant::now(), stage.time);
-        let events = stage.pump(0.5, |_| false);
-        let pace = (stage.time - from) / start.elapsed().as_secs_f64();
-        assert!(near(pace, 2.0, 0.4), "{pace} s of the clip a second");
+        let (start, mut events, mut drawn) = (Instant::now(), Vec::new(), Vec::new());
+        while start.elapsed() < Duration::from_millis(500) {
+            let more = stage.pump(0.0, |_| false);
+            if more.contains(&Event::Frame) {
+                drawn.push((*stage.shown.last().unwrap(), stage.mpv.counted));
+            }
+            events.extend(more);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut paces: Vec<f64> = drawn
+            .windows(2)
+            .filter(|pair| pair[1].0 > pair[0].0 && pair[1].1 > pair[0].1)
+            .map(|pair| {
+                let apart = (pair[1].1 - pair[0].1) as f64 * 1e-9;
+                (pair[1].0 - pair[0].0) as f64 * 0.04 / apart
+            })
+            .collect();
+        paces.sort_by(f64::total_cmp);
+        let pace = paces.get(paces.len() / 2).copied().unwrap_or(0.0);
+        assert!(
+            paces.len() >= 5 && near(pace, 2.0, 0.4),
+            "{paces:?} s of the clip a second"
+        );
         // row P7: volume and mute stay through a seek
         let events = [events, stage.after(&["seek", "0.1", "absolute+exact"])].concat();
         assert!(
@@ -2611,32 +2630,40 @@ pub(crate) mod tests {
 
     #[test]
     fn the_end_pauses_on_the_last_frame() {
+        // no inventory row of its own: the end the viewer quits at (row P14's); mpv pauses there, and the end is reported once it has, with the position at the length; mpv hands its reports over round-robin, so the pause, the last position and the end come in any order within a look, and the last position can come a look after the end (asked in that order, the stress run: 3 of 203 traced at load 7 to 16)
         let mut stage = Stage::new();
         stage.clip(2.0, 2.0);
         stage.after(&["seek", "1.5", "absolute+exact"]);
         stage.mpv.set("pause", "no");
         let start = Instant::now();
-        let events = stage.pump(3.0, |e| *e == Event::Ended(true));
+        let mut events = stage.pump(3.0, |e| *e == Event::Ended(true));
         let wall = start.elapsed().as_secs_f64();
-        assert_eq!(
-            events[events.len() - 2..],
-            [Event::Pause(true), Event::Ended(true)],
+        assert!(
+            events.last() == Some(&Event::Ended(true)) && events.contains(&Event::Pause(true)),
             "{events:?}"
         );
         assert!(
             near(wall, 0.5, 0.15),
             "the sound plays out: ended after {wall} s"
         );
+        // nothing follows the end but its last position
+        let after = stage.settle();
+        let length = stage.length.unwrap();
+        let at_end = |e: &Event| match e {
+            Event::Frame => true,
+            Event::Time(time) => near(*time, length, 1e-9),
+            _ => false,
+        };
+        assert!(
+            after.iter().all(at_end),
+            "nothing follows the end: {after:?}"
+        );
+        events.extend(after);
         assert!(
             near(stage.time, stage.length.unwrap(), 1e-9),
-            "at {} of {:?}",
+            "at {} of {:?}: {events:?}",
             stage.time,
             stage.length
-        );
-        assert_eq!(
-            stage.settle().iter().find(|e| **e != Event::Frame),
-            None,
-            "nothing follows the end"
         );
         assert_eq!(stage.shown.last(), Some(&49));
         let held = stage.mpv.render(160, 120).unwrap();
@@ -3232,7 +3259,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_playing_step_on_a_variable_rate_clip_takes_the_next_frame() {
-        // rows P15, N2: `.` on a playing clip pauses and shows the frame after the one on screen, by a seek 4 ms short of that frame's time as the frame rate gives it; a seek landing at its target can be past the picture's end, where the position is the sound's, or a frame of its own that sits there, which mpv's step then tells apart; frames 44, 32 and 44 ms apart here (25 a second on average): from a frame before a 32 ms gap the target falls on the next frame's time, and mpv's step moved on from it (the review's probe: `.` on frame 34 ended on 36, 3 of 3); `,` then shows the frame `.` left; every frame drawn is marked shown, as the viewer does
+        // rows P15, N2: `.` on a playing clip pauses and shows the frame after the one on screen, by a seek 4 ms short of that frame's time as the frame rate gives it; a seek landing at its target can be past the picture's end, where the position is the sound's, or a frame of its own that sits there, which mpv's step then tells apart; frames 44, 32 and 44 ms apart here (25 a second on average): from a frame before a 32 ms gap the target falls on the next frame's time, and mpv's step moved on from it (the review's probe: `.` on frame 34 ended on 36, 3 of 3); `,` then shows the frame `.` left; every frame drawn is marked shown, as the viewer does, and the frame on screen is taken at its own time: under load mpv's position given with a frame was the next one's (the accepted limit of a playing `.` a few frames past, owner 2026-11-13; the stress run: 9 of 22 traced rounds at load 42 to 77 ended a frame on)
         let mut stage = Stage::new();
         let file = stage.file("vfr.mp4");
         let times = "(floor(N/3)*0.12+if(eq(mod(N\\,3)\\,1)\\,0.044\\,if(eq(mod(N\\,3)\\,2)\\,0.076\\,0)))/TB";
@@ -3268,6 +3295,8 @@ pub(crate) mod tests {
                             let on = *stage.shown.last().unwrap();
                             if on >= 32 && on % 3 == round / 3 && stepped.is_none() {
                                 stepped = Some(on);
+                                let pattern = [0.0, 0.044, 0.076][on % 3];
+                                stage.mpv.on_screen = Some((on / 3) as f64 * 0.12 + pattern);
                                 stage.mpv.step(true);
                             }
                         }
@@ -4271,7 +4300,7 @@ pub(crate) mod tests {
 
     #[test]
     fn damage_does_not_stop_the_clip() {
-        // row P25
+        // row P25: frames in the middle of this clip are damaged and skipped, the frame before held (32 to 41 in the stress run), and the clip plays on to its last frame; the frames drawn, each once (a redraw as mpv pauses at the end draws the last again), rise from the start through that gap to 49 (asked as a whole list, a frame mpv let go while the test looked 100 ms late, and that redraw, failed it under load: the stress run, 1 of 10 and 1 of 200 traced)
         let mut stage = Stage::new();
         let file = stage.counter("hurt.mp4", 25, 2.0, 0.0, &[]);
         let mut bytes = std::fs::read(&file).unwrap();
@@ -4284,10 +4313,14 @@ pub(crate) mod tests {
         stage.mpv.set("pause", "no");
         let events = stage.pump(4.0, |e| matches!(e, Event::Ended(true) | Event::Failed(_)));
         assert_eq!(events.last(), Some(&Event::Ended(true)), "{events:?}");
-        let (shown, whole) = (&stage.shown, (1..=49).collect::<Vec<usize>>());
+        let mut drawn = stage.shown.clone();
+        drawn.dedup();
+        let rises = drawn.windows(2).all(|pair| pair[0] < pair[1]);
+        let gap = |pair: &[usize]| pair[1] - pair[0] >= 5 && pair[0] >= 15 && pair[1] <= 47;
         assert!(
-            *shown != whole && shown.starts_with(&whole[..20]) && shown.ends_with(&whole[45..]),
-            "{shown:?}"
+            rises && drawn.windows(2).any(gap) && drawn[0] <= 5 && drawn.last() == Some(&49),
+            "{:?}",
+            stage.shown
         );
     }
 }
