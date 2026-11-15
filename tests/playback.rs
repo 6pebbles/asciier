@@ -601,15 +601,26 @@ fn frame_steps_move_one_frame_and_pause() {
     // frames 0 to 254, all under the counter's wrap; a clip of 2.2 s ended before `.` landed at load 55 (the review: 2 of 18 copies)
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 10.2, 10.2, &[]);
     let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
-    // `.` as soon as it plays on
-    tty.until("playing", |screen| {
-        screen.row(24).starts_with("> ") && frame(screen) >= 3
+    // `.` once playback runs on steadily: from frame 25, past start-up, where frames left out are the rule under load, and once a playing update shows the frame after the one before it, at most 6 s on; sent at frame 3, a step 3 frames past passed by the limit's sign in 3 of 8 runs at load 22 to 33 (the review's variant)
+    let before = std::cell::Cell::new(None);
+    tty.until_drawn("a steady playing update", 0, |screen| {
+        let on = frame(screen);
+        let playing = screen.row(24).starts_with("> ");
+        let last = if playing {
+            before.replace(Some(on))
+        } else {
+            None
+        };
+        playing && on >= 25 && (last == Some(on.wrapping_sub(1)) || on > 150)
     });
+    let sent = Instant::now();
     tty.send(b".");
     tty.await_status("| ");
-    // the frame on screen at the key: the last drawn playing (the test reads the screen late under load)
+    // the frame on screen at the key: the last drawn playing before the pause (the test reads the screen late under load; a `| ` can show at the start, as mpv reports the open's pause late)
     let draws = updates(&tty, 0);
-    let paused = draws.iter().position(|(_, _, row)| row.starts_with("| "));
+    let paused = draws
+        .iter()
+        .position(|(came, _, row)| *came >= sent && row.starts_with("| "));
     let playing: Vec<_> = draws[..paused.unwrap()]
         .iter()
         .filter(|(_, _, row)| row.starts_with("> "))
