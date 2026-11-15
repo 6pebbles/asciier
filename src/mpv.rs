@@ -3734,7 +3734,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_frame_handed_over_while_mpv_holds_its_reports_back_is_timed_by_its_target() {
-        // rows P16, N26: the clock is the time of the frame on screen, mpv's position; under load mpv held back every report of what the viewer observes for about 1 s while it handed frames over (the review's trace: frame 22 drawn under the clock of frame 5, 0.2 s, in frames_come_at_the_clips_rate_and_the_end_quits); here mpv reports nothing for 0.6 s, the properties unobserved, while the frames are drawn: each frame's time follows from the last one with a position by their target times (seen without it: the clock 0.6 s behind the frame); also with that last position read late, 0.12 s older than mpv's clock at the read, which held the clock back by as much where the time since the read stood for the time since the report (the review: 0.112 s behind, 1 of 35 runs under load); and with a speed asked at the stall's start, where the speed before ran the clock ahead of the frame and back once the reports came (the review: 0.31 s at 0.5): the clock then waits for mpv's report
+        // rows P16, N26: the clock is the time of the frame on screen, mpv's position; under load mpv held back every report of what the viewer observes for about 1 s while it handed frames over (the review's trace: frame 22 drawn under the clock of frame 5, 0.2 s, in frames_come_at_the_clips_rate_and_the_end_quits); here mpv reports nothing for 0.6 s or more, the properties unobserved, while the frames are drawn: each frame's time follows from the last one with a position by their target times (seen without it: the clock 0.6 s behind the frame); also with that last position read late, 0.12 s older than mpv's clock at the read, which held the clock back by as much where the time since the read stood for the time since the report (the review: 0.112 s behind, 1 of 35 runs under load); and with a speed asked at the stall's start, where the speed before ran the clock ahead of the frame and back once the reports came (the review: 0.31 s at 0.5): the clock then waits for mpv's report
         unsafe extern "C" {
             fn mpv_unobserve_property(mpv: *mut c_void, userdata: u64) -> c_int;
         }
@@ -3758,8 +3758,13 @@ pub(crate) mod tests {
             }
             // SAFETY: the handle is valid; every property is observed with 0.
             unsafe { mpv_unobserve_property(stage.mpv.handle, 0) };
+            // 0.6 s at least, and on until more than 5 frames are drawn, within 2.5 s of the clip: a caller starved under load drew 3 in 0.6 s (the stress run, load 112)
+            let speed_factor = speed.map_or(1.0, |speed| speed.parse::<f64>().unwrap());
+            let most = Duration::from_secs_f64(2.5 / speed_factor);
             let (start, mut apart) = (Instant::now(), Vec::new());
-            while start.elapsed() < Duration::from_millis(600) {
+            while start.elapsed() < Duration::from_millis(600)
+                || apart.len() <= 5 && start.elapsed() < most
+            {
                 if stage.pump(0.0, |_| false).contains(&Event::Frame) {
                     let number = *stage.shown.last().unwrap();
                     apart.push((number, number as f64 * 0.04 - stage.time));
