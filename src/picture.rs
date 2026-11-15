@@ -1459,9 +1459,9 @@ mod tests {
         assert!(r > 250 && g < 5 && b < 5, "{r} {g} {b}");
     }
 
-    // tests/test_image.py:116
     #[test]
     fn over_the_limit_is_too_large_not_unopenable() {
+        // rows S18, S8a: tests/test_image.py:116 at tag python-final: a still over twice Pillow's MAX_IMAGE_PIXELS is not opened, too large with `<name> is too large to open (over 179 megapixels)` (lib/ascii_image.py:23, :95), and identifies all the same (lib/ascii_image.py:76); here also its copy refused as too large, and one at the limit given to the decoder
         let dir = Dir::new("too_large");
         // 2 * 5 * 29 * 43 = 12470 and 113 * 127 = 14351: their product is MAX_PIXELS
         assert_eq!(12470 * 14351, MAX_PIXELS);
@@ -1548,7 +1548,7 @@ mod tests {
 
     #[test]
     fn a_gif_frame_past_its_screen_is_cut_to_it() {
-        // rows S1, S18, N41: a GIF whose first frame reaches past its screen, within the limit, opens as a still of the screen's size, the frame cut to it and transparent outside it (the image crate's decoder): an 8 x 8 frame of red at (4, 4) on a screen of 8 x 8 px; the old tools grew the picture to the frame (Pillow 13, GifImagePlugin _seek): through open_picture of lib/ascii_image.py:99 (tag python-final) this file was a still of 12 x 12 px, palette index 0 outside the frame, red here (seen 2026-11-13, Pillow 13.0.0)
+        // rows S1, N41: a GIF whose first frame reaches past its screen, within the limit, opens as a still of the screen's size, the frame cut to it and transparent outside it (the image crate's decoder): an 8 x 8 frame of red at (4, 4) on a screen of 8 x 8 px; the old tools grew the picture to the frame (Pillow 13, GifImagePlugin _seek): through open_picture of lib/ascii_image.py:99 (tag python-final) this file was a still of 12 x 12 px, palette index 0 outside the frame, red here (seen 2026-11-13, Pillow 13.0.0)
         let dir = Dir::new("gif_past_screen");
         let file = dir.file("past.gif", gif_of((8, 8), &[&gif_frame(4, 4, 8, 8)]));
         let opened = still(&file);
