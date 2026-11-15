@@ -238,23 +238,35 @@ fn qoi_frames(file: &mut impl Read) -> std::result::Result<u32, Not> {
     }
 }
 
-/// A WebP's frames as libwebp counts a well-formed one's for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP; libwebp's demuxer leaves out a frame without an image and refuses a file cut short, so a damaged WebP can count otherwise in Pillow (N6, N7).
+/// A WebP's frames as libwebp counts a well-formed one's for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP; libwebp's demuxer leaves out a frame without an image and refuses a file cut short, so a damaged WebP can count otherwise in Pillow (N6, N7). An error for a VP8X whose EXIF, ICCP or XMP chunk runs past the file's end, which Pillow's libwebp refuses: the decoder takes such a chunk whole by the size it declares, up to 4 GiB allocated before the read fails (the EXIF for the orientation); the chunks walked as image-webp walks them, as far as the RIFF's length takes it.
 fn webp_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
     let mut head = [0; 21]; // RIFF, its length, WEBP, the first chunk's kind and length, a byte of its data: VP8X's flags
     file.read_exact(&mut head)?;
-    if &head[12..16] != b"VP8X" || head[20] & 0x02 == 0 {
+    if &head[12..16] != b"VP8X" {
         return Ok(1);
     }
+    let end = file.seek(SeekFrom::End(0))?;
+    let riff = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
     let length = u32::from_le_bytes([head[16], head[17], head[18], head[19]]);
-    let next = 20 + u64::from(length) + u64::from(length % 2); // chunks are padded to even
-    file.seek(SeekFrom::Start(next))?;
+    let mut at = 20 + u64::from(length) + u64::from(length % 2); // chunks are padded to even
+    let last = at + u64::from(riff).saturating_sub(12);
     let (mut frames, mut chunk) = (0, [0; 8]);
-    while frames < 2 && file.read_exact(&mut chunk).is_ok() {
-        let length = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+    while at < last {
+        file.seek(SeekFrom::Start(at))?;
+        if file.read_exact(&mut chunk).is_err() {
+            break;
+        }
+        let length = u64::from(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]));
+        if matches!(&chunk[..4], b"EXIF" | b"ICCP" | b"XMP ") && at + 8 + length > end {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
         frames += u32::from(&chunk[..4] == b"ANMF");
-        file.seek(SeekFrom::Current(i64::from(length) + i64::from(length % 2)))?;
+        at += 8 + length + length % 2;
     }
-    Ok(frames.max(1))
+    Ok(match head[20] & 0x02 {
+        0 => 1, // no animation
+        _ => frames.clamp(1, 2),
+    })
 }
 
 /// The decoder of the raster still at `path`, its header read: the format by content, within `MAX_PIXELS`, no animation; in Pillow's order (Image.open, then lib/ascii_image.py:61): the file read to its first frame, then its size, then its frames; a GIF measured by its blocks before the decoder reads it, whose refusals Pillow does not share.
@@ -1676,6 +1688,41 @@ mod tests {
         broken[0] = 0; // no zlib header
         let broken = dir.file("broken.png", profiled((8, 8), &broken));
         assert_eq!(rgb(&still(&broken).pic).get_pixel(7, 7).0, [1, 2, 3]);
+    }
+
+    /// An 8 x 4 WebP of #010203 behind a VP8X of `flags`, then a `kind` chunk of `data` that declares `declared` bytes.
+    fn webp_with(kind: &[u8; 4], flags: u8, data: &[u8], declared: u32) -> Vec<u8> {
+        let mut frame = Vec::new();
+        RgbaImage::from_pixel(8, 4, Rgba([1, 2, 3, 255]))
+            .write_with_encoder(WebPEncoder::new_lossless(&mut frame))
+            .unwrap();
+        let mut body = b"WEBPVP8X\x0a\0\0\0".to_vec();
+        body.extend([flags, 0, 0, 0, 7, 0, 0, 3, 0, 0]); // the flags, width - 1, height - 1
+        body.extend(&frame[12..]); // the VP8L chunk
+        body.extend(kind);
+        body.extend(declared.to_le_bytes());
+        body.extend(data);
+        [&b"RIFF"[..], &(body.len() as u32).to_le_bytes(), &body].concat()
+    }
+
+    #[test]
+    fn a_webp_whose_metadata_runs_past_its_end_is_no_picture() {
+        // rows S1, S2: Pillow 13's libwebp refuses a WebP whose EXIF, ICCP or XMP chunk declares more bytes than the file holds: no picture to identifies and open_picture of lib/ascii_image.py:67 and :105 at tag python-final (seen 2026-11-15, Pillow 13.0.0, a chunk of 64 bytes declaring 4294967040 behind an 8 x 4 frame: `could not create decoder object`, an OSError); the WebP decoder takes such a chunk whole by its declared size, the EXIF for the orientation: 4 GiB allocated before its read fails, an abort past the memory at hand; an EXIF the file holds is read, its orientation a quarter turn right, upright as Pillow shows it
+        let dir = Dir::new("webp_metadata");
+        for (name, chunk, flag) in [
+            ("exif.webp", b"EXIF", 0x08),
+            ("iccp.webp", b"ICCP", 0x20),
+            ("xmp.webp", b"XMP ", 0x04),
+        ] {
+            let file = dir.file(name, webp_with(chunk, flag, &[0; 64], 0xFFFF_FF00));
+            let seen = (kind(&file), identifies(&file));
+            assert_eq!(seen, ("no image", false), "{name}");
+        }
+        let turned = exif(6); // a quarter right
+        let whole = webp_with(b"EXIF", 0x08, &turned, turned.len() as u32);
+        let whole = still(&dir.file("whole.webp", whole));
+        assert_eq!(whole.pic.size(), (4, 8));
+        assert_eq!(rgb(&whole.pic).get_pixel(3, 7).0, [1, 2, 3]);
     }
 
     #[test]
