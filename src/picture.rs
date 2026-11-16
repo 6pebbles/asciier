@@ -329,7 +329,7 @@ fn boxed(
     Ok((size >= body - at).then_some((kind, body, at.saturating_add(size))))
 }
 
-/// An AVIF's one frame, measured by the size its container declares, the primary item's first ispe property (pitm, ipma, ipco), as Pillow 13 measures one (AvifImagePlugin, libavif's parse), before the decoder, which learns a size only from the picture dav1d decodes whole: over `MAX_PIXELS`, `Not::TooLarge`; the decoded picture's own size is measured after it. `Not::Image` for a file whose first box is no ftyp, whole and of brands in fours, or whose brands hold no AVIF brand (avif, avis), which mp4parse and libavif refuse; one of a major brand Pillow does not take (AvifImagePlugin _accept: avif, avis, mif1, msf1), the decoder's to tell (N7).
+/// An AVIF's frames, up to 2, as libavif counts them for Pillow 13 (AvifImagePlugin n_frames): where the major brand is not avif and moov holds a track, the samples of its first AV1 track that is no other's auxiliary, else 1, the primary item; measured by the size its container declares, the primary item's first ispe property (pitm, ipma, ipco), as Pillow 13 measures one (libavif's parse), before the decoder, which learns a size only from the picture dav1d decodes whole: over `MAX_PIXELS`, `Not::TooLarge`; the decoded picture's own size is measured after it. `Not::Image` for a file whose first box is no ftyp, whole and of brands in fours, or whose brands hold no AVIF brand (avif, avis), which mp4parse and libavif refuse; one of a major brand Pillow does not take (AvifImagePlugin _accept: avif, avis, mif1, msf1), the decoder's to tell (N7).
 fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     let (mut walk, end) = Walk::new(file)?;
     let Some((kind, body, stop)) = boxed(&mut walk, 0, end)? else {
@@ -350,19 +350,36 @@ fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     if !matches!(&major, b"avif" | b"avis" | b"mif1" | b"msf1") {
         return Ok(1);
     }
-    let (mut at, mut meta) = (stop, None);
+    let (mut at, mut meta, mut moov) = (stop, None, None);
     while let Some((kind, body, next)) = boxed(&mut walk, at, end)? {
-        if &kind == b"meta" {
-            meta = meta.or(Some((body + 4, next.min(end)))); // past its version and flags
+        match &kind {
+            b"meta" => meta = meta.or(Some((body + 4, next.min(end)))), // past its version and flags
+            b"moov" => moov = moov.or(Some((body, next.min(end)))),
+            _ => {}
         }
         at = next;
     }
-    let Some((mut at, end)) = meta else {
-        return Ok(1);
+    let size = match meta {
+        Some(meta) => declared(&mut walk, meta)?,
+        None => None,
     };
-    // its primary item (pitm), each item's properties by their places (iprp's ipma), the properties (iprp's ipco)
+    if size.is_some_and(too_large) {
+        return Err(Not::TooLarge);
+    }
+    let samples = match moov {
+        Some(moov) if &major != b"avif" => samples(&mut walk, moov)?, // libavif takes the track
+        _ => None,
+    };
+    Ok(samples.map_or(1, |count| count.clamp(1, 2)))
+}
+
+/// The size an AVIF's meta box, from `at` to `end` past its version and flags, declares: its primary item's first ispe property, as libavif takes it, by its primary item (pitm), each item's properties by their places (iprp's ipma) and the properties (iprp's ipco).
+fn declared(
+    walk: &mut Walk<'_, impl Read + Seek>,
+    (mut at, end): (u64, u64),
+) -> std::io::Result<Option<(u32, u32)>> {
     let (mut primary, mut ipma, mut ipco) = (None, None, None);
-    while let Some((kind, body, next)) = boxed(&mut walk, at, end)? {
+    while let Some((kind, body, next)) = boxed(walk, at, end)? {
         let next = next.min(end);
         if &kind == b"pitm" {
             let mut head = [0; 6]; // the version and flags, the item's first 2 bytes: all of it in version 0, else half
@@ -377,7 +394,7 @@ fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
         }
         if &kind == b"iprp" {
             let mut part = body;
-            while let Some((inner, body, stop)) = boxed(&mut walk, part, next)? {
+            while let Some((inner, body, stop)) = boxed(walk, part, next)? {
                 match &inner {
                     b"ipma" => ipma = ipma.or(Some((body, stop.min(next)))),
                     b"ipco" => ipco = ipco.or(Some((body, stop.min(next)))),
@@ -389,13 +406,13 @@ fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
         at = next;
     }
     let (Some(primary), Some((body, end)), Some((mut at, last))) = (primary, ipma, ipco) else {
-        return Ok(1);
+        return Ok(None);
     };
-    let places = associations(&mut walk, body, end, primary)?;
-    // of the primary item's properties, the first, in their order, that is an ispe, as libavif takes it
+    let places = associations(walk, body, end, primary)?;
+    // of the primary item's properties, the first, in their order, that is an ispe
     let mut sides = vec![None; places.len()];
     let mut place = 1; // the properties are counted from 1
-    while let Some((kind, body, next)) = boxed(&mut walk, at, last)? {
+    while let Some((kind, body, next)) = boxed(walk, at, last)? {
         if &kind == b"ispe" && next.min(last) >= body + 12 && places.contains(&place) {
             let mut ispe = [0; 12]; // the version and flags, the width, the height
             walk.read(body, &mut ispe)?;
@@ -410,10 +427,64 @@ fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
         }
         (at, place) = (next, place + 1);
     }
-    match sides.into_iter().flatten().next() {
-        Some(size) if too_large(size) => Err(Not::TooLarge),
-        _ => Ok(1),
+    Ok(sides.into_iter().flatten().next())
+}
+
+/// What a track's boxes tell of it: whether it holds AV1 (an av01 sample entry in stsd), whether it names another as the one it is the auxiliary of (tref's auxl, as an alpha plane), and its samples (stsz's count).
+#[derive(Default)]
+struct Track {
+    av1: bool,
+    auxiliary: bool,
+    samples: Option<u32>,
+}
+
+/// The samples of the first track in moov's boxes, from `at` to `end`, that holds AV1 and is no other's auxiliary, as libavif takes a sequence's colour track.
+fn samples(
+    walk: &mut Walk<'_, impl Read + Seek>,
+    (mut at, end): (u64, u64),
+) -> std::io::Result<Option<u32>> {
+    while let Some((kind, body, next)) = boxed(walk, at, end)? {
+        let next = next.min(end);
+        if &kind == b"trak" {
+            let mut track = Track::default();
+            told(walk, (body, next), 0, &mut track)?;
+            if track.av1 && !track.auxiliary && track.samples.is_some() {
+                return Ok(track.samples);
+            }
+        }
+        at = next;
     }
+    Ok(None)
+}
+
+/// Into `track`, what its boxes from `at` to `end`, `depth` boxes down from trak, tell: down by tref, and by mdia, minf and stbl to stsd and stsz (a full box each: its version and flags, then stsd's count of entries and its first entry's size and kind, stsz's size of every sample and its count).
+fn told(
+    walk: &mut Walk<'_, impl Read + Seek>,
+    (mut at, end): (u64, u64),
+    depth: u8,
+    track: &mut Track,
+) -> std::io::Result<()> {
+    while let Some((kind, body, next)) = boxed(walk, at, end)? {
+        let next = next.min(end);
+        let mut field = [0; 4];
+        match (&kind, depth) {
+            (b"tref" | b"mdia", 0) | (b"minf", 1) | (b"stbl", 2) => {
+                told(walk, (body, next), depth + 1, track)?
+            }
+            (b"auxl", 1) => track.auxiliary = true,
+            (b"stsd", 3) if next >= body + 16 => {
+                walk.read(body + 12, &mut field)?;
+                track.av1 |= &field == b"av01";
+            }
+            (b"stsz", 3) if next >= body + 12 => {
+                walk.read(body + 8, &mut field)?;
+                track.samples = track.samples.or(Some(u32::from_be_bytes(field)));
+            }
+            _ => {}
+        }
+        at = next;
+    }
+    Ok(())
 }
 
 /// The places among ipco's properties, counted from 1, of the properties that `item`'s entry in the ipma box from `body` to `end` names, in its order; none where it names none. ipma: its version and flags, the count of entries, then each entry's item (2 bytes in version 0, else 4), the count of its properties and their places (1 byte each, the top bit a flag, or 2 bytes with flag 1).
@@ -1672,6 +1743,27 @@ mod tests {
         assert_eq!(kind(&dir.file("clip.mp4", [0u8; 64])), "no image");
         assert_eq!(kind(&dir.0.join("missing.png")), "no image");
         assert_eq!(kind(&dir.0), "no image");
+    }
+
+    #[test]
+    fn an_avif_sequence_is_an_animation() {
+        // rows S1, V17: is_animation of lib/ascii_image.py:61 at tag python-final: an AVIF image sequence of 2 frames is an animation, no still, and identifies no still (lib/ascii_image.py:67), as Pillow 13 counts its frames (AvifImagePlugin n_frames: libavif takes a sequence's track where the major brand is avis, mif1 or msf1, the primary item where it is avif; seen 2026-11-16, Pillow 13.0.0 and libavif 1.4.2: 2 frames, 2 under mif1, 1 under avif); tests/golden/picture-sequence.avif: avifenc 1.4.2 of two 16 x 8 px frames of four flat quarters, a sequence behind its first frame as the primary item, which the decoder shows
+        let dir = Dir::new("avif_sequence");
+        let sequence: &[u8] = include_bytes!("../tests/golden/picture-sequence.avif");
+        assert_eq!(&sequence[8..12], b"avis"); // the major brand
+        for (brand, seen) in [
+            ("avis", "animation"),
+            ("mif1", "animation"),
+            ("avif", "still"),
+        ] {
+            let file = [&sequence[..8], brand.as_bytes(), &sequence[12..]].concat();
+            let file = dir.file("sequence.avif", file);
+            assert_eq!(
+                (kind(&file), identifies(&file)),
+                (seen, seen == "still"),
+                "{brand}"
+            );
+        }
     }
 
     #[test]
