@@ -153,6 +153,7 @@ struct Playback {
     speed: i32,
     volume: Option<f64>,
     muted: bool,
+    /// `L`: a video starts again at its end, sound alone by mpv's `loop-file`.
     looping: bool,
     /// After MPRIS Stop: paused with the mark `.`, until a seek or `space`.
     stopped: bool,
@@ -474,8 +475,9 @@ impl Viewer {
     /// One batch of mpv's events, as `Mpv::events` hands them.
     fn mpv_batch(&mut self, events: Vec<Event>) {
         let live = self.help.is_none() && self.page.is_none();
+        let audio = matches!(self.mode, Mode::Audio(..));
         let Some(p) = self.playback() else { return };
-        let (mut frame, mut grabbed, mut ended) = (false, Vec::new(), false);
+        let (mut frame, mut grabbed, mut ended, mut again) = (false, Vec::new(), false, false);
         for event in events {
             match event {
                 Event::Frame => frame = true,
@@ -485,14 +487,21 @@ impl Viewer {
                 Event::Speed(factor) => p.speed = (factor * 100.0).round() as i32,
                 Event::Volume(volume) => p.volume = Some(volume),
                 Event::Mute(muted) => p.muted = muted,
-                Event::Loop(looping) => p.looping = looping,
+                Event::Loop(looping) if audio => p.looping = looping,
                 Event::Shape { w, h, turn } => {
                     p.shape = Some(if turn % 180 == 90 { (h, w) } else { (w, h) });
                     frame = true; // the frame mpv holds: the first one may have come before its shape
                 }
-                Event::Ended(true) if p.playing && !p.looping => ended = true,
+                // the natural end, not a step onto the last frame: looping, from the start again (sound alone reaches it only when mpv's loop was set too late), else the quit
+                Event::Ended(true) if p.playing => {
+                    if p.looping {
+                        again = true;
+                    } else {
+                        ended = true;
+                    }
+                }
                 Event::Grabbed(picture, time) => grabbed.push((picture, time)),
-                Event::Ended(_) | Event::Loaded { .. } | Event::Failed(_) => {}
+                Event::Ended(_) | Event::Loop(_) | Event::Loaded { .. } | Event::Failed(_) => {}
             }
         }
         let p = self.playback().expect("media mode");
@@ -514,6 +523,16 @@ impl Viewer {
             }
             self.quit = true;
             return;
+        }
+        if again {
+            // as the old viewer restarted at the end (ended of bin/ascii-viewer:2135 at tag python-final), its clock at 0 meanwhile; a layer open keeps the clip paused, for its close to play on
+            p.time = 0.0;
+            if live {
+                p.paused = false;
+                p.mpv.again();
+            } else {
+                p.mpv.seek(&["seek", "0", "absolute+exact"]);
+            }
         }
         if frame {
             if !live || p.drawn.elapsed() < FRAME_GAP {
@@ -744,9 +763,13 @@ impl Viewer {
                 }
             }
             b"L" => {
+                let audio = matches!(self.mode, Mode::Audio(..));
                 if let Some(p) = self.playback() {
                     p.looping = !p.looping;
-                    p.mpv.set("loop-file", if p.looping { "inf" } else { "no" });
+                    // mpv loops sound alone, gapless, as the old viewer had it do (bin/ascii-viewer:2324-2325 at tag python-final); a video the viewer starts again at its end
+                    if audio {
+                        p.mpv.set("loop-file", if p.looping { "inf" } else { "no" });
+                    }
                     let toast = format!("loop {}", if p.looping { "on" } else { "off" });
                     self.ui.say(toast);
                 }
@@ -1430,6 +1453,96 @@ mod tests {
         assert!(viewer.quit, "the end quits");
         let saved = image::open(&shot).map(|png| (png.width(), png.height()));
         assert!(matches!(saved, Ok((1920, 1080))), "{shot:?}: {saved:?}");
+    }
+
+    #[test]
+    fn the_loop_at_an_end_under_the_help_plays_on_from_the_start_once_it_closes() {
+        // rows H3, P14: playing media pauses while the help shows and plays on once it closes (bin/ascii-viewer:2064-2066 and :2096-2097 at tag python-final), and with the loop on a video starts again at its end; an end mpv reached as the help opened, its pause on the way, sends the clip to its start there, paused, and the close plays it on from there; here mpv's report of the end is handed in on a clip paused near its end, and the close resumes as unlayer does
+        let _env = crate::mpv::tests::env();
+        let home = crate::mpv::tests::Scratch::new();
+        std::fs::create_dir_all(home.0.join(".config/mpv")).unwrap();
+        std::fs::write(home.0.join(".config/mpv/mpv.conf"), "ao=null\n").unwrap();
+        let _home = crate::mpv::tests::Var::set("HOME", &home.0);
+        let file = home.0.join("clip.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i"])
+            .args([
+                "testsrc2=s=160x90:r=25:d=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=d=2",
+            ])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&file)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let mut mpv = Mpv::new("asciier-test", || {}).unwrap();
+        mpv.open(&file, 10.0).unwrap();
+        mpv.seek(&["seek", "1.9", "absolute+exact"]);
+        let playback = Playback {
+            mpv,
+            audio: true,
+            paused: true,
+            time: 1.9,
+            length: Some(2.0),
+            speed: 100,
+            volume: Some(100.0),
+            muted: false,
+            looping: true,
+            stopped: false,
+            playing: true,
+            shape: None,
+            drawn: Instant::now() - FRAME_GAP,
+            owed: false,
+            rows: Vec::new(),
+            grabs: VecDeque::new(),
+        };
+        let mut viewer = Viewer {
+            ui: ui(SMALL),
+            mode: Mode::Video(playback),
+            page: None,
+            held: Vec::new(),
+            help: Some(0),
+            resume: true,
+            mpris: None,
+            file,
+            results: channel().1,
+            quit: false,
+        };
+        let clock = |viewer: &Viewer| match &viewer.mode {
+            Mode::Video(p) => (p.time, p.paused),
+            _ => unreachable!("a video"),
+        };
+        let pump = |viewer: &mut Viewer, seconds: f64, until: &dyn Fn(&Viewer) -> bool| {
+            let end = Instant::now() + Duration::from_secs_f64(seconds);
+            while !until(viewer) && Instant::now() < end {
+                viewer.mpv_events();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            until(viewer)
+        };
+        pump(&mut viewer, 1.0, &|_| false);
+        viewer.mpv_batch(vec![Event::Pause(true), Event::Ended(true)]);
+        // at the start, paused, while the help shows (a window for what must not happen: playing on)
+        let start = pump(&mut viewer, 5.0, &|viewer| clock(viewer).0 < 0.1);
+        pump(&mut viewer, 0.5, &|_| false);
+        let held = clock(&viewer);
+        // the help closes: what unlayer does but its writes to the terminal
+        (viewer.help, viewer.resume) = (None, false);
+        if let Mode::Video(p) = &mut viewer.mode {
+            p.pause(false);
+        }
+        let on = pump(&mut viewer, 5.0, &|viewer| {
+            (0.3..1.5).contains(&clock(viewer).0)
+        });
+        let after = clock(&viewer);
+        assert!(
+            !viewer.quit && start && held.0 < 0.1 && held.1 && on && !after.1,
+            "under the help {held:?}, after it {after:?}, quit {}",
+            viewer.quit
+        );
     }
 
     #[test]
