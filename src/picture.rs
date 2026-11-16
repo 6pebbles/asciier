@@ -172,7 +172,7 @@ fn gif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
 /// Bytes of a PNG's profile Pillow 13 inflates at most: it refuses a file whose profile holds more (PngImagePlugin MAX_TEXT_CHUNK, _safe_zlib_decompress).
 const MAX_TEXT_CHUNK: u64 = 1 << 20;
 
-/// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two; `Not::Image` for an acTL under 8 bytes and for a profile over `MAX_TEXT_CHUNK`, files Pillow refuses, and for a file without image data, which Pillow counts as one frame where IEND ends it (N6, N7); `Not::TooLarge` for a header over `MAX_PIXELS`, measured at the image data as Pillow measures it, where the png crate gives up on the largest headers as no picture. The profile measured is the png crate's, the first iCCP within its bounds, which it inflates whole while the decoder is made.
+/// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two; `Not::Image` for an acTL under 8 bytes and for a profile over `MAX_TEXT_CHUNK`, files Pillow refuses, and for a file without image data, which Pillow counts as one frame where IEND ends it (N6, N7); `Not::TooLarge` for a header over `MAX_PIXELS`, measured at the image data as Pillow measures it, where the png crate gives up on the largest headers as no picture. The profile measured is the png crate's, the first iCCP within its bounds whose CRC holds (it passes over an ancillary chunk whose CRC fails), which it inflates whole while the decoder is made.
 fn png_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not> {
     let (mut size, mut frames, mut control, mut profile) = (None, None, false, true);
     file.seek_relative(8)?; // past the signature
@@ -206,17 +206,43 @@ fn png_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not>
                 };
             }
             b"iCCP" if profile && length <= 0x7FFF_FFFF => {
-                profile = false;
-                let mut data = file.by_ref().take(length.into());
-                if profile_too_long(&mut data)? {
-                    return Err(Not::Image);
+                left = 0;
+                if crc_holds(file, &head[4..], length.into())? {
+                    profile = false;
+                    file.seek_relative(-(i64::from(length) + 4))?; // back to its data
+                    let mut data = file.by_ref().take(length.into());
+                    if profile_too_long(&mut data)? {
+                        return Err(Not::Image);
+                    }
+                    left = data.limit() + 4;
                 }
-                left = data.limit() + 4;
             }
             _ => {}
         }
         file.seek_relative(left as i64)?; // within 2^32 + 4
     }
+}
+
+/// Whether the CRC of a chunk of `kind` holds over its kind and the `length` bytes of data the reader stands at; the reader then stands at the next chunk.
+fn crc_holds(file: &mut impl BufRead, kind: &[u8], length: u64) -> std::io::Result<bool> {
+    let mut crc = flate2::Crc::new();
+    crc.update(kind);
+    let mut data = file.by_ref().take(length);
+    loop {
+        let bytes = data.fill_buf()?;
+        let read = bytes.len();
+        if read == 0 {
+            break;
+        }
+        crc.update(bytes);
+        data.consume(read);
+    }
+    let mut sum = [0; 4];
+    match data.limit() {
+        0 => file.read_exact(&mut sum)?,
+        _ => return Err(std::io::ErrorKind::UnexpectedEof.into()), // cut short
+    }
+    Ok(crc.sum() == u32::from_be_bytes(sum))
 }
 
 /// Whether an iCCP chunk's data holds a profile that inflates past `MAX_TEXT_CHUNK`: the profile's name ended by a NUL within 81 bytes (PNG's names hold 1 to 79), the method, 0 for zlib, then the stream, inflated no further than that; a stream that fails to inflate holds no profile, to Pillow and to the png crate.
@@ -1750,7 +1776,7 @@ mod tests {
 
     #[test]
     fn a_png_profile_over_a_mebibyte_is_no_picture() {
-        // row S1: Pillow 13 inflates a PNG's colour profile (iCCP) to 1 MiB at most and refuses a file whose profile holds more, also one over the limit, as it measures a file once it has read to the image data (PngImagePlugin chunk_iCCP and _safe_zlib_decompress, MAX_TEXT_CHUNK: a ValueError, no picture to identifies and open_picture of lib/ascii_image.py:67 and :105 at tag python-final; seen 2026-11-15, Pillow 13.0.0: a profile of 1 MiB opens, one of 1 MiB and a byte does not, 8 x 8 px or 60000 x 60000 px); a profile that does not inflate is none to it (zlib.error); the png crate inflates the first profile whole while the decoder is made, before any size is known: 2 GiB from a file of 2 MB
+        // row S1: Pillow 13 inflates a PNG's colour profile (iCCP) to 1 MiB at most and refuses a file whose profile holds more, also one over the limit, as it measures a file once it has read to the image data (PngImagePlugin chunk_iCCP and _safe_zlib_decompress, MAX_TEXT_CHUNK: a ValueError, no picture to identifies and open_picture of lib/ascii_image.py:67 and :105 at tag python-final; seen 2026-11-15, Pillow 13.0.0: a profile of 1 MiB opens, one of 1 MiB and a byte does not, 8 x 8 px or 60000 x 60000 px); a profile that does not inflate is none to it (zlib.error); the png crate inflates the first profile whole while the decoder is made, before any size is known: 2 GiB from a file of 2 MB; it passes over a profile whose CRC fails and inflates the next one, so a small profile of a broken CRC before one over 1 MiB is no picture too, as Pillow refuses a chunk whose CRC fails (PngImagePlugin ChunkStream.crc: a SyntaxError; seen 2026-11-16, Pillow 13.0.0)
         let dir = Dir::new("png_profile");
         let row = [&[0][..], &[1, 2, 3].repeat(8)].concat(); // filter 0
         let profiled = |(w, h): (u32, u32), profile: &[u8]| {
@@ -1770,6 +1796,18 @@ mod tests {
             let seen = (kind(&file), identifies(&file));
             assert_eq!(seen, ("no image", false), "{name}");
         }
+        let small = [&b"p\0\0"[..], &zlib(&[0; 4096])].concat();
+        let mut second = png_chunks(&[
+            (b"IHDR", ihdr(8, 8, 8, 2)),
+            (b"iCCP", small.clone()),
+            (b"iCCP", [&b"q\0\0"[..], &past].concat()),
+            (b"IDAT", zlib(&row.repeat(8))),
+            (b"IEND", vec![]),
+        ]);
+        let crc = 8 + 25 + 8 + small.len(); // past the signature, the header and the first profile's length, kind and data
+        second[crc] ^= 0xFF;
+        let second = dir.file("second.png", second);
+        assert_eq!((kind(&second), identifies(&second)), ("no image", false));
         let mut broken = zlib(&vec![0; 2 * mebibyte]);
         broken[0] = 0; // no zlib header
         let broken = dir.file("broken.png", profiled((8, 8), &broken));
