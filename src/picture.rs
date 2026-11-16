@@ -329,7 +329,7 @@ fn boxed(
     Ok((size >= body - at).then_some((kind, body, at.saturating_add(size))))
 }
 
-/// An AVIF's one frame, measured by the sizes its container declares, the ispe properties in its meta box, as Pillow 13 measures one (AvifImagePlugin, libavif's parse), before the decoder, which learns a size only from the picture dav1d decodes whole: one over `MAX_PIXELS`, `Not::TooLarge`; the decoded picture's own size is measured after it. `Not::Image` for a file whose first box is no ftyp, whole and of brands in fours, or whose brands hold no AVIF brand (avif, avis), which mp4parse and libavif refuse; one of a major brand Pillow does not take (AvifImagePlugin _accept: avif, avis, mif1, msf1), the decoder's to tell (N7).
+/// An AVIF's one frame, measured by the size its container declares, the primary item's first ispe property (pitm, ipma, ipco), as Pillow 13 measures one (AvifImagePlugin, libavif's parse), before the decoder, which learns a size only from the picture dav1d decodes whole: over `MAX_PIXELS`, `Not::TooLarge`; the decoded picture's own size is measured after it. `Not::Image` for a file whose first box is no ftyp, whole and of brands in fours, or whose brands hold no AVIF brand (avif, avis), which mp4parse and libavif refuse; one of a major brand Pillow does not take (AvifImagePlugin _accept: avif, avis, mif1, msf1), the decoder's to tell (N7).
 fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     let (mut walk, end) = Walk::new(file)?;
     let Some((kind, body, stop)) = boxed(&mut walk, 0, end)? else {
@@ -350,28 +350,110 @@ fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     if !matches!(&major, b"avif" | b"avis" | b"mif1" | b"msf1") {
         return Ok(1);
     }
-    let (mut at, mut end) = (stop, end);
-    let mut path = [b"meta", b"iprp", b"ipco"].into_iter(); // the boxes that hold the properties
-    let mut want = path.next();
-    while let Some((kind, body, stop)) = boxed(&mut walk, at, end)? {
-        if want.is_some_and(|wanted| &kind == wanted) {
-            let full = u64::from(&kind == b"meta") * 4; // a full box's version and flags
-            (at, end, want) = (body + full, end.min(stop), path.next());
-            continue;
+    let (mut at, mut meta) = (stop, None);
+    while let Some((kind, body, next)) = boxed(&mut walk, at, end)? {
+        if &kind == b"meta" {
+            meta = meta.or(Some((body + 4, next.min(end)))); // past its version and flags
         }
-        if want.is_none() && &kind == b"ispe" {
-            let mut sides = [0; 12]; // the version and flags, the width, the height
-            walk.read(body, &mut sides)?;
-            let side = |at: usize| {
-                u32::from_be_bytes([sides[at], sides[at + 1], sides[at + 2], sides[at + 3]])
-            };
-            if too_large((side(4), side(8))) {
-                return Err(Not::TooLarge);
+        at = next;
+    }
+    let Some((mut at, end)) = meta else {
+        return Ok(1);
+    };
+    // its primary item (pitm), each item's properties by their places (iprp's ipma), the properties (iprp's ipco)
+    let (mut primary, mut ipma, mut ipco) = (None, None, None);
+    while let Some((kind, body, next)) = boxed(&mut walk, at, end)? {
+        let next = next.min(end);
+        if &kind == b"pitm" {
+            let mut head = [0; 6]; // the version and flags, the item's first 2 bytes: all of it in version 0, else half
+            walk.read(body, &mut head)?;
+            let mut item = u32::from(u16::from_be_bytes([head[4], head[5]]));
+            if head[0] > 0 {
+                let mut low = [0; 2];
+                walk.read(body + 6, &mut low)?;
+                item = item << 16 | u32::from(u16::from_be_bytes(low));
+            }
+            primary = primary.or(Some(item));
+        }
+        if &kind == b"iprp" {
+            let mut part = body;
+            while let Some((inner, body, stop)) = boxed(&mut walk, part, next)? {
+                match &inner {
+                    b"ipma" => ipma = ipma.or(Some((body, stop.min(next)))),
+                    b"ipco" => ipco = ipco.or(Some((body, stop.min(next)))),
+                    _ => {}
+                }
+                part = stop;
             }
         }
-        at = stop;
+        at = next;
     }
-    Ok(1)
+    let (Some(primary), Some((body, end)), Some((mut at, last))) = (primary, ipma, ipco) else {
+        return Ok(1);
+    };
+    let places = associations(&mut walk, body, end, primary)?;
+    // of the primary item's properties, the first, in their order, that is an ispe, as libavif takes it
+    let mut sides = vec![None; places.len()];
+    let mut place = 1; // the properties are counted from 1
+    while let Some((kind, body, next)) = boxed(&mut walk, at, last)? {
+        if &kind == b"ispe" && next.min(last) >= body + 12 && places.contains(&place) {
+            let mut ispe = [0; 12]; // the version and flags, the width, the height
+            walk.read(body, &mut ispe)?;
+            let side = |at: usize| {
+                u32::from_be_bytes([ispe[at], ispe[at + 1], ispe[at + 2], ispe[at + 3]])
+            };
+            for (named, seen) in places.iter().zip(&mut sides) {
+                if *named == place {
+                    *seen = Some((side(4), side(8)));
+                }
+            }
+        }
+        (at, place) = (next, place + 1);
+    }
+    match sides.into_iter().flatten().next() {
+        Some(size) if too_large(size) => Err(Not::TooLarge),
+        _ => Ok(1),
+    }
+}
+
+/// The places among ipco's properties, counted from 1, of the properties that `item`'s entry in the ipma box from `body` to `end` names, in its order; none where it names none. ipma: its version and flags, the count of entries, then each entry's item (2 bytes in version 0, else 4), the count of its properties and their places (1 byte each, the top bit a flag, or 2 bytes with flag 1).
+fn associations(
+    walk: &mut Walk<'_, impl Read + Seek>,
+    body: u64,
+    end: u64,
+    item: u32,
+) -> std::io::Result<Vec<u64>> {
+    let mut head = [0; 8];
+    walk.read(body, &mut head)?;
+    let id = if head[0] == 0 { 2 } else { 4 }; // an item's bytes
+    let wide = head[3] & 1 == 1; // 2 bytes a place
+    let (mut at, mut entries) = (
+        body + 8,
+        u32::from_be_bytes([head[4], head[5], head[6], head[7]]),
+    );
+    while entries > 0 && at < end {
+        let mut entry = [0; 5]; // the item, the count of its properties
+        walk.read(at, &mut entry[4 - id..])?;
+        let (named, count) = (
+            u32::from_be_bytes([entry[0], entry[1], entry[2], entry[3]]),
+            entry[4],
+        );
+        let mut places = vec![0; usize::from(count) << u8::from(wide)];
+        at += id as u64 + 1;
+        if named == item {
+            walk.read(at, &mut places)?;
+            return Ok(match wide {
+                true => places
+                    .chunks(2)
+                    .map(|place| u64::from(u16::from_be_bytes([place[0], place[1]]) & 0x7FFF))
+                    .collect(),
+                false => places.iter().map(|place| u64::from(place & 0x7F)).collect(),
+            });
+        }
+        at += places.len() as u64;
+        entries -= 1;
+    }
+    Ok(Vec::new())
 }
 
 /// A WebP's frames as libwebp counts a well-formed one's for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP; libwebp's demuxer leaves out a frame without an image and refuses a file cut short, so a damaged WebP can count otherwise in Pillow (N6, N7). An error for a VP8X whose EXIF, ICCP or XMP chunk runs past the file's end, which Pillow's libwebp refuses: the decoder takes such a chunk whole by the size it declares, up to 4 GiB allocated before the read fails (the EXIF for the orientation); the chunks walked as image-webp walks them, as far as the RIFF's length takes it.
@@ -1721,6 +1803,26 @@ mod tests {
         avif
     }
 
+    /// `avif`, laid out as tests/golden/picture-quarters.avif, with `property` after the properties of its ipco box: the boxes around it grown, the picture's place in its iloc box moved on.
+    fn with_property(avif: &[u8], property: &[u8]) -> Vec<u8> {
+        let place = |out: &[u8], kind: &[u8]| out.windows(4).position(|at| at == kind).unwrap() - 4;
+        let grow = |out: &mut Vec<u8>, at: usize| {
+            let value =
+                u32::from_be_bytes(out[at..at + 4].try_into().unwrap()) + property.len() as u32;
+            out[at..at + 4].copy_from_slice(&value.to_be_bytes());
+        };
+        let ipco = place(avif, b"ipco");
+        let end = ipco + u32::from_be_bytes(avif[ipco..ipco + 4].try_into().unwrap()) as usize;
+        let mut out = [&avif[..end], property, &avif[end..]].concat();
+        for kind in [b"meta", b"iprp", b"ipco"] {
+            let at = place(&out, kind);
+            grow(&mut out, at);
+        }
+        let extent = place(&out, b"iloc") + 22; // the header, the version and flags, the sizes, the count, the item, its data reference, its extents
+        grow(&mut out, extent);
+        out
+    }
+
     #[test]
     fn no_signature_or_a_refused_header_is_no_picture() {
         // rows S1, S18: a file named by a format's suffix without that format's signature is no picture, as to Pillow 13, whose readers take a file by its signature (QoiImagePlugin and PngImagePlugin _accept; seen 2026-11-16, Pillow 13.0.0 through identifies and open_picture of lib/ascii_image.py:67 and :105 at tag python-final), though the bytes where its header would hold the sides declare more than the limit: a text named .qoi, a QOI header whose signature reads qoiF, a PNG header of 60000 x 60000 px behind a signature zeroed or one byte off; so is a PNG whose header's CRC fails or that is cut to 8 bytes, which the png crate and Pillow refuse (PngImagePlugin ChunkStream.crc: a SyntaxError; chunk_IHDR: `Truncated IHDR chunk`, a ValueError), and an AVIF declaring 15000 x 15000 px without its first box, ftyp, or whose ftyp names no AVIF brand (avif, avis), which mp4parse and libavif refuse (Pillow: `cannot identify image file`)
@@ -1777,12 +1879,30 @@ mod tests {
 
     #[test]
     fn an_avif_is_measured_by_its_container_before_it_is_decoded() {
-        // rows S18, N7: Pillow 13 measures an AVIF by the size its container declares, the primary item's ispe property, before any picture is decoded (AvifImagePlugin, libavif's parse): tests/golden/picture-quarters.avif declaring 15000 x 15000 px is too large to open and identifies (lib/ascii_image.py:76, :95 at tag python-final; seen 2026-11-15, Pillow 13.0.0); the decoder learns a size only from the picture dav1d decodes whole, here 16 x 8 px; N7: one whose major brand Pillow does not take (AvifImagePlugin _accept: avif, avis, mif1, msf1), heic or isom before the AVIF brands, is the built-in decoder's to tell: a still of its 16 x 8 px, where Pillow gave no picture (seen 2026-11-16, Pillow 13.0.0: `cannot identify image file`)
+        // rows S18, N7: Pillow 13 measures an AVIF by the size its container declares, the primary item's ispe property, before any picture is decoded (AvifImagePlugin, libavif's parse): tests/golden/picture-quarters.avif declaring 15000 x 15000 px is too large to open and identifies (lib/ascii_image.py:76, :95 at tag python-final; seen 2026-11-15, Pillow 13.0.0); the decoder learns a size only from the picture dav1d decodes whole, here 16 x 8 px; N7: one whose major brand Pillow does not take (AvifImagePlugin _accept: avif, avis, mif1, msf1), heic or isom before the AVIF brands, is the built-in decoder's to tell: a still of its 16 x 8 px, where Pillow gave no picture (seen 2026-11-16, Pillow 13.0.0: `cannot identify image file`); a property of 15000 x 15000 px that no item takes is not measured, a still of 16 x 8 px to Pillow too, nor an ispe of the primary item cut short before its sides, which libavif and mp4parse refuse
         let dir = Dir::new("avif_extent");
         let avif = quarters_avif(15000, 15000);
         let file = dir.file("big.avif", &avif);
         assert_eq!((kind(&file), identifies(&file)), ("too large", true));
         assert!(matches!(original_png(&file, 0), Err(NoCopy::TooLarge)));
+        let ispe = |w: u32, h: u32| {
+            [
+                &20u32.to_be_bytes()[..],
+                b"ispe",
+                &[0; 4],
+                &w.to_be_bytes(),
+                &h.to_be_bytes(),
+            ]
+            .concat()
+        };
+        let quarters = quarters_avif(16, 8);
+        let unused = dir.file("unused.avif", with_property(&quarters, &ispe(15000, 15000)));
+        assert_eq!(rgb(&still(&unused).pic).dimensions(), (16, 8));
+        let mut short = avif.clone();
+        let at = short.windows(4).position(|kind| kind == b"ispe").unwrap() - 4;
+        short[at..at + 4].copy_from_slice(&12u32.to_be_bytes()); // the header, the version and flags
+        let short = dir.file("short.avif", short);
+        assert_eq!((kind(&short), identifies(&short)), ("no image", false));
         for brand in [b"heic", b"isom"] {
             let mut other = avif.clone();
             other[8..12].copy_from_slice(brand);
