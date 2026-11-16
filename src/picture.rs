@@ -528,7 +528,7 @@ fn associations(
     Ok(Vec::new())
 }
 
-/// A WebP's frames as libwebp counts a well-formed one's for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP; libwebp's demuxer leaves out a frame without an image and refuses a file cut short, so a damaged WebP can count otherwise in Pillow (N6, N7). An error for a VP8X whose EXIF, ICCP or XMP chunk runs past the file's end, which Pillow's libwebp refuses: the decoder takes such a chunk whole by the size it declares, up to 4 GiB allocated before the read fails (the EXIF for the orientation); the chunks walked as image-webp walks them, as far as the RIFF's length takes it.
+/// A WebP's frames as libwebp counts a well-formed one's for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP; libwebp's demuxer leaves out a frame without an image and refuses a file cut short, so a damaged WebP can count otherwise in Pillow (N6, N7). An error for a VP8X whose EXIF, ICCP or XMP chunk runs past the file's end: the decoder takes the first such chunk of each kind whole by the size it declares, with its flag or without, up to 4 GiB allocated before the read fails (the EXIF for the orientation); Pillow's libwebp refuses such a file, or opens it where the chunk lies past the RIFF's end, a damaged WebP's verdict (N6, N7); the chunks walked as image-webp walks them, to 12 bytes short of the RIFF's length past VP8X, so past the RIFF's end.
 fn webp_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
     let mut head = [0; 21]; // RIFF, its length, WEBP, the first chunk's kind and length, a byte of its data: VP8X's flags
     file.read_exact(&mut head)?;
