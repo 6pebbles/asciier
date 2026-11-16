@@ -634,8 +634,11 @@ fn ico_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not>
     }
 }
 
-/// Whether a data window of the EXR at `path`, the pixels its blocks hold, is over `MAX_PIXELS`: each part's last dataWindow of type box2i, as the exr crate takes it, which allocates a block's pixels by it before it inflates them, where the decoder's size is the display window, the picture's. Walked once the exr crate has read the headers whole, so as it reads them, its refusals its own: the magic number, the version and flags (long names: 256 bytes a name at most, else 32; several parts: a header each, then a NUL), then each header's attributes, a NUL ending them: a name and a kind, each ended by a NUL, the value's size, the value.
-fn exr_window_too_large(path: &Path) -> std::result::Result<bool, Not> {
+/// Bytes a block of an EXR may hold: a picture of `MAX_PIXELS` in four float channels.
+const MAX_BLOCK: u64 = MAX_PIXELS * 16;
+
+/// An EXR's parts measured: each one's data window, the pixels its blocks hold, over `MAX_PIXELS`, `Not::TooLarge`, where the decoder's size is the display window, the picture's; a block, its lines or its tile within the data window, in all the channels' bytes over `MAX_BLOCK`, `Not::Image`. The exr crate allocates a block's pixels so before it inflates them. Each part's attributes taken as the exr crate takes them, the last of a name with its kind: dataWindow (box2i), channels (chlist: each a name, a type, 2 bytes a pixel for half, else 4, and 12 bytes more), compression (its lines a block: 1, 16, 32 or 256), tiles (tiledesc: the tile's sides) where the part is tiled (its type, or the version's flag of a single tiled part). Walked once the exr crate has read the headers whole, so as it reads them, its refusals its own: the magic number, the version and flags (long names: 256 bytes a name at most, else 32; several parts: a header each, then a NUL), then each header's attributes, a NUL ending them: a name and a kind, each ended by a NUL, the value's size, the value.
+fn exr_measured(path: &Path) -> std::result::Result<(), Not> {
     fn byte(file: &mut impl Read) -> std::io::Result<u8> {
         let mut byte = [0];
         file.read_exact(&mut byte).map(|()| byte[0])
@@ -660,47 +663,94 @@ fn exr_window_too_large(path: &Path) -> std::result::Result<bool, Not> {
     let mut file = BufReader::new(File::open(path)?);
     let mut head = [0; 8];
     file.read_exact(&mut head)?;
-    let (most, parts) = (
-        if head[5] & 0x04 > 0 { 256 } else { 32 },
-        head[5] & 0x10 > 0,
-    ); // flag bits 10 and 12
+    let flags = head[5]; // flag bits 9 to 12: a single tiled part, long names, deep data, several parts
+    let (most, parts) = (if flags & 0x04 > 0 { 256 } else { 32 }, flags & 0x10 > 0);
     loop {
         if parts && ends(&mut file)? {
-            return Ok(false);
+            return Ok(());
         }
-        let mut window = None;
+        let (mut window, mut bytes, mut lines, mut tile, mut tiled) = ((1, 1), 0, 1, None, None);
         while !ends(&mut file)? {
             let (name, kind) = (text(&mut file, most)?, text(&mut file, most)?);
             let mut size = [0; 4];
             file.read_exact(&mut size)?;
-            let mut size = u32::from_le_bytes(size);
-            if name == b"dataWindow" && kind == b"box2i" && size >= 16 {
-                let mut bounds = [0; 16]; // xMin, yMin, xMax, yMax
-                file.read_exact(&mut bounds)?;
-                let at = |at: usize| {
-                    i64::from(i32::from_le_bytes([
-                        bounds[at],
-                        bounds[at + 1],
-                        bounds[at + 2],
-                        bounds[at + 3],
-                    ]))
-                };
-                let side = |a: i64, b: i64| (a.max(b) - a.min(b) + 1) as u64;
-                window = Some(side(at(0), at(8)) * side(at(4), at(12)));
-                size -= 16;
+            let mut value = file.by_ref().take(u32::from_le_bytes(size).into());
+            let mut field = [0; 16];
+            match (&name[..], &kind[..]) {
+                (b"dataWindow", b"box2i") => {
+                    value.read_exact(&mut field)?; // xMin, yMin, xMax, yMax
+                    let at = |at: usize| {
+                        i64::from(i32::from_le_bytes([
+                            field[at],
+                            field[at + 1],
+                            field[at + 2],
+                            field[at + 3],
+                        ]))
+                    };
+                    let side = |a: i64, b: i64| (a.max(b) - a.min(b) + 1) as u64;
+                    window = (side(at(0), at(8)), side(at(4), at(12)));
+                }
+                (b"channels", b"chlist") => {
+                    bytes = 0;
+                    loop {
+                        let mut channel = Vec::new();
+                        value.by_ref().take(257).read_until(0, &mut channel)?;
+                        if channel.len() < 2 {
+                            break; // a NUL alone: the list's end
+                        }
+                        value.read_exact(&mut field)?; // its type, then whether linear, 3 reserved bytes, its sampling
+                        bytes += if field[..4] == [1, 0, 0, 0] { 2 } else { 4 };
+                    }
+                }
+                (b"compression", b"compression") => {
+                    value.read_exact(&mut field[..1])?;
+                    lines = match field[0] {
+                        0..=2 => 1,
+                        3 | 5 => 16,
+                        9 | 10 => 256,
+                        _ => 32,
+                    };
+                }
+                (b"tiles", b"tiledesc") => {
+                    value.read_exact(&mut field[..8])?; // the tile's width and height, then its levels
+                    let side = |at: usize| {
+                        u64::from(u32::from_le_bytes([
+                            field[at],
+                            field[at + 1],
+                            field[at + 2],
+                            field[at + 3],
+                        ]))
+                    };
+                    tile = Some((side(0), side(4)));
+                }
+                (b"type", b"string") => {
+                    let mut named = Vec::new();
+                    value.by_ref().take(64).read_to_end(&mut named)?;
+                    tiled = Some(named == b"tiledimage" || named == b"deeptile");
+                }
+                _ => {}
             }
-            file.seek_relative(size.into())?;
+            let left = value.limit();
+            file.seek_relative(left as i64)?; // within 2^32
         }
-        if window.is_some_and(|pixels| pixels > MAX_PIXELS) {
-            return Ok(true);
+        let (w, h) = window;
+        if w * h > MAX_PIXELS {
+            return Err(Not::TooLarge);
+        }
+        let block = match (tiled.unwrap_or(flags & 0x02 > 0), tile) {
+            (true, Some((across, down))) => across.min(w) * down.min(h),
+            _ => w * lines.min(h),
+        };
+        if block.saturating_mul(bytes) > MAX_BLOCK {
+            return Err(Not::Image);
         }
         if !parts {
-            return Ok(false);
+            return Ok(());
         }
     }
 }
 
-/// The decoder of the raster still at `path`, its header read: the format by content, within `MAX_PIXELS`, no animation; in Pillow's order (Image.open, then lib/ascii_image.py:61): the file read to its first frame, then its size, then its frames; a GIF measured by its blocks before the decoder reads it, whose refusals Pillow does not share; an EXR by its data windows too, once the decoder has read its headers.
+/// The decoder of the raster still at `path`, its header read: the format by content, within `MAX_PIXELS`, no animation; in Pillow's order (Image.open, then lib/ascii_image.py:61): the file read to its first frame, then its size, then its frames; a GIF measured by its blocks before the decoder reads it, whose refusals Pillow does not share; an EXR by its data windows and blocks too, once the decoder has read its headers.
 fn header(path: &Path) -> std::result::Result<impl ImageDecoder, Not> {
     let mut reader = ImageReader::open(path)
         .and_then(ImageReader::with_guessed_format)
@@ -709,9 +759,11 @@ fn header(path: &Path) -> std::result::Result<impl ImageDecoder, Not> {
     let format = reader.format();
     let frames = frames(path, format)?;
     let decoder = reader.into_decoder().map_err(|_| Not::Image)?;
-    let exr = format == Some(ImageFormat::OpenExr);
-    if too_large(decoder.dimensions()) || exr && exr_window_too_large(path)? {
+    if too_large(decoder.dimensions()) {
         return Err(Not::TooLarge);
+    }
+    if format == Some(ImageFormat::OpenExr) {
+        exr_measured(path)?;
     }
     match frames {
         1 => Ok(decoder),
@@ -2062,26 +2114,30 @@ mod tests {
         assert!(all, "{seen:?}"); // (name, too large with its message, identifies, its copy refused as too large, open)
     }
 
-    /// An EXR of one part: three half channels B, G, R in ZIP's blocks of 16 lines, a display window and a data window (xMin, yMin, xMax, yMax), the offset table, then each block: its first line, its size, `block`.
-    fn exr(display: [i32; 4], data: [i32; 4], block: &[u8]) -> Vec<u8> {
+    /// An EXR of one part: three half channels B, G, R and `floats` float channels more, in ZIP's blocks of 16 lines, a display window and a data window (xMin, yMin, xMax, yMax), the offset table, then each block: its first line, its size, `block`.
+    fn exr(display: [i32; 4], data: [i32; 4], block: &[u8], floats: usize) -> Vec<u8> {
         let attribute = |name: &str, kind: &str, value: &[u8]| {
             let size = (value.len() as i32).to_le_bytes();
             [name.as_bytes(), b"\0", kind.as_bytes(), b"\0", &size, value].concat()
         };
         let window = |bounds: [i32; 4]| bounds.map(i32::to_le_bytes).concat();
-        // each: its name, HALF, not linear, 3 reserved bytes, sampled every pixel across and down
-        let channel = |name: &[u8]| {
+        // each: its name, HALF (1) or FLOAT (2), not linear, 3 reserved bytes, sampled every pixel across and down
+        let channel = |name: &[u8], kind: u8| {
             [
                 name,
                 b"\0",
-                &[1, 0, 0, 0],
+                &[kind, 0, 0, 0],
                 &[0; 4],
                 &[1, 0, 0, 0],
                 &[1, 0, 0, 0],
             ]
             .concat()
         };
-        let channels = [channel(b"B"), channel(b"G"), channel(b"R"), vec![0]].concat();
+        let mut channels = [channel(b"B", 1), channel(b"G", 1), channel(b"R", 1)].concat();
+        for more in 0..floats {
+            channels.extend(channel(format!("c{more:04}").as_bytes(), 2)); // after the capitals, as the names go
+        }
+        channels.push(0);
         let mut out = vec![0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0]; // the magic number, version 2, no flags
         out.extend(attribute("channels", "chlist", &channels));
         out.extend(attribute("compression", "compression", &[3])); // ZIP
@@ -2107,11 +2163,11 @@ mod tests {
 
     #[test]
     fn an_exr_is_measured_by_its_data_window_too() {
-        // rows S18, N7: an EXR, a format of the built-in decoders that Pillow 13 does not read, is held to the limit by its data window, the pixels its blocks hold, as well as by its display window, its picture's size (owner 2026-11-16): too large to open, identifies, its copy refused; the exr crate allocates a block's pixels by the data window before it inflates them (zune-inflate's output, by its size hint), 103 GB for a ZIP block of 16 lines 1073741821 px wide behind a display window of 16 x 8 px; a data window at the limit goes to the decoder, which finds its blocks empty; one of 16 x 8 px over a zero picture opens, black
+        // rows S18, N7: an EXR, a format of the built-in decoders that Pillow 13 does not read, is held to the limit by its data window, the pixels its blocks hold, as well as by its display window, its picture's size (owner 2026-11-16): too large to open, identifies, its copy refused; the exr crate allocates a block's pixels by the data window before it inflates them (zune-inflate's output, by its size hint), 103 GB for a ZIP block of 16 lines 1073741821 px wide behind a display window of 16 x 8 px; a data window at the limit goes to the decoder, which finds its blocks empty; one of 16 x 8 px over a zero picture opens, black; a block's pixels are allocated in all the channels' bytes, so a block, its lines or its tile within the data window, past the bytes of a picture at the limit in four float channels is no picture: 430 GB for a ZIP block of 16 lines 11184810 px wide in 3 half channels and 600 float ones
         let dir = Dir::new("exr_window");
         let small = [0, 0, 15, 7];
         let zero = zlib(&[&[0][..], &[128; 767]].concat()); // 16 x 8 px of 3 half channels at 0: each byte its difference from the last plus 128
-        let opened = still(&dir.file("small.exr", exr(small, small, &zero)));
+        let opened = still(&dir.file("small.exr", exr(small, small, &zero, 0)));
         assert_eq!(rgb(&opened.pic).dimensions(), (16, 8));
         assert_eq!(colours(rgb(&opened.pic)), [[0, 0, 0]].into());
         assert_eq!(12470 * 14351, MAX_PIXELS);
@@ -2119,7 +2175,7 @@ mod tests {
             ("past.exr", [0, 0, 12469, 14351]),
             ("wide.exr", [0, 0, 1073741820, 15]),
         ] {
-            let file = dir.file(name, exr(small, data, &zlib(b"")));
+            let file = dir.file(name, exr(small, data, &zlib(b""), 0));
             let Opened::TooLarge(why) = open(&file) else {
                 panic!("{name}: {}", kind(&file))
             };
@@ -2133,8 +2189,17 @@ mod tests {
                 "{name}"
             );
         }
-        let at = dir.file("at.exr", exr(small, [0, 0, 12469, 14350], &zlib(b"")));
+        let at = dir.file("at.exr", exr(small, [0, 0, 12469, 14350], &zlib(b""), 0));
         assert_eq!((kind(&at), identifies(&at)), ("no image", true));
+        // a block of a data window within the limit, its pixels in all their channels' bytes past a picture's at the limit in four float channels
+        let channels = dir.file(
+            "channels.exr",
+            exr(small, [0, 0, 11184809, 15], &zlib(b""), 600),
+        );
+        assert_eq!(
+            (kind(&channels), identifies(&channels)),
+            ("no image", false)
+        );
     }
 
     /// tests/golden/picture-quarters.avif, its ispe property declaring `w` x `h` px.
