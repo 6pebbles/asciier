@@ -1080,6 +1080,42 @@ fn l_loops_the_clip_until_it_is_off() {
 }
 
 #[test]
+fn space_on_the_last_frame_plays_round_or_quits() {
+    // rows P8, P13, P14: `space` on the last frame, paused there by `.`, played on, and the decoder's end then quit, exit 0, or with `L` started the clip again (toggle and ended of bin/ascii-viewer:2270 and :2135 at tag python-final); mpv pauses at once at its end, and on the last frame, which a seek past the end showed at its own time once the step played the sound out, it told nothing of it: the viewer played on that frame under the mark `>` for good (seen before the fix with the loop off; with mpv's own loop, loop-file, mpv played it round)
+    let sandbox = Sandbox::new();
+    let video = counter(&sandbox, "clip.mp4", "160x90", 25, 2.2, 2.2, &[]);
+    for looping in [true, false] {
+        let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+        paused_at_the_start(&mut tty);
+        if looping {
+            says(&mut tty, b"L", "loop on");
+        }
+        lands(&mut tty, b"\x1b[1;2C\x1b[1;2C", 50, "| 00:02");
+        for number in 51..=54 {
+            lands(&mut tty, b".", number, "| 00:02");
+        }
+        // mpv plays the sound out, then a seek past the end shows the frame at its own time, 2.16 s: 63 of the bar's 64 cells, 60 of 61 while looping (room 4 less)
+        let cells = if looping { 60 } else { 63 };
+        tty.until("the clock on the last frame", |screen| {
+            screen.row(24).matches('━').count() == cells
+        });
+        let at = tty.send(b" ");
+        if looping {
+            let again = |screen: &Screen| frame(screen) < 10 && screen.row(24).starts_with("> ");
+            if !tty.wait(at, PATIENCE, |out| {
+                replay(out, SMALL, again).contains(&true)
+            }) {
+                tty.fail("not from the start again after `space`");
+            }
+            says(&mut tty, b"L", "loop off");
+        }
+        let what = if looping { "looping" } else { "not looping" };
+        let status = tty.exit_within(PATIENCE).and_then(|status| status.code());
+        assert_eq!(status, Some(0), "{what}");
+    }
+}
+
+#[test]
 fn the_status_row_shows_mark_clock_length_and_bar() {
     // row P16: status of bin/ascii-viewer:2143 at tag python-final, the rows as the old viewer wrote them in this harness: `<mark> MM:SS / MM:SS` and round(room x position / length) of `━`, room = cols - len - 1, 4 less while looping, `L` in the last column; only the text written, after the draw erased the row; cut to the width; minutes in full
     let sandbox = Sandbox::new();

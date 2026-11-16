@@ -31,7 +31,7 @@ pub enum Event {
     Mute(bool),
     /// mpv's `loop-file`, which loops sound alone.
     Loop(bool),
-    /// The end of the file was reached and mpv has paused there (`keep-open`): the sound has played out. A step or a seek onto the end reports it too; `false`: a seek left the end.
+    /// The end of the file was reached and mpv has paused there (`keep-open`): the sound has played out. A step or a seek onto the end reports it too, and a play there again; `false`: a seek left the end.
     Ended(bool),
     /// The picture's display size as stored and the clockwise turn (0, 90, 180, 270) the stream asks for: upright it is `h` x `w` for a turn of 90 or 270.
     Shape {
@@ -812,7 +812,16 @@ impl Mpv {
 
     fn go(&mut self, op: Op) {
         match op {
-            Op::Pause { paused, .. } => self.put_pause(paused),
+            Op::Pause { paused, .. } => {
+                // a play where nothing is left to play, mpv paused at the end or on the last frame a seek past the end showed at its own time, ends there again at once, which mpv can leave unsaid: its pause and end stand as they were reported
+                let anchored = self
+                    .end
+                    .is_some_and(|end| (end - self.time).abs() < 0.000_001);
+                if !paused && (self.at_end && self.paused || anchored && self.tail) {
+                    self.reported.push(Event::Ended(true));
+                }
+                self.put_pause(paused)
+            }
             Op::Seek(args) => self.start_seek(&args, false),
             Op::Anchor => {
                 let past = self.length.unwrap_or(self.time) + 1.0;
@@ -1042,6 +1051,8 @@ impl Mpv {
                 if anchor {
                     self.end = Some(landed);
                 }
+                // a seek that left the end has the next end told, though mpv's reports of leaving it and of coming back came in one look (a one-frame clip played again)
+                self.ended &= self.at_end && self.paused;
                 // an exact seek shows the first frame at most 5 ms before its target; one landing further short, or past the last frame's own time, shows the last frame, at the sound's position
                 let short = target.is_some_and(|target| landed < target - 0.006);
                 let past = self.end.is_some_and(|end| landed > end + 0.001);
@@ -4392,6 +4403,39 @@ pub(crate) mod tests {
                 continue;
             }
             wrong.extend(requests_go(&mut stage, case));
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn a_play_where_nothing_is_left_to_play_ends_again() {
+        // rows P8, P14: `space` on the last frame played on, and the decoder's end then quit, or with the loop on started again (toggle and ended of bin/ascii-viewer:2270 and :2135 at tag python-final); mpv pauses at once at its end, and with the end reported, or on the last frame a seek past the end showed at its own time, it told nothing of it: the viewer played on the last frame under the mark `>` for good (seen before the fix: no report in 1.5 s, 3 of 3 rounds of each case with sound, of the end silent); the end is now told again; each case: the end played to, and `.` on the last frame, with sound to the end and silent
+        let mut wrong = Vec::new();
+        for audio in [2.0, 0.0] {
+            for case in ["the end", "`.` on the last frame"] {
+                let mut stage = Stage::new();
+                stage.clip(2.0, audio);
+                stage.settle();
+                let at = if case == "the end" { "1.8" } else { "1.96" };
+                stage.mpv.seek(&["seek", at, "absolute+exact"]);
+                assert!(idle(&mut stage, 10.0), "{case}");
+                if case == "the end" {
+                    stage.play();
+                } else {
+                    stage.step(true);
+                }
+                // there, every request done
+                stage.pump(10.0, |e| *e == Event::Ended(true));
+                let there = idle(&mut stage, 10.0) && stage.holds(0.3) && stage.mpv.paused;
+                stage.play();
+                let ends = stage.pump(2.0, |e| *e == Event::Ended(true));
+                if !(there && ends.contains(&Event::Ended(true))) {
+                    let on = (stage.shown.last(), stage.time, stage.mpv.paused);
+                    wrong.push(format!(
+                        "{case}, {audio} s of sound: there {there}, then {on:?}"
+                    ));
+                }
+            }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
