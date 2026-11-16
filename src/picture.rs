@@ -75,19 +75,19 @@ fn caught<T>(work: impl FnOnce() -> T) -> Option<T> {
     crate::term::guard(std::panic::AssertUnwindSafe(work)).ok()
 }
 
-/// A raster still's frames as Pillow's n_frames counts a well-formed file's (lib/ascii_image.py:61), up to 2, nothing decoded: a GIF by its blocks, an APNG and a WebP by their chunks, 1 for any other format; `Not::Image` where they cannot be counted, `Not::TooLarge` for a GIF whose screen, grown to its first frame, and for a PNG, a QOI or an AVIF whose header is over `MAX_PIXELS`, measured before their decoders, which give up on some such headers as no picture or decode an AVIF whole to learn its size; a damaged file can count otherwise in Pillow (N6, N7).
+/// A raster still's frames as Pillow's n_frames counts a well-formed file's (lib/ascii_image.py:61), up to 2, nothing decoded: a GIF by its blocks, an APNG and a WebP by their chunks, an AVIF by its boxes, 1 for any other format; `Not::Image` where they cannot be counted, `Not::TooLarge` for a GIF whose screen, grown to its first frame, and for a PNG, a QOI, an AVIF, a BMP, an icon or a WebP whose header is over `MAX_PIXELS`, measured before their decoders, which give up on some such headers as no picture or decode an AVIF whole to learn its size; a damaged file can count otherwise in Pillow (N6, N7).
 fn frames(path: &Path, format: Option<ImageFormat>) -> std::result::Result<u32, Not> {
     let mut file = BufReader::new(File::open(path).map_err(|_| Not::Image)?);
-    let counted = match format {
-        Some(ImageFormat::Gif) => return gif_frames(&mut file),
-        Some(ImageFormat::Png) => return png_frames(&mut file),
-        Some(ImageFormat::Qoi) => return qoi_frames(&mut file),
-        Some(ImageFormat::Avif) => return avif_frames(&mut file),
+    match format {
+        Some(ImageFormat::Gif) => gif_frames(&mut file),
+        Some(ImageFormat::Png) => png_frames(&mut file),
+        Some(ImageFormat::Qoi) => qoi_frames(&mut file),
+        Some(ImageFormat::Avif) => avif_frames(&mut file),
         Some(ImageFormat::WebP) => webp_frames(&mut file),
-        Some(ImageFormat::Ico) => return ico_frames(&mut file),
+        Some(ImageFormat::Ico) => ico_frames(&mut file),
+        Some(ImageFormat::Bmp) => bmp_frames(&mut file),
         _ => Ok(1),
-    };
-    counted.map_err(|_| Not::Image) // frames that cannot be counted: no picture
+    }
 }
 
 /// A GIF's frames, up to 2, by a walk of its blocks as Pillow 13 walks a well-formed GIF (GifImagePlugin _seek), nothing decoded: its image descriptors, the blocks between walked past their data; the trailer or the file's end ends the walk, a byte that starts no block is passed over, a descriptor cut short counts no frame; no frame, or no GIF87a or GIF89a signature (a GIF by its suffix alone), `Not::Image`. The first frame reaching past the screen grows the picture to its extent, read from the descriptor's first 8 bytes, before its flags, as Pillow measures it: over `MAX_PIXELS`, `Not::TooLarge`, as is a screen over it once the first frame is read (Image.open's measure). A damaged GIF can count otherwise in Pillow (N6, N7): it reads on past an extension's empty first sub-block (a comment's aside) and, before the first frame, past a NETSCAPE2.0 block's empty second one, and there refuses a graphic control block too short for its fields.
@@ -528,13 +528,19 @@ fn associations(
     Ok(Vec::new())
 }
 
-/// A WebP's frames as libwebp counts a well-formed one's for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP; libwebp's demuxer leaves out a frame without an image and refuses a file cut short, so a damaged WebP can count otherwise in Pillow (N6, N7). An error for a VP8X whose EXIF, ICCP or XMP chunk runs past the file's end: the decoder takes the first such chunk of each kind whole by the size it declares, with its flag or without, up to 4 GiB allocated before the read fails (the EXIF for the orientation); Pillow's libwebp refuses such a file, or opens it where the chunk lies past the RIFF's end, a damaged WebP's verdict (N6, N7); the chunks walked as image-webp walks them, to 12 bytes short of the RIFF's length past VP8X, so past the RIFF's end.
-fn webp_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
-    let mut head = [0; 21]; // RIFF, its length, WEBP, the first chunk's kind and length, a byte of its data: VP8X's flags
-    file.read_exact(&mut head)?;
+/// A WebP's frames as libwebp counts a well-formed one's for Pillow: the ANMF chunks behind a VP8X with the animation flag, up to 2; 1 for any other WebP; libwebp's demuxer leaves out a frame without an image and refuses a file cut short, so a damaged WebP can count otherwise in Pillow (N6, N7). An error for a VP8X whose EXIF, ICCP or XMP chunk runs past the file's end: the decoder takes the first such chunk of each kind whole by the size it declares, with its flag or without, up to 4 GiB allocated before the read fails (the EXIF for the orientation); Pillow's libwebp refuses such a file, or opens it where the chunk lies past the RIFF's end, a damaged WebP's verdict (N6, N7); the chunks walked as image-webp walks them, to 12 bytes short of the RIFF's length past VP8X, so past the RIFF's end. Then `Not::TooLarge` for a VP8X canvas over `MAX_PIXELS`, as Pillow measures libwebp's canvas, where image-webp gives up on one over 2^32 px as no picture; without RIFF's and WebP's signatures (a WebP by its suffix alone), `Not::Image`.
+fn webp_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
+    let mut head = [0; 30]; // RIFF, its length, WEBP, the first chunk's kind and length; VP8X's flags, 3 reserved bytes, the canvas's width - 1 and height - 1
+    file.read_exact(&mut head[..21])?;
+    if &head[..4] != b"RIFF" || &head[8..12] != b"WEBP" {
+        return Err(Not::Image); // a WebP by its suffix alone
+    }
     if &head[12..16] != b"VP8X" {
         return Ok(1);
     }
+    file.read_exact(&mut head[21..])?;
+    let side = |at: usize| u32::from_le_bytes([head[at], head[at + 1], head[at + 2], 0]) + 1;
+    let canvas = (side(24), side(27));
     let (mut walk, end) = Walk::new(file)?;
     let riff = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
     let length = u32::from_le_bytes([head[16], head[17], head[18], head[19]]);
@@ -547,15 +553,50 @@ fn webp_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
         }
         let length = u64::from(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]));
         if matches!(&chunk[..4], b"EXIF" | b"ICCP" | b"XMP ") && at + 8 + length > end {
-            return Err(std::io::ErrorKind::InvalidData.into());
+            return Err(Not::Image);
         }
         frames += u32::from(&chunk[..4] == b"ANMF");
         at += 8 + length + length % 2;
+    }
+    if too_large(canvas) {
+        return Err(Not::TooLarge);
     }
     Ok(match head[20] & 0x02 {
         0 => 1, // no animation
         _ => frames.clamp(1, 2),
     })
+}
+
+/// A BMP's one frame, its header measured before the decoder (`dib`); without BMP's signature (a BMP by its suffix alone), `Not::Image`.
+fn bmp_frames(file: &mut impl Read) -> std::result::Result<u32, Not> {
+    let mut head = [0; 14]; // BM, the file's size, two reserved, the pixels' place
+    file.read_exact(&mut head)?;
+    if !head.starts_with(b"BM") {
+        return Err(Not::Image); // a BMP by its suffix alone
+    }
+    dib(file)
+}
+
+/// The DIB header the reader stands at, its sides read as Pillow 13 reads them (BmpImagePlugin _bitmap: 16 bits each in a header of 12 bytes, else the width unsigned and the height unsigned but for one whose top byte is 0xFF, a top-down picture's) and measured before the decoder, which gives up on a side over 65535 px, a negative width and the least height as no picture: over `MAX_PIXELS`, `Not::TooLarge`; a header Pillow does not know is left to the decoder. An icon's BMP is measured so too, its height twice the picture's, the AND mask's with it, as Pillow measures it (IcoImagePlugin IcoFile.frame).
+fn dib(file: &mut impl Read) -> std::result::Result<u32, Not> {
+    let mut header = [0; 12]; // its size, the width, the height
+    file.read_exact(&mut header)?;
+    let field = |at: usize| {
+        u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+    };
+    let half = |at: usize| u32::from(u16::from_le_bytes([header[at], header[at + 1]]));
+    let size = match field(0) {
+        12 => (half(4), half(6)),
+        40 | 52 | 56 | 64 | 108 | 124 => match field(8) {
+            height if height >> 24 == 0xFF => (field(4), height.wrapping_neg()),
+            height => (field(4), height),
+        },
+        _ => return Ok(1),
+    };
+    match too_large(size) {
+        true => Err(Not::TooLarge),
+        false => Ok(1),
+    }
 }
 
 /// An ICO's one frame, its directory read as the decoder reads it: 6 bytes, then 16 an entry, an entry of over 256 planes or bits refused; the entry the decoder takes, the most bits a pixel, then the most pixels by the directory, the last entry winning ties (image's ico best_entry), walked from its place: a PNG as `png_frames` walks one, its profile bounded and its header measured, as the decoder reads such a PNG by the png crate without limits.
@@ -589,7 +630,7 @@ fn ico_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not>
     file.seek_relative(-8)?;
     match &signature {
         b"\x89PNG\r\n\x1a\n" => png_frames(file).map(|_| 1), // an icon's picture, its animation none
-        _ => Ok(1),
+        _ => dib(file),
     }
 }
 
@@ -1884,7 +1925,7 @@ mod tests {
 
     #[test]
     fn a_size_its_decoder_gives_up_on_is_too_large() {
-        // row S18: Pillow 13 measures a PNG or a QOI by its header once it has read to the image data (PngImagePlugin and QoiImagePlugin _open, then Image.open's _decompression_bomb_check): over the limit it is too large to open and identifies all the same (lib/ascii_image.py:76, :95 at tag python-final; seen 2026-11-15, Pillow 13.0.0: a PNG of 2147483647 x 2147483647 px, the largest a PNG's header holds, of 8 bits a channel, and QOIs of 20025 x 20025 px and of 4294967295 x 4294967295 px); the png crate gives up on that PNG's header (its limits, though none were set) and the qoi crate on one over 400 megapixels, as no picture, before a size is measured
+        // row S18: Pillow 13 measures a PNG or a QOI by its header once it has read to the image data (PngImagePlugin and QoiImagePlugin _open, then Image.open's _decompression_bomb_check): over the limit it is too large to open and identifies all the same (lib/ascii_image.py:76, :95 at tag python-final; seen 2026-11-15, Pillow 13.0.0: a PNG of 2147483647 x 2147483647 px, the largest a PNG's header holds, of 8 bits a channel, and QOIs of 20025 x 20025 px and of 4294967295 x 4294967295 px); the png crate gives up on that PNG's header (its limits, though none were set) and the qoi crate on one over 400 megapixels, as no picture, before a size is measured; so too a BMP, an icon and a WebP, as Pillow measures them (BmpImagePlugin _bitmap, the sides unsigned, a height whose top byte is 0xFF top-down; IcoImagePlugin IcoFile.frame, the entry's PNG or BMP, the BMP's height twice the picture's; libwebp's canvas; seen 2026-11-16, Pillow 13.0.0: BMPs of 2147483647 x 1 px, of 8 px by the least height, -2^31, of the width -8 px and of 65536 x 2731 px, an icon whose BMP declares 60000 x 120000 px or whose PNG the largest sides, a WebP of a canvas of 2^24 px a side over a frame of 8 x 4 px), where the bmp decoder gives up on a side over 65535 px, a negative width and the least height, the ico decoder as the png crate does, and image-webp on a canvas over 2^32 px
         let dir = Dir::new("decoder_gives_up");
         let side = png_chunks(&[
             (b"IHDR", ihdr(0x7FFF_FFFF, 0x7FFF_FFFF, 8, 2)),
@@ -1902,25 +1943,56 @@ mod tests {
             ]
             .concat()
         };
-        for (name, data) in [
-            ("side.png", side),
+        // a DIB header of 40 bytes: its size, the sides, one plane of `bits`, no compression; then pixels
+        let dib = |w: i32, h: i32, bits: u8| {
+            let sides = [w.to_le_bytes(), h.to_le_bytes()].concat();
+            [
+                &40u32.to_le_bytes()[..],
+                &sides,
+                &[1, 0, bits, 0],
+                &[0; 24],
+                &[0; 64],
+            ]
+            .concat()
+        };
+        let bmp = |w: i32, h: i32| {
+            let dib = dib(w, h, 24);
+            let sizes = [
+                (14 + dib.len() as u32).to_le_bytes(),
+                [0; 4],
+                54u32.to_le_bytes(),
+            ];
+            [&b"BM"[..], &sizes.concat(), &dib].concat() // the file's size, two reserved, the pixels' place
+        };
+        let mut canvas = webp_with(b"abcd", 0, &[], 0);
+        canvas[24..30].fill(0xFF); // the canvas's width - 1 and height - 1
+        let cases = [
+            ("side.png", side.clone()),
             ("over.qoi", qoi(20025)),
             ("most.qoi", qoi(u32::MAX)),
-        ] {
+            ("wide.bmp", bmp(0x7FFF_FFFF, 1)),
+            ("least.bmp", bmp(8, i32::MIN)),
+            ("negative.bmp", bmp(-8, 8)),
+            ("over.bmp", bmp(65536, 2731)),
+            ("dib.ico", ico_of(&dib(60000, 120000, 32))),
+            ("side.ico", ico_of(&side)),
+            ("canvas.webp", canvas),
+        ];
+        let seen = cases.map(|(name, data)| {
             let file = dir.file(name, data);
-            let Opened::TooLarge(why) = open(&file) else {
-                panic!("{name}: {}", kind(&file))
+            let said = match open(&file) {
+                Opened::TooLarge(why) => {
+                    why == format!("{name} is too large to open (over 179 megapixels)")
+                }
+                _ => false,
             };
-            assert_eq!(
-                why,
-                format!("{name} is too large to open (over 179 megapixels)")
-            );
-            assert!(identifies(&file), "{name}");
-            assert!(
-                matches!(original_png(&file, 0), Err(NoCopy::TooLarge)),
-                "{name}"
-            );
-        }
+            let refused = matches!(original_png(&file, 0), Err(NoCopy::TooLarge));
+            (name, said, identifies(&file), refused, kind(&file))
+        });
+        let all = seen
+            .iter()
+            .all(|&(_, said, id, refused, _)| said && id && refused);
+        assert!(all, "{seen:?}"); // (name, too large with its message, identifies, its copy refused as too large, open)
     }
 
     /// tests/golden/picture-quarters.avif, its ispe property declaring `w` x `h` px.
@@ -2324,7 +2396,7 @@ mod tests {
         let walks: [(&str, Vec<u8>, Walked); 4] = [
             ("png", png, |file| png_frames(file)),
             ("gif", gif, |file| gif_frames(file)),
-            ("webp", webp, |file| webp_frames(file).map_err(Not::from)),
+            ("webp", webp, |file| webp_frames(file)),
             ("avif", avif, |file| avif_frames(file)),
         ];
         // (walk, reads, reads at most)

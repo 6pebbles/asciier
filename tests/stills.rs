@@ -740,7 +740,7 @@ fn h_and_l_step_through_the_folders_images_by_name() {
 
 #[test]
 fn a_step_passes_over_a_size_its_decoder_gives_up_on_as_too_large() {
-    // rows S7, S18: step of bin/ascii-viewer:1888 at tag python-final: a file over 179 megapixels is passed over with `; <name> too large`, also a QOI over 400 megapixels and a PNG of the largest sides a PNG's header holds, whose decoders give up on such headers, as Pillow measures them (identifies and open_picture of lib/ascii_image.py:67 and :105)
+    // rows S7, S18: step of bin/ascii-viewer:1888 at tag python-final: a file over 179 megapixels is passed over with `; <name> too large`, also a QOI over 400 megapixels and a PNG of the largest sides a PNG's header holds, a BMP of 2147483647 x 1 px, an icon whose BMP declares 60000 x 120000 px and a WebP whose canvas is 2^24 px a side, whose decoders give up on such headers, as Pillow measures them (identifies and open_picture of lib/ascii_image.py:67 and :105), each named in the order passed
     let sandbox = Sandbox::new();
     let big = sandbox.folder("big");
     save(&gradient(40, 30), &big.join("0.png"));
@@ -755,6 +755,26 @@ fn a_step_passes_over_a_size_its_decoder_gives_up_on_as_too_large() {
         (b"l", "0.png  1/4; 3.png too large"),
         (b"h", "2.png  3/4; 3.png too large"),
         (b"h", "0.png  1/4; 1.qoi too large"),
+    ] {
+        says(&mut tty, keys, text);
+    }
+    quit(&mut tty);
+    let more = sandbox.folder("more");
+    save(&gradient(40, 30), &more.join("0.png"));
+    bmp_header(&more.join("1.bmp"), 0x7FFF_FFFF, 1);
+    ico_header(&more.join("2.ico"), 60000, 120000);
+    webp_canvas(&more.join("3.webp"), 1 << 24, 1 << 24);
+    save(&gradient(40, 30), &more.join("4.png"));
+    let mut tty = drawn(&sandbox, &more.join("0.png"), SMALL);
+    for (keys, text) in [
+        (
+            b"l",
+            "4.png  5/5; 1.bmp too large; 2.ico too large; 3.webp too large",
+        ),
+        (
+            b"h",
+            "0.png  1/5; 3.webp too large; 2.ico too large; 1.bmp too large",
+        ),
     ] {
         says(&mut tty, keys, text);
     }

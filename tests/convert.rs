@@ -1213,12 +1213,22 @@ fn cells_in_color0_and_spaces_stay_blank() {
 
 #[test]
 fn a_still_over_the_pixel_limit_is_refused() {
-    // rows C9, N1: bin/ascii-convert:526 at tag python-final (tests/test_convert.py:156): exit 1, `<name> is too large to open (over 179 megapixels)` (twice Pillow's limit, lib/ascii_image.py:23), no picture and no video made of it; so too for a PNG of the largest sides a PNG's header holds and a QOI over 400 megapixels, whose decoders give up on such headers, as Pillow measures them (seen 2026-11-15 with the old converter, Pillow 13.0.0); N1: after `asciier: `, the old converter's `ascii-convert: `
+    // rows C9, N1: bin/ascii-convert:526 at tag python-final (tests/test_convert.py:156): exit 1, `<name> is too large to open (over 179 megapixels)` (twice Pillow's limit, lib/ascii_image.py:23), no picture and no video made of it; so too for a PNG of the largest sides a PNG's header holds and a QOI over 400 megapixels (seen 2026-11-15 with the old converter, Pillow 13.0.0), a BMP of 2147483647 x 1 px, an icon whose BMP declares 60000 x 120000 px and a WebP whose canvas is 2^24 px a side (seen 2026-11-16, Pillow 13.0.0), whose decoders give up on such headers, as Pillow measures them; N1: after `asciier: `, the old converter's `ascii-convert: `
     let sandbox = Sandbox::new();
     png_header(&sandbox.path("huge.png"), 20_000, 10_000);
     png_header(&sandbox.path("side.png"), 0x7FFF_FFFF, 0x7FFF_FFFF);
     std::fs::write(sandbox.path("over.qoi"), qoi_header(20025, 20025)).unwrap();
-    for name in ["huge.png", "side.png", "over.qoi"] {
+    bmp_header(&sandbox.path("wide.bmp"), 0x7FFF_FFFF, 1);
+    ico_header(&sandbox.path("dib.ico"), 60000, 120000);
+    webp_canvas(&sandbox.path("canvas.webp"), 1 << 24, 1 << 24);
+    for name in [
+        "huge.png",
+        "side.png",
+        "over.qoi",
+        "wide.bmp",
+        "dib.ico",
+        "canvas.webp",
+    ] {
         let ran = convert(&sandbox, &[name]);
         let message = format!("asciier: {name} is too large to open (over 179 megapixels)\n");
         assert_eq!(

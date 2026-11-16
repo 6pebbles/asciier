@@ -1196,3 +1196,53 @@ pub fn probe(sandbox: &Sandbox, file: &Path, entries: &str, stream: Option<&str>
     assert!(output.status.success(), "ffprobe {file:?}");
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
+
+/// A BMP whose header declares `w` x `h` px of 24 bits (a negative height: top-down), then 64 bytes of pixels.
+pub fn bmp_header(path: &Path, w: i32, h: i32) -> PathBuf {
+    let mut bmp = b"BM".to_vec();
+    bmp.extend(118u32.to_le_bytes()); // the file's size, two reserved, the pixels' place
+    bmp.extend([0; 4]);
+    bmp.extend(54u32.to_le_bytes());
+    bmp.extend(dib_header(w, h, 24));
+    bmp.extend([0; 64]);
+    std::fs::write(path, bmp).unwrap();
+    path.to_path_buf()
+}
+
+/// A DIB header of 40 bytes: its size, the sides, one plane of `bits`, no compression.
+fn dib_header(w: i32, h: i32, bits: u8) -> Vec<u8> {
+    let mut dib = 40u32.to_le_bytes().to_vec();
+    dib.extend(w.to_le_bytes());
+    dib.extend(h.to_le_bytes());
+    dib.extend([1, 0, bits, 0]);
+    dib.extend([0; 24]);
+    dib
+}
+
+/// An icon of one entry, a BMP whose header declares `w` x `h` px of 32 bits (the height twice the picture's, the AND mask's with it), then 64 bytes of pixels.
+pub fn ico_header(path: &Path, w: i32, h: i32) -> PathBuf {
+    let mut ico = vec![0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 32, 0]; // the type, one entry: its sides, colours, planes, bits
+    ico.extend(104u32.to_le_bytes()); // its bytes and its place, past the header and the entry
+    ico.extend(22u32.to_le_bytes());
+    ico.extend(dib_header(w, h, 32));
+    ico.extend([0; 64]);
+    std::fs::write(path, ico).unwrap();
+    path.to_path_buf()
+}
+
+/// A WebP whose VP8X canvas declares `w` x `h` px, to 2^24 a side, over a lossless frame of 8 x 4 px.
+pub fn webp_canvas(path: &Path, w: u32, h: u32) -> PathBuf {
+    let mut frame = Vec::new();
+    image::RgbaImage::from_pixel(8, 4, image::Rgba([1, 2, 3, 255]))
+        .write_with_encoder(image::codecs::webp::WebPEncoder::new_lossless(&mut frame))
+        .unwrap();
+    let mut body = b"WEBPVP8X\x0a\0\0\0\0\0\0\0".to_vec(); // VP8X of 10 bytes: no flags, 3 reserved bytes, then the canvas's width - 1 and height - 1
+    body.extend(&(w - 1).to_le_bytes()[..3]);
+    body.extend(&(h - 1).to_le_bytes()[..3]);
+    body.extend(&frame[12..]); // its VP8L chunk
+    let mut webp = b"RIFF".to_vec();
+    webp.extend((body.len() as u32).to_le_bytes());
+    webp.extend(body);
+    std::fs::write(path, webp).unwrap();
+    path.to_path_buf()
+}
