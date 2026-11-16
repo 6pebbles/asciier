@@ -291,9 +291,11 @@ const OP: u64 = 3;
 const SETTLED: u64 = 4;
 /// `reply_userdata` of the `pause` read once a step's mark is reported.
 const STEPPED: u64 = 5;
+/// `reply_userdata` of the count of frames let go read right before the position once a request is done.
+const DROPS: u64 = 6;
 /// The properties `set` holds the reports of, and the `reply_userdata` of each one's set: `HELD + n` for the nth.
 const HOLDS: [&str; 4] = ["speed", "volume", "mute", "loop-file"];
-const HELD: u64 = 6;
+const HELD: u64 = 7;
 
 type Callback = extern "C" fn(*mut c_void);
 
@@ -413,6 +415,15 @@ fn flag(reply: &RawEvent) -> Option<bool> {
     unsafe {
         let property = &*(reply.data as *const Property);
         (reply.error >= 0 && property.format == FLAG).then(|| *(property.data as *const c_int) != 0)
+    }
+}
+
+/// The value of a `GET_PROPERTY_REPLY` asked for as an integer; `None` on an error.
+fn whole(reply: &RawEvent) -> Option<i64> {
+    // SAFETY: as in `double`.
+    unsafe {
+        let property = &*(reply.data as *const Property);
+        (reply.error >= 0 && property.format == INT64).then(|| *(property.data as *const i64))
     }
 }
 
@@ -1001,8 +1012,10 @@ impl Mpv {
 
     /// The position after the request under way, read now that mpv is done with it.
     fn settle(&mut self) {
-        // SAFETY: the name lives through the call.
+        // mpv's count of frames let go first, which mpv answers before the position: a frame let go meanwhile, its count reported after the position, is the one there, not one after it (seen at the loop's seek of a one-frame clip with sound: a caller that did not look for 400 ms had the seek's frame, let go twice while paused, named 0.0632 s for 0.0232)
+        // SAFETY: the names live through the calls.
         let asked = unsafe {
+            mpv_get_property_async(self.handle, DROPS, c"frame-drop-count".as_ptr(), INT64);
             mpv_get_property_async(self.handle, SETTLED, c"time-pos".as_ptr(), DOUBLE) >= 0
         };
         if !asked {
@@ -1256,6 +1269,10 @@ impl Mpv {
                 // past the picture's end the position is the sound's: the frame mpv holds is the last, of the time given with it
                 let time = self.held().filter(|_| self.tail);
                 Some(Event::Grabbed(taken, time.or_else(|| double(event))))
+            }
+            GET_PROPERTY_REPLY if event.userdata == DROPS => {
+                self.drops = whole(event).unwrap_or(self.drops);
+                None
             }
             // each request reads once it is done (`settling`): a read whose request a loop's seek ended (`MPV_EVENT_SEEK`) comes before any read of the request that went next, and is no longer of one under way
             GET_PROPERTY_REPLY if event.userdata == SETTLED => {
@@ -4781,42 +4798,45 @@ pub(crate) mod tests {
 
     #[test]
     fn a_grab_on_a_one_frame_clip_that_loops_with_sound_is_named_by_its_frame() {
-        // rows N5, N21: past the picture's end, the sound playing on, a frame taken is named by the frame mpv holds; on a one-frame clip that loops, its frame comes again in mpv's restart after each loop's seek, while the position is the seek's, so its time stayed unknown, no frame followed, and a grab was named by the sound's position (the review's probe: 0.53 s, 4 of 4 rounds; here before the fix: 0.32 s); the first frame after a loop's seek is at the clip's start, 0 s
-        let mut stage = Stage::new();
-        let file = stage.file("one.mp4");
-        let picture = format!("{QUADRANTS},trim=end_frame=1");
-        let mut args = vec!["-f", "lavfi", "-i", &picture, "-f", "lavfi", "-i"];
-        args.extend(["sine=d=1", "-c:a", "aac"]);
-        args.extend(H264);
-        args.push(file.to_str().unwrap());
-        ffmpeg(&args);
-        assert_eq!(stage.open(&file), (true, true));
-        stage.settle();
-        stage.mpv.set("loop-file", "inf");
-        stage.mpv.pause(false);
-        // past the first loop's seek (mpv loops once the sound is all handed to the output, which holds 0.4 s of it here: seen at 0.57 s), 0.3 s into the sound again
-        let (mut last, mut looped) = (0.0, false);
-        stage.pump(10.0, |e| match e {
-            Event::Time(t) => {
-                looped |= *t < last - 0.2;
-                last = *t;
-                looped && *t > 0.3
+        // rows N5, N21: past the picture's end, the sound playing on, a frame taken is named by the frame mpv holds; a one-frame clip that loops shows its frame again after each loop's seek, the position then the sound's; mpv's own loop (loop-file) handed that frame over in its restart, timed only while the caller looked then: one that did not look for 400 to 700 ms across it had the grab named 0.0632 s, by a time from before the loop and a frame let go counted on it, or by the sound's position, 0.33 to 0.36 s (the stress run: 1 of 15 suites at load 30; the review's probe: 400 ms 2 of 3, 700 ms 3 of 3); the viewer's loop seeks to the start and reads where it landed, after mpv's count of frames let go: the seek's frame, let go while the caller did not look, is no frame after it (seen with the count as reported, after that read: 0.0632 s at 400 ms); within a frame, as one mpv lets go after that read counts as one; each case: the caller does not look for 0, 400 or 700 ms once it asked for the loop's seek
+        let mut wrong = Vec::new();
+        for late in [0, 400, 700] {
+            let mut stage = Stage::new();
+            let file = stage.file("one.mp4");
+            let picture = format!("{QUADRANTS},trim=end_frame=1");
+            let mut args = vec!["-f", "lavfi", "-i", &picture, "-f", "lavfi", "-i"];
+            args.extend(["sine=d=1", "-c:a", "aac"]);
+            args.extend(H264);
+            args.push(file.to_str().unwrap());
+            ffmpeg(&args);
+            assert_eq!(stage.open(&file), (true, true));
+            stage.settle();
+            stage.looping(true);
+            stage.play();
+            let asleep = |_: &mut Stage| std::thread::sleep(Duration::from_millis(late));
+            let looped = stage.at_loop_seek(10.0, asleep).is_some();
+            // 0.3 s into the sound again
+            stage.pump(
+                10.0,
+                |e| matches!(e, Event::Time(t) if *t > 0.3 && *t < 0.9),
+            );
+            stage.playing = false;
+            stage.mpv.pause(true);
+            let done = looped && idle(&mut stage, 10.0);
+            stage.mpv.grab();
+            let events = stage.pump(5.0, |e| matches!(e, Event::Grabbed(..)));
+            let named = match events.last() {
+                Some(Event::Grabbed(Some(_), time)) => *time,
+                _ => None,
+            };
+            if !(done && named.is_some_and(|time| near(time, 0.0, 0.041))) {
+                wrong.push(format!(
+                    "{late} ms: looped {looped}, named {named:?}, paused at {}",
+                    stage.time
+                ));
             }
-            _ => false,
-        });
-        stage.mpv.pause(true);
-        assert!(looped && idle(&mut stage, 10.0), "at {}", stage.time);
-        stage.mpv.grab();
-        let events = stage.pump(5.0, |e| matches!(e, Event::Grabbed(..)));
-        let named = match events.last() {
-            Some(Event::Grabbed(Some(_), time)) => *time,
-            _ => None,
-        };
-        assert!(
-            named.is_some_and(|time| near(time, 0.0, 0.041)),
-            "named {named:?}, paused at {}",
-            stage.time
-        );
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
