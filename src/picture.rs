@@ -96,9 +96,7 @@ fn gif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
         file.read_exact(&mut byte).ok().map(|()| byte[0])
     }
     fn skip(file: &mut impl Seek, bytes: i64) -> std::result::Result<(), Not> {
-        file.seek(SeekFrom::Current(bytes))
-            .map(drop)
-            .map_err(|_| Not::Image)
+        file.seek_relative(bytes).map_err(|_| Not::Image)
     }
     // past the data sub-blocks to their terminator, or to the file's end
     fn blocks(file: &mut (impl Read + Seek)) -> std::result::Result<(), Not> {
@@ -176,18 +174,20 @@ const MAX_TEXT_CHUNK: u64 = 1 << 20;
 
 /// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two; `Not::Image` for an acTL under 8 bytes and for a profile over `MAX_TEXT_CHUNK`, files Pillow refuses, and for a file without image data, which Pillow counts as one frame where IEND ends it (N6, N7); `Not::TooLarge` for a header over `MAX_PIXELS`, measured at the image data as Pillow measures it, where the png crate gives up on the largest headers as no picture. The profile measured is the png crate's, the first iCCP within its bounds, which it inflates whole while the decoder is made.
 fn png_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not> {
-    let (mut at, mut size, mut frames, mut control, mut profile) = (8, None, None, false, true); // past the signature
+    let (mut size, mut frames, mut control, mut profile) = (None, None, false, true);
+    file.seek_relative(8)?; // past the signature
     loop {
-        file.seek(SeekFrom::Start(at))?;
         let mut head = [0; 8];
         file.read_exact(&mut head)?;
         let length = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+        let mut left = u64::from(length) + 4; // to the next chunk: the data, its CRC
         match &head[4..] {
             b"IDAT" | b"fdAT" if size.is_some_and(too_large) => return Err(Not::TooLarge),
             b"IDAT" | b"fdAT" => return Ok(frames.map_or(1, |n| n + u32::from(!control))),
             b"IHDR" if size.is_none() => {
                 let mut sides = [0; 8];
                 file.by_ref().take(length.into()).read_exact(&mut sides)?;
+                left -= 8;
                 let side = |at: usize| {
                     u32::from_be_bytes([sides[at], sides[at + 1], sides[at + 2], sides[at + 3]])
                 };
@@ -198,6 +198,7 @@ fn png_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not>
             b"acTL" => {
                 let mut count = [0; 4];
                 file.read_exact(&mut count)?;
+                left -= 4;
                 let count = u32::from_be_bytes(count);
                 frames = match frames {
                     Some(_) => None,
@@ -206,13 +207,15 @@ fn png_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not>
             }
             b"iCCP" if profile && length <= 0x7FFF_FFFF => {
                 profile = false;
-                if profile_too_long(file.by_ref().take(length.into()))? {
+                let mut data = file.by_ref().take(length.into());
+                if profile_too_long(&mut data)? {
                     return Err(Not::Image);
                 }
+                left = data.limit() + 4;
             }
             _ => {}
         }
-        at += 12 + u64::from(length); // the length, the kind, the data, its CRC
+        file.seek_relative(left as i64)?; // within 2^32 + 4
     }
 }
 
@@ -239,22 +242,48 @@ fn qoi_frames(file: &mut impl Read) -> std::result::Result<u32, Not> {
     }
 }
 
+/// A walk's reader at places counted from the file's start, moved there by relative seeks: they keep a `BufReader`'s buffer where it reaches, where a seek from the start drops it, a refill a chunk.
+struct Walk<'a, R> {
+    file: &'a mut R,
+    at: Option<u64>, // where the reader stands; `None` after a read that failed
+}
+
+impl<R: Read + Seek> Walk<'_, R> {
+    /// A walk of `file`, and the file's length.
+    fn new(file: &mut R) -> std::io::Result<(Walk<'_, R>, u64)> {
+        let end = file.seek(SeekFrom::End(0))?;
+        let at = Some(end);
+        Ok((Walk { file, at }, end))
+    }
+
+    /// `bytes` read from `at`, which lies within 2^62.
+    fn read(&mut self, at: u64, bytes: &mut [u8]) -> std::io::Result<()> {
+        match self.at.take() {
+            Some(now) => self.file.seek_relative(at as i64 - now as i64)?,
+            None => drop(self.file.seek(SeekFrom::Start(at))?),
+        }
+        self.file.read_exact(bytes)?;
+        self.at = Some(at + bytes.len() as u64);
+        Ok(())
+    }
+}
+
 /// An AVIF's one frame, measured by the sizes its container declares, the ispe properties in its meta box, as Pillow 13 measures one (AvifImagePlugin, libavif's parse), before the decoder, which learns a size only from the picture dav1d decodes whole: one over `MAX_PIXELS`, `Not::TooLarge`; the decoded picture's own size is measured after it.
 fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
-    let (mut at, mut end) = (0, file.seek(SeekFrom::End(0))?);
+    let (mut walk, mut end) = Walk::new(file)?;
+    let mut at = 0;
     let mut path = [b"meta", b"iprp", b"ipco"].into_iter(); // the boxes that hold the properties
     let mut want = path.next();
     while at + 8 <= end {
-        file.seek(SeekFrom::Start(at))?;
         let mut head = [0; 8];
-        file.read_exact(&mut head)?;
+        walk.read(at, &mut head)?;
         let (mut size, mut body) = (
             u32::from_be_bytes([head[0], head[1], head[2], head[3]]).into(),
             at + 8,
         );
         if size == 1 {
             let mut large = [0; 8];
-            file.read_exact(&mut large)?;
+            walk.read(at + 8, &mut large)?;
             (size, body) = (u64::from_be_bytes(large), at + 16);
         } else if size == 0 {
             size = end - at; // to the end
@@ -270,8 +299,7 @@ fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
         }
         if want.is_none() && kind == b"ispe" {
             let mut sides = [0; 12]; // the version and flags, the width, the height
-            file.seek(SeekFrom::Start(body))?;
-            file.read_exact(&mut sides)?;
+            walk.read(body, &mut sides)?;
             let side = |at: usize| {
                 u32::from_be_bytes([sides[at], sides[at + 1], sides[at + 2], sides[at + 3]])
             };
@@ -291,15 +319,14 @@ fn webp_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
     if &head[12..16] != b"VP8X" {
         return Ok(1);
     }
-    let end = file.seek(SeekFrom::End(0))?;
+    let (mut walk, end) = Walk::new(file)?;
     let riff = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
     let length = u32::from_le_bytes([head[16], head[17], head[18], head[19]]);
     let mut at = 20 + u64::from(length) + u64::from(length % 2); // chunks are padded to even
     let last = at + u64::from(riff).saturating_sub(12);
     let (mut frames, mut chunk) = (0, [0; 8]);
     while at < last {
-        file.seek(SeekFrom::Start(at))?;
-        if file.read_exact(&mut chunk).is_err() {
+        if walk.read(at, &mut chunk).is_err() {
             break;
         }
         let length = u64::from(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]));
@@ -1842,6 +1869,57 @@ mod tests {
     fn a_decoder_panic_is_caught() {
         assert_eq!(caught(|| 7), Some(7));
         assert_eq!(caught(|| -> u8 { panic!("a decoder's") }), None);
+    }
+
+    /// Bytes in memory that count the reads made of them.
+    struct Counted(Cursor<Vec<u8>>, usize);
+
+    impl Read for Counted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.1 += 1;
+            self.0.read(buf)
+        }
+    }
+
+    impl Seek for Counted {
+        fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+            self.0.seek(to)
+        }
+    }
+
+    #[test]
+    fn a_walk_reads_its_file_about_once() {
+        // a walk steps from chunk to chunk, block to block or box to box by relative seeks, which keep its reader's buffer: 100000 empty chunks, sub-blocks or boxes cost reads by the file's size, 8 KiB a read, not a read each (a seek from the start drops the buffer: a GIF of 16 MB took 11.7 s to identify, a WebP of 32 MB 39.7 s, seen round 8)
+        let many = 100_000;
+        let mut chunks = vec![(b"IHDR", ihdr(8, 8, 8, 2))];
+        chunks.extend(std::iter::repeat_n((b"abCd", vec![]), many));
+        chunks.extend([(b"IDAT", zlib(b"")), (b"IEND", vec![])]);
+        let png = png_chunks(&chunks);
+        let comment = [&[0x21, 0xFE][..], &[1, b'.'].repeat(many), &[0]].concat();
+        let gif = gif_of((8, 8), &[&comment, &gif_frame(0, 0, 8, 8)]);
+        let mut webp = webp_with(b"abcd", 0, &[], 0);
+        webp.extend(b"abcd\0\0\0\0".repeat(many));
+        let riff = (webp.len() as u32 - 8).to_le_bytes();
+        webp[4..8].copy_from_slice(&riff);
+        let quarters = include_bytes!("../tests/golden/picture-quarters.avif");
+        let free = b"\0\0\0\x08free".repeat(many);
+        let avif = [&quarters[..32], &free, &quarters[32..]].concat(); // after the ftyp box
+        type Walked = fn(&mut BufReader<Counted>) -> std::result::Result<u32, Not>;
+        let walks: [(&str, Vec<u8>, Walked); 4] = [
+            ("png", png, |file| png_frames(file)),
+            ("gif", gif, |file| gif_frames(file)),
+            ("webp", webp, |file| webp_frames(file).map_err(Not::from)),
+            ("avif", avif, |file| avif_frames(file)),
+        ];
+        // (walk, reads, reads at most)
+        let seen = walks.map(|(name, bytes, walk)| {
+            let size = bytes.len();
+            let mut file = BufReader::new(Counted(Cursor::new(bytes), 0));
+            assert!(matches!(walk(&mut file), Ok(1)), "{name}");
+            (name, file.get_ref().1, size / 4096 + 8)
+        });
+        let within = seen.iter().all(|(_, reads, most)| reads <= most);
+        assert!(within, "{seen:?}");
     }
 
     // tests/test_viewer.py:815; the checksum: zlib.crc32 of the viewer's checkerboard((37, 21))
