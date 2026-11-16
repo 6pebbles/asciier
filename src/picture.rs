@@ -257,10 +257,13 @@ fn profile_too_long(mut data: impl BufRead) -> std::io::Result<bool> {
     Ok(inflated.is_ok_and(|bytes| bytes > MAX_TEXT_CHUNK))
 }
 
-/// A QOI's one frame, its header measured before the decoder, which refuses one over 400 megapixels as no picture, where Pillow 13 measures it (QoiImagePlugin _open, then Image.open's measure): over `MAX_PIXELS`, `Not::TooLarge`.
+/// A QOI's one frame, its header measured before the decoder, which refuses one over 400 megapixels as no picture, where Pillow 13 measures it (QoiImagePlugin _open, then Image.open's measure): over `MAX_PIXELS`, `Not::TooLarge`; without QOI's signature (a QOI by its suffix alone), `Not::Image`.
 fn qoi_frames(file: &mut impl Read) -> std::result::Result<u32, Not> {
     let mut head = [0; 12]; // qoif, the width, the height
     file.read_exact(&mut head)?;
+    if !head.starts_with(b"qoif") {
+        return Err(Not::Image); // a QOI by its suffix alone
+    }
     let side = |at: usize| u32::from_be_bytes([head[at], head[at + 1], head[at + 2], head[at + 3]]);
     match too_large((side(4), side(8))) {
         true => Err(Not::TooLarge),
@@ -1672,6 +1675,35 @@ mod tests {
             assert!(identifies(&file), "{name}");
             assert!(
                 matches!(original_png(&file, 0), Err(NoCopy::TooLarge)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_suffix_without_its_signature_is_no_picture() {
+        // rows S1, S18: a file named by a format's suffix without that format's signature is no picture, as to Pillow 13, whose readers take a file by its signature (QoiImagePlugin _accept; seen 2026-11-16, Pillow 13.0.0 through identifies and open_picture of lib/ascii_image.py:67 and :105 at tag python-final), though the bytes where its header would hold the sides declare more than the limit: a text named .qoi, a QOI header whose signature reads qoiF
+        let dir = Dir::new("no_signature");
+        let sides = [20025u32.to_be_bytes(), 20025u32.to_be_bytes()].concat();
+        let qoif = [
+            &b"qoiF"[..],
+            &sides,
+            &[4, 0],
+            &[0; 8],
+            &[0, 0, 0, 0, 0, 0, 0, 1],
+        ]
+        .concat();
+        for (name, data) in [
+            (
+                "text.qoi",
+                b"not a picture at all, a text of some length\n".to_vec(),
+            ),
+            ("qoif.qoi", qoif),
+        ] {
+            let file = dir.file(name, data);
+            assert_eq!(
+                (kind(&file), identifies(&file)),
+                ("no image", false),
                 "{name}"
             );
         }
