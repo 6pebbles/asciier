@@ -634,7 +634,73 @@ fn ico_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not>
     }
 }
 
-/// The decoder of the raster still at `path`, its header read: the format by content, within `MAX_PIXELS`, no animation; in Pillow's order (Image.open, then lib/ascii_image.py:61): the file read to its first frame, then its size, then its frames; a GIF measured by its blocks before the decoder reads it, whose refusals Pillow does not share.
+/// Whether a data window of the EXR at `path`, the pixels its blocks hold, is over `MAX_PIXELS`: each part's last dataWindow of type box2i, as the exr crate takes it, which allocates a block's pixels by it before it inflates them, where the decoder's size is the display window, the picture's. Walked once the exr crate has read the headers whole, so as it reads them, its refusals its own: the magic number, the version and flags (long names: 256 bytes a name at most, else 32; several parts: a header each, then a NUL), then each header's attributes, a NUL ending them: a name and a kind, each ended by a NUL, the value's size, the value.
+fn exr_window_too_large(path: &Path) -> std::result::Result<bool, Not> {
+    fn byte(file: &mut impl Read) -> std::io::Result<u8> {
+        let mut byte = [0];
+        file.read_exact(&mut byte).map(|()| byte[0])
+    }
+    // a NUL next: the end of a header or of the headers
+    fn ends(file: &mut impl BufRead) -> std::io::Result<bool> {
+        let end = file.fill_buf()?.first() == Some(&0);
+        file.consume(usize::from(end));
+        Ok(end)
+    }
+    // its first byte whatever it is, as the exr crate reads a text
+    fn text(file: &mut impl Read, most: usize) -> std::result::Result<Vec<u8>, Not> {
+        let mut text = vec![byte(file)?];
+        loop {
+            match byte(file)? {
+                0 => return Ok(text),
+                next if text.len() < most => text.push(next),
+                _ => return Err(Not::Image),
+            }
+        }
+    }
+    let mut file = BufReader::new(File::open(path)?);
+    let mut head = [0; 8];
+    file.read_exact(&mut head)?;
+    let (most, parts) = (
+        if head[5] & 0x04 > 0 { 256 } else { 32 },
+        head[5] & 0x10 > 0,
+    ); // flag bits 10 and 12
+    loop {
+        if parts && ends(&mut file)? {
+            return Ok(false);
+        }
+        let mut window = None;
+        while !ends(&mut file)? {
+            let (name, kind) = (text(&mut file, most)?, text(&mut file, most)?);
+            let mut size = [0; 4];
+            file.read_exact(&mut size)?;
+            let mut size = u32::from_le_bytes(size);
+            if name == b"dataWindow" && kind == b"box2i" && size >= 16 {
+                let mut bounds = [0; 16]; // xMin, yMin, xMax, yMax
+                file.read_exact(&mut bounds)?;
+                let at = |at: usize| {
+                    i64::from(i32::from_le_bytes([
+                        bounds[at],
+                        bounds[at + 1],
+                        bounds[at + 2],
+                        bounds[at + 3],
+                    ]))
+                };
+                let side = |a: i64, b: i64| (a.max(b) - a.min(b) + 1) as u64;
+                window = Some(side(at(0), at(8)) * side(at(4), at(12)));
+                size -= 16;
+            }
+            file.seek_relative(size.into())?;
+        }
+        if window.is_some_and(|pixels| pixels > MAX_PIXELS) {
+            return Ok(true);
+        }
+        if !parts {
+            return Ok(false);
+        }
+    }
+}
+
+/// The decoder of the raster still at `path`, its header read: the format by content, within `MAX_PIXELS`, no animation; in Pillow's order (Image.open, then lib/ascii_image.py:61): the file read to its first frame, then its size, then its frames; a GIF measured by its blocks before the decoder reads it, whose refusals Pillow does not share; an EXR by its data windows too, once the decoder has read its headers.
 fn header(path: &Path) -> std::result::Result<impl ImageDecoder, Not> {
     let mut reader = ImageReader::open(path)
         .and_then(ImageReader::with_guessed_format)
@@ -643,7 +709,8 @@ fn header(path: &Path) -> std::result::Result<impl ImageDecoder, Not> {
     let format = reader.format();
     let frames = frames(path, format)?;
     let decoder = reader.into_decoder().map_err(|_| Not::Image)?;
-    if too_large(decoder.dimensions()) {
+    let exr = format == Some(ImageFormat::OpenExr);
+    if too_large(decoder.dimensions()) || exr && exr_window_too_large(path)? {
         return Err(Not::TooLarge);
     }
     match frames {
@@ -1993,6 +2060,81 @@ mod tests {
             .iter()
             .all(|&(_, said, id, refused, _)| said && id && refused);
         assert!(all, "{seen:?}"); // (name, too large with its message, identifies, its copy refused as too large, open)
+    }
+
+    /// An EXR of one part: three half channels B, G, R in ZIP's blocks of 16 lines, a display window and a data window (xMin, yMin, xMax, yMax), the offset table, then each block: its first line, its size, `block`.
+    fn exr(display: [i32; 4], data: [i32; 4], block: &[u8]) -> Vec<u8> {
+        let attribute = |name: &str, kind: &str, value: &[u8]| {
+            let size = (value.len() as i32).to_le_bytes();
+            [name.as_bytes(), b"\0", kind.as_bytes(), b"\0", &size, value].concat()
+        };
+        let window = |bounds: [i32; 4]| bounds.map(i32::to_le_bytes).concat();
+        // each: its name, HALF, not linear, 3 reserved bytes, sampled every pixel across and down
+        let channel = |name: &[u8]| {
+            [
+                name,
+                b"\0",
+                &[1, 0, 0, 0],
+                &[0; 4],
+                &[1, 0, 0, 0],
+                &[1, 0, 0, 0],
+            ]
+            .concat()
+        };
+        let channels = [channel(b"B"), channel(b"G"), channel(b"R"), vec![0]].concat();
+        let mut out = vec![0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0]; // the magic number, version 2, no flags
+        out.extend(attribute("channels", "chlist", &channels));
+        out.extend(attribute("compression", "compression", &[3])); // ZIP
+        out.extend(attribute("dataWindow", "box2i", &window(data)));
+        out.extend(attribute("displayWindow", "box2i", &window(display)));
+        out.extend(attribute("lineOrder", "lineOrder", &[0]));
+        out.extend(attribute("pixelAspectRatio", "float", &1f32.to_le_bytes()));
+        out.extend(attribute("screenWindowCenter", "v2f", &[0; 8]));
+        out.extend(attribute("screenWindowWidth", "float", &1f32.to_le_bytes()));
+        out.push(0); // the header's end
+        let blocks = (data[3] - data[1]) / 16 + 1;
+        let first = out.len() as u64 + 8 * blocks as u64;
+        for at in 0..blocks as u64 {
+            out.extend((first + at * (8 + block.len() as u64)).to_le_bytes());
+        }
+        for at in 0..blocks {
+            out.extend((data[1] + 16 * at).to_le_bytes());
+            out.extend((block.len() as i32).to_le_bytes());
+            out.extend(block);
+        }
+        out
+    }
+
+    #[test]
+    fn an_exr_is_measured_by_its_data_window_too() {
+        // rows S18, N7: an EXR, a format of the built-in decoders that Pillow 13 does not read, is held to the limit by its data window, the pixels its blocks hold, as well as by its display window, its picture's size (owner 2026-11-16): too large to open, identifies, its copy refused; the exr crate allocates a block's pixels by the data window before it inflates them (zune-inflate's output, by its size hint), 103 GB for a ZIP block of 16 lines 1073741821 px wide behind a display window of 16 x 8 px; a data window at the limit goes to the decoder, which finds its blocks empty; one of 16 x 8 px over a zero picture opens, black
+        let dir = Dir::new("exr_window");
+        let small = [0, 0, 15, 7];
+        let zero = zlib(&[&[0][..], &[128; 767]].concat()); // 16 x 8 px of 3 half channels at 0: each byte its difference from the last plus 128
+        let opened = still(&dir.file("small.exr", exr(small, small, &zero)));
+        assert_eq!(rgb(&opened.pic).dimensions(), (16, 8));
+        assert_eq!(colours(rgb(&opened.pic)), [[0, 0, 0]].into());
+        assert_eq!(12470 * 14351, MAX_PIXELS);
+        for (name, data) in [
+            ("past.exr", [0, 0, 12469, 14351]),
+            ("wide.exr", [0, 0, 1073741820, 15]),
+        ] {
+            let file = dir.file(name, exr(small, data, &zlib(b"")));
+            let Opened::TooLarge(why) = open(&file) else {
+                panic!("{name}: {}", kind(&file))
+            };
+            assert_eq!(
+                why,
+                format!("{name} is too large to open (over 179 megapixels)")
+            );
+            assert!(identifies(&file), "{name}");
+            assert!(
+                matches!(original_png(&file, 0), Err(NoCopy::TooLarge)),
+                "{name}"
+            );
+        }
+        let at = dir.file("at.exr", exr(small, [0, 0, 12469, 14350], &zlib(b"")));
+        assert_eq!((kind(&at), identifies(&at)), ("no image", true));
     }
 
     /// tests/golden/picture-quarters.avif, its ispe property declaring `w` x `h` px.
