@@ -2232,7 +2232,7 @@ mod tests {
 
     #[test]
     fn no_signature_or_a_refused_header_is_no_picture() {
-        // rows S1, S18: a file named by a format's suffix without that format's signature is no picture, as to Pillow 13, whose readers take a file by its signature (QoiImagePlugin and PngImagePlugin _accept; seen 2026-11-16, Pillow 13.0.0 through identifies and open_picture of lib/ascii_image.py:67 and :105 at tag python-final), though the bytes where its header would hold the sides declare more than the limit: a text named .qoi, a QOI header whose signature reads qoiF, a PNG header of 60000 x 60000 px behind a signature zeroed or one byte off; so is a PNG whose header's CRC fails or that is cut to 8 bytes, which the png crate and Pillow refuse (PngImagePlugin ChunkStream.crc: a SyntaxError; chunk_IHDR: `Truncated IHDR chunk`, a ValueError), and an AVIF declaring 15000 x 15000 px without its first box, ftyp, or whose ftyp names no AVIF brand (avif, avis), which mp4parse and libavif refuse (Pillow: `cannot identify image file`)
+        // rows S1, S18: a file named by a format's suffix without that format's signature is no picture, as to Pillow 13, whose readers take a file by its signature (QoiImagePlugin and PngImagePlugin _accept; seen 2026-11-16, Pillow 13.0.0 through identifies and open_picture of lib/ascii_image.py:67 and :105 at tag python-final), though the bytes where its header would hold the sides declare more than the limit: a text named .qoi, a QOI header whose signature reads qoiF, a PNG header of 60000 x 60000 px behind a signature zeroed or one byte off; so is a PNG whose header's CRC fails or that is cut to 8 bytes, which the png crate and Pillow refuse (PngImagePlugin ChunkStream.crc: a SyntaxError; chunk_IHDR: `Truncated IHDR chunk`, a ValueError), and an AVIF declaring 15000 x 15000 px without its first box, ftyp, or whose ftyp names no AVIF brand (avif, avis), which mp4parse and libavif refuse (Pillow: `cannot identify image file`); so too a WebP whose canvas is 2^24 px a side behind RIFX for RIFF, and a BMP of 2147483647 x 1 px behind BX for BM (seen 2026-11-16, Pillow 13.0.0)
         let dir = Dir::new("no_signature");
         let big = png_header(60000, 60000);
         assert_eq!(kind(&dir.file("whole.png", &big)), "too large");
@@ -2249,6 +2249,28 @@ mod tests {
         ]);
         let avif = quarters_avif(15000, 15000);
         assert_eq!(kind(&dir.file("whole.avif", &avif)), "too large");
+        let mut rifx = webp_with(b"abcd", 0, &[], 0);
+        rifx[24..30].fill(0xFF); // the canvas's width - 1 and height - 1
+        rifx[3] = b'X';
+        let mut bx = [
+            &b"BM"[..],
+            &118u32.to_le_bytes(),
+            &[0; 4],
+            &54u32.to_le_bytes(),
+        ]
+        .concat(); // the file's size, two reserved, the pixels' place
+        bx.extend(
+            [
+                &40u32.to_le_bytes()[..],
+                &0x7FFF_FFFFi32.to_le_bytes(),
+                &1i32.to_le_bytes(),
+                &[1, 0, 24, 0],
+                &[0; 24],
+                &[0; 64],
+            ]
+            .concat(),
+        );
+        bx[1] = b'X';
         let mut brandless = avif.clone();
         brandless[8..12].copy_from_slice(b"mif1"); // the major brand, then the compatible ones: mif1 miaf MA1B
         brandless[16..20].copy_from_slice(b"mif1");
@@ -2273,6 +2295,8 @@ mod tests {
             ("short.png", short),
             ("unboxed.avif", avif[32..].to_vec()), // after the ftyp box
             ("brandless.avif", brandless),
+            ("rifx.webp", rifx),
+            ("bx.bmp", bx),
         ];
         let seen = cases.map(|(name, data)| {
             let file = dir.file(name, data);
