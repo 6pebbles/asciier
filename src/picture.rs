@@ -172,10 +172,14 @@ fn gif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
 /// Bytes of a PNG's profile Pillow 13 inflates at most: it refuses a file whose profile holds more (PngImagePlugin MAX_TEXT_CHUNK, _safe_zlib_decompress).
 const MAX_TEXT_CHUNK: u64 = 1 << 20;
 
-/// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two; `Not::Image` for an acTL under 8 bytes and for a profile over `MAX_TEXT_CHUNK`, files Pillow refuses, and for a file without image data, which Pillow counts as one frame where IEND ends it (N6, N7); `Not::TooLarge` for a header over `MAX_PIXELS`, measured at the image data as Pillow measures it, where the png crate gives up on the largest headers as no picture. The profile measured is the png crate's, the first iCCP within its bounds whose CRC holds (it passes over an ancillary chunk whose CRC fails), which it inflates whole while the decoder is made.
+/// A PNG's frames as Pillow 13 counts them from the chunks before the image data: acTL's number, one more for a default image outside the animation (no fcTL before the IDAT); 1 without an acTL, with one of no frames or over 2^31, or with two; `Not::Image` without PNG's signature (a PNG by its suffix alone), for a header under 13 bytes or whose CRC fails, which the png crate refuses too, for an acTL under 8 bytes and for a profile over `MAX_TEXT_CHUNK`, files Pillow refuses, and for a file without image data, which Pillow counts as one frame where IEND ends it (N6, N7); `Not::TooLarge` for a header over `MAX_PIXELS`, measured at the image data as Pillow measures it, where the png crate gives up on the largest headers as no picture. The profile measured is the png crate's, the first iCCP within its bounds whose CRC holds (it passes over an ancillary chunk whose CRC fails), which it inflates whole while the decoder is made.
 fn png_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not> {
     let (mut size, mut frames, mut control, mut profile) = (None, None, false, true);
-    file.seek_relative(8)?; // past the signature
+    let mut signature = [0; 8];
+    file.read_exact(&mut signature)?;
+    if &signature != b"\x89PNG\r\n\x1a\n" {
+        return Err(Not::Image); // a PNG by its suffix alone
+    }
     loop {
         let mut head = [0; 8];
         file.read_exact(&mut head)?;
@@ -187,7 +191,11 @@ fn png_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not>
             b"IHDR" if size.is_none() => {
                 let mut sides = [0; 8];
                 file.by_ref().take(length.into()).read_exact(&mut sides)?;
-                left -= 8;
+                file.seek_relative(-8)?;
+                if length < 13 || !crc_holds(file, &head[4..], length.into())? {
+                    return Err(Not::Image); // a header the png crate refuses, and Pillow
+                }
+                left = 0;
                 let side = |at: usize| {
                     u32::from_be_bytes([sides[at], sides[at + 1], sides[at + 2], sides[at + 3]])
                 };
@@ -1681,9 +1689,22 @@ mod tests {
     }
 
     #[test]
-    fn a_suffix_without_its_signature_is_no_picture() {
-        // rows S1, S18: a file named by a format's suffix without that format's signature is no picture, as to Pillow 13, whose readers take a file by its signature (QoiImagePlugin _accept; seen 2026-11-16, Pillow 13.0.0 through identifies and open_picture of lib/ascii_image.py:67 and :105 at tag python-final), though the bytes where its header would hold the sides declare more than the limit: a text named .qoi, a QOI header whose signature reads qoiF
+    fn no_signature_or_a_refused_header_is_no_picture() {
+        // rows S1, S18: a file named by a format's suffix without that format's signature is no picture, as to Pillow 13, whose readers take a file by its signature (QoiImagePlugin and PngImagePlugin _accept; seen 2026-11-16, Pillow 13.0.0 through identifies and open_picture of lib/ascii_image.py:67 and :105 at tag python-final), though the bytes where its header would hold the sides declare more than the limit: a text named .qoi, a QOI header whose signature reads qoiF, a PNG header of 60000 x 60000 px behind a signature zeroed or one byte off; so is a PNG whose header's CRC fails or that is cut to 8 bytes, which the png crate and Pillow refuse (PngImagePlugin ChunkStream.crc: a SyntaxError; chunk_IHDR: `Truncated IHDR chunk`, a ValueError)
         let dir = Dir::new("no_signature");
+        let big = png_header(60000, 60000);
+        assert_eq!(kind(&dir.file("whole.png", &big)), "too large");
+        let mut zeroed = big.clone();
+        zeroed[..8].fill(0);
+        let mut off = big.clone();
+        off[1] = b'Q';
+        let mut sum = big.clone();
+        sum[29] ^= 0xFF; // the header's CRC
+        let short = png_chunks(&[
+            (b"IHDR", ihdr(60000, 60000, 1, 0)[..8].to_vec()),
+            (b"IDAT", zlib(b"")),
+            (b"IEND", vec![]),
+        ]);
         let sides = [20025u32.to_be_bytes(), 20025u32.to_be_bytes()].concat();
         let qoif = [
             &b"qoiF"[..],
@@ -1693,20 +1714,25 @@ mod tests {
             &[0, 0, 0, 0, 0, 0, 0, 1],
         ]
         .concat();
-        for (name, data) in [
+        let cases = [
             (
                 "text.qoi",
                 b"not a picture at all, a text of some length\n".to_vec(),
             ),
             ("qoif.qoi", qoif),
-        ] {
+            ("zeroed.png", zeroed),
+            ("off.png", off),
+            ("sum.png", sum),
+            ("short.png", short),
+        ];
+        let seen = cases.map(|(name, data)| {
             let file = dir.file(name, data);
-            assert_eq!(
-                (kind(&file), identifies(&file)),
-                ("no image", false),
-                "{name}"
-            );
-        }
+            (name, kind(&file), identifies(&file))
+        });
+        let none = seen
+            .iter()
+            .all(|&(_, kind, id)| (kind, id) == ("no image", false));
+        assert!(none, "{seen:?}");
     }
 
     #[test]
