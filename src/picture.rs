@@ -84,6 +84,7 @@ fn frames(path: &Path, format: Option<ImageFormat>) -> std::result::Result<u32, 
         Some(ImageFormat::Qoi) => return qoi_frames(&mut file),
         Some(ImageFormat::Avif) => return avif_frames(&mut file),
         Some(ImageFormat::WebP) => webp_frames(&mut file),
+        Some(ImageFormat::Ico) => return ico_frames(&mut file),
         _ => Ok(1),
     };
     counted.map_err(|_| Not::Image) // frames that cannot be counted: no picture
@@ -555,6 +556,41 @@ fn webp_frames(file: &mut (impl Read + Seek)) -> std::io::Result<u32> {
         0 => 1, // no animation
         _ => frames.clamp(1, 2),
     })
+}
+
+/// An ICO's one frame, its directory read as the decoder reads it: 6 bytes, then 16 an entry, an entry of over 256 planes or bits refused; the entry the decoder takes, the most bits a pixel, then the most pixels by the directory, the last entry winning ties (image's ico best_entry), walked from its place: a PNG as `png_frames` walks one, its profile bounded and its header measured, as the decoder reads such a PNG by the png crate without limits.
+fn ico_frames(file: &mut (impl BufRead + Seek)) -> std::result::Result<u32, Not> {
+    let mut head = [0; 6]; // two reserved bytes, the type, the count of entries
+    file.read_exact(&mut head)?;
+    let (mut best, mut last) = (None, None); // the first best of the entries before the last; the last
+    for _ in 0..u16::from_le_bytes([head[4], head[5]]) {
+        let mut entry = [0; 16]; // the sides, colours, a reserved byte, planes, bits, bytes, place
+        file.read_exact(&mut entry)?;
+        let field = |at: usize| u16::from_le_bytes([entry[at], entry[at + 1]]);
+        if field(4) > 256 || field(6) > 256 {
+            return Err(Not::Image); // as the decoder refuses it
+        }
+        let side = |byte: u8| if byte == 0 { 256 } else { u32::from(byte) };
+        let score = (field(6), side(entry[0]) * side(entry[1]));
+        let place = u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]);
+        if let Some(before) = last.replace((score, place))
+            && best.is_none_or(|(most, _)| before.0 > most)
+        {
+            best = Some(before);
+        }
+    }
+    let Some(last) = last else {
+        return Err(Not::Image); // no entry
+    };
+    let (_, place) = best.filter(|(score, _)| *score > last.0).unwrap_or(last);
+    file.seek(SeekFrom::Start(place.into()))?;
+    let mut signature = [0; 8];
+    file.read_exact(&mut signature)?;
+    file.seek_relative(-8)?;
+    match &signature {
+        b"\x89PNG\r\n\x1a\n" => png_frames(file).map(|_| 1), // an icon's picture, its animation none
+        _ => Ok(1),
+    }
 }
 
 /// The decoder of the raster still at `path`, its header read: the format by content, within `MAX_PIXELS`, no animation; in Pillow's order (Image.open, then lib/ascii_image.py:61): the file read to its first frame, then its size, then its frames; a GIF measured by its blocks before the decoder reads it, whose refusals Pillow does not share.
@@ -2089,7 +2125,7 @@ mod tests {
 
     #[test]
     fn a_png_profile_over_a_mebibyte_is_no_picture() {
-        // row S1: Pillow 13 inflates a PNG's colour profile (iCCP) to 1 MiB at most and refuses a file whose profile holds more, also one over the limit, as it measures a file once it has read to the image data (PngImagePlugin chunk_iCCP and _safe_zlib_decompress, MAX_TEXT_CHUNK: a ValueError, no picture to identifies and open_picture of lib/ascii_image.py:67 and :105 at tag python-final; seen 2026-11-15, Pillow 13.0.0: a profile of 1 MiB opens, one of 1 MiB and a byte does not, 8 x 8 px or 60000 x 60000 px); a profile that does not inflate is none to it (zlib.error); the png crate inflates the first profile whole while the decoder is made, before any size is known: 2 GiB from a file of 2 MB; it passes over a profile whose CRC fails and inflates the next one, so a small profile of a broken CRC before one over 1 MiB is no picture too, as Pillow refuses a chunk whose CRC fails (PngImagePlugin ChunkStream.crc: a SyntaxError; seen 2026-11-16, Pillow 13.0.0)
+        // row S1: Pillow 13 inflates a PNG's colour profile (iCCP) to 1 MiB at most and refuses a file whose profile holds more, also one over the limit, as it measures a file once it has read to the image data (PngImagePlugin chunk_iCCP and _safe_zlib_decompress, MAX_TEXT_CHUNK: a ValueError, no picture to identifies and open_picture of lib/ascii_image.py:67 and :105 at tag python-final; seen 2026-11-15, Pillow 13.0.0: a profile of 1 MiB opens, one of 1 MiB and a byte does not, 8 x 8 px or 60000 x 60000 px); a profile that does not inflate is none to it (zlib.error); the png crate inflates the first profile whole while the decoder is made, before any size is known: 2 GiB from a file of 2 MB; it passes over a profile whose CRC fails and inflates the next one, so a small profile of a broken CRC before one over 1 MiB is no picture too, as Pillow refuses a chunk whose CRC fails (PngImagePlugin ChunkStream.crc: a SyntaxError; seen 2026-11-16, Pillow 13.0.0); either is no picture as an icon's PNG too, which Pillow reads as a PNG (IcoImagePlugin IcoFile.frame; seen 2026-11-16, Pillow 13.0.0)
         let dir = Dir::new("png_profile");
         let row = [&[0][..], &[1, 2, 3].repeat(8)].concat(); // filter 0
         let profiled = |(w, h): (u32, u32), profile: &[u8]| {
@@ -2125,6 +2161,35 @@ mod tests {
         broken[0] = 0; // no zlib header
         let broken = dir.file("broken.png", profiled((8, 8), &broken));
         assert_eq!(rgb(&still(&broken).pic).get_pixel(7, 7).0, [1, 2, 3]);
+        // so too in an icon, whose PNG the ICO decoder reads by the png crate without limits (an RGBA PNG, as an icon's has to be)
+        let rgba = [&[0][..], &[1, 2, 3, 255].repeat(8)].concat();
+        let icon = |profiles: &[&[u8]]| {
+            let mut chunks = vec![(b"IHDR", ihdr(8, 8, 8, 6))];
+            chunks.extend(profiles.iter().map(|data| (b"iCCP", data.to_vec())));
+            chunks.extend([(b"IDAT", zlib(&rgba.repeat(8))), (b"IEND", vec![])]);
+            ico_of(&png_chunks(&chunks))
+        };
+        assert_eq!(kind(&dir.file("plain.ico", icon(&[]))), "still");
+        let named = [&b"q\0\0"[..], &past].concat();
+        let mut second = icon(&[&small, &named]);
+        second[22 + crc] ^= 0xFF; // past the icon's header and its entry
+        for (name, file) in [("past.ico", icon(&[&named])), ("second.ico", second)] {
+            let file = dir.file(name, file);
+            assert_eq!(
+                (kind(&file), identifies(&file)),
+                ("no image", false),
+                "{name}"
+            );
+        }
+    }
+
+    /// An icon of one entry of 8 x 8 px and 32 bits a pixel, `image`: a PNG, or a BMP's header and pixels.
+    fn ico_of(image: &[u8]) -> Vec<u8> {
+        let mut out = vec![0, 0, 1, 0, 1, 0, 8, 8, 0, 0, 1, 0, 32, 0]; // the type, one entry: its sides, colours, planes, bits
+        out.extend((image.len() as u32).to_le_bytes());
+        out.extend(22u32.to_le_bytes()); // past the header and the entry
+        out.extend(image);
+        out
     }
 
     /// An 8 x 4 WebP of #010203 behind a VP8X of `flags`, then a `kind` chunk of `data` that declares `declared` bytes.
