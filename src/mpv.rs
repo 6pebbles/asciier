@@ -4179,19 +4179,19 @@ pub(crate) mod tests {
             stage.settle();
             stage.mpv.set("loop-file", "inf");
             let sent = if case == "reaching mpv in its seek" {
-                // a playing step sent on the last frame, drawn as mpv handed it over just before its seek, its time known (a position can come a look after its frame), before the viewer saw the seek
+                // a playing step sent on the last frame, drawn as mpv handed it over just before its seek, or on the one before, where mpv handed the last over about 2 ms before its seek and a test drawing late missed it (sent nothing in 30 s, 1 of 2 copies at load 44), its time known (a position can come a look after its frame), before the viewer saw the seek
                 stage.mpv.pause(false);
                 let (start, mut sent) = (Instant::now(), false);
                 while !sent && start.elapsed() < Duration::from_secs(30) {
                     let last = |stage: &mut Stage| {
                         stage.draw();
                         stage.mpv.shown();
-                        let last = stage.shown.last() == Some(&49);
-                        if last {
-                            stage.mpv.on_screen.get_or_insert(1.96);
+                        let on = stage.shown.last().copied().filter(|n| [48, 49].contains(n));
+                        if let Some(on) = on {
+                            stage.mpv.on_screen.get_or_insert(on as f64 * 0.04);
                             stage.mpv.step(true);
                         }
-                        last
+                        on.is_some()
                     };
                     sent = stage.at_own_seek(5.0, last).unwrap_or(false);
                 }
