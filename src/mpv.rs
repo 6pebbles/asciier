@@ -71,9 +71,10 @@ pub struct Mpv {
     counted: i64,
     /// Where the last step forward started, paused, when it moved: a step back right after it seeks there.
     back: Option<f64>,
-    /// The time of the frame the caller last rendered, as far as known (`held` then), and of the one on screen (`shown`).
-    rendered: Option<f64>,
+    /// The time of the frame the caller last rendered, as far as known (`held` then), and of the one on screen (`shown`). The target times identify those frames, so a seek's settled time corrects only its own frame if it was rendered or shown before that reply.
+    rendered: Option<(Option<f64>, i64)>,
     on_screen: Option<f64>,
+    screen_frame: Option<i64>,
     /// The frame shown is the picture's last and the position can be past it: the sound's, playing on or paused there, or a seek's target past the last frame. `end`: that frame's own time, once a seek past the end has given it. `runs`: the position ran on in the last look that gave one, with no frame handed over and none let go.
     tail: bool,
     end: Option<f64>,
@@ -530,6 +531,7 @@ impl Mpv {
             back: None,
             rendered: None,
             on_screen: None,
+            screen_frame: None,
             tail: false,
             end: None,
             runs: false,
@@ -943,8 +945,16 @@ impl Mpv {
             _ => None,
         };
         // no step goes from a frame drawn before
-        (self.back, self.tail, self.rendered, self.on_screen) = (None, false, None, None);
+        (
+            self.back,
+            self.tail,
+            self.rendered,
+            self.on_screen,
+            self.screen_frame,
+        ) = (None, false, None, None, None);
         (self.runs, self.stamp) = (false, None);
+        // Frame times on opposite sides of a seek have no target span or period in common.
+        (self.seen, self.bound, self.base) = (None, None, None);
         let mark = self.marks + 1;
         self.fresh = false;
         self.busy = Some(Busy::Seek {
@@ -1089,6 +1099,16 @@ impl Mpv {
                 }
             }
             None => {}
+        }
+        // A request's frame can have been painted before its position reply arrived; correct that frame's time, without retiming an older frame still on screen.
+        let held = self.held();
+        if let Some((at, target)) = &mut self.rendered
+            && *target == self.counted
+        {
+            *at = held;
+        }
+        if self.screen_frame == Some(self.counted) {
+            self.on_screen = held;
         }
         self.next();
         moved.then_some(Event::Time(landed))
@@ -1517,14 +1537,16 @@ impl Mpv {
         // SAFETY: the surface holds `h` rows of `stride` bytes from `start` on; the parameters live through the call.
         let drawn = unsafe { mpv_render_context_render(self.render, params.as_mut_ptr()) };
         if drawn >= 0 {
-            self.rendered = self.held();
+            self.rendered = Some((self.held(), self.counted));
         }
         (drawn >= 0).then(|| upright(&self.surface[start..], stride, w, h, 0, turn))
     }
 
     /// The frame last rendered is on screen now: a step forward on a playing clip goes from it.
     pub fn shown(&mut self) {
-        self.on_screen = self.rendered;
+        (self.on_screen, self.screen_frame) = self
+            .rendered
+            .map_or((None, None), |(at, target)| (at, Some(target)));
     }
 
     /// Tell mpv the due frame was not drawn.
@@ -4423,6 +4445,24 @@ pub(crate) mod tests {
             .zip(own)
             .all(|(named, own)| named.is_some_and(|named| near(named, own, 1e-9)));
         assert!(right, "{named:?} for {own:?}");
+    }
+
+    #[test]
+    fn a_seek_starts_its_frames_time_bound_anew() {
+        // rows P9, P15, N5: a frame shown after a seek has that frame's time, independent of the frame before the seek; carrying the bound from frame 0 across a seek onto frame 49 gave on_screen 0.04 for 1.96, and a playing `.` there showed frame 2 (the round 8 remaining checks).
+        let mut stage = Stage::new();
+        stage.clip(2.0, 2.0);
+        stage.settle();
+        stage.mpv.seek(&["seek", "1.96", "absolute+exact"]);
+        assert!(idle(&mut stage, 5.0) && stage.reach(49, 1.96, 5.0));
+        stage.mpv.shown();
+        assert!(
+            stage.mpv.on_screen.is_some_and(|at| near(at, 1.96, 0.001)),
+            "shown {:?}, held {:?}, frame {:?}",
+            stage.mpv.on_screen,
+            stage.mpv.held(),
+            stage.shown.last()
+        );
     }
 
     #[test]
