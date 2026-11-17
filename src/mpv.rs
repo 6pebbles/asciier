@@ -87,9 +87,9 @@ pub struct Mpv {
     setting: [u32; 4],
     /// The frame of a grab whose time mpv has not given yet.
     taken: Option<Option<RgbImage>>,
-    /// A new position comes with a new frame, but past the picture's end, where the sound plays on: `seen`, the position given with the last new frame (`None` while it is to come), and mpv's count of frames let go untaken then; `prev`, the same of the frame before; `base`, that position, or the position at the last look in which mpv had let frames go, and the count then; `first`, the first position of the look under way.
+    /// A new position comes with a new frame, but past the picture's end, where the sound plays on: `seen`, the position given with the last new frame (`None` while it is to come), and mpv's count of frames let go untaken then; `bound`, that frame's latest time by the preceding frame and their target times (the frame period while no target span is known); `base`, that position, or the position at the last look in which mpv had let frames go, and the count then; `first`, the first position of the look under way.
     seen: Option<(f64, i64)>,
-    prev: Option<(f64, i64)>,
+    bound: Option<f64>,
     base: Option<(f64, i64)>,
     first: Option<f64>,
     /// When `events` last returned.
@@ -539,7 +539,7 @@ impl Mpv {
             setting: [0; 4],
             taken: None,
             seen: None,
-            prev: None,
+            bound: None,
             base: None,
             first: None,
             looked: Instant::now(),
@@ -1052,7 +1052,7 @@ impl Mpv {
                     _ if from.is_some() && (short || blank) => kept.unwrap_or(landed),
                     _ => landed,
                 };
-                (self.seen, self.prev) = (Some((seen, self.drops)), None);
+                (self.seen, self.bound) = (Some((seen, self.drops)), None);
                 self.base = Some((landed, self.drops));
                 self.back = from.filter(|_| !self.tail && !blank);
                 if let (true, Some(left)) = (blank, from) {
@@ -1077,7 +1077,7 @@ impl Mpv {
                     });
                 } else if self.fresh || next {
                     self.back = rested.then_some(from);
-                    (self.seen, self.prev) = (Some((landed, self.drops)), None);
+                    (self.seen, self.bound) = (Some((landed, self.drops)), None);
                     self.base = Some((landed, self.drops));
                 } else {
                     self.tail = true;
@@ -1195,12 +1195,22 @@ impl Mpv {
                 Some(at) => on.then_some((at, info.target_time)),
                 None => self.stamp.filter(|_| on),
             };
+            // Keep the preceding frame's bounded time: neither a missing position nor consecutive late positions lose that bound. A variable-rate frame follows its predecessor by their target span while playing, not the average frame period.
+            self.bound = self.seen.map(|(at, drops)| {
+                let before = self.bound.map_or(at, |bound| at.min(bound));
+                let span = (info.target_time - self.counted) as f64 * 1e-9 * self.speed;
+                let next = if on && self.counted != 0 && span > 0.0 {
+                    span
+                } else {
+                    self.frame * (1 + self.drops - drops).max(1) as f64
+                };
+                before + next
+            });
             self.counted = info.target_time;
             self.fresh = true;
             self.tail &= self.busy.is_some();
             self.runs = false;
-            self.prev = self.seen.take();
-            self.seen = given.map(|at| (at, self.drops));
+            self.seen = given.or(self.bound).map(|at| (at, self.drops));
             self.base = self.seen;
         }
         new
@@ -1210,12 +1220,7 @@ impl Mpv {
     fn held(&self) -> Option<f64> {
         // mpv counts anew from a seek
         let (at, drops) = self.seen?;
-        let seen = match self.prev {
-            Some((before, dropped)) => {
-                at.min(before + self.frame * (1 + drops - dropped).max(1) as f64)
-            }
-            None => at,
-        };
+        let seen = self.bound.map_or(at, |bound| at.min(bound));
         Some(seen + self.frame * (self.drops - drops).max(0) as f64)
     }
 
@@ -4405,7 +4410,7 @@ pub(crate) mod tests {
         assert!(near(mpv.frame, 0.04, 1e-9));
         let mut named = Vec::new();
         for (given, drops) in [(1.963, 5), (1.979, 5), (1.963, 6), (1.979, 7)] {
-            (mpv.prev, mpv.seen, mpv.drops) = (Some((1.92, 5)), Some((given, 5)), drops);
+            (mpv.bound, mpv.seen, mpv.drops) = (Some(1.96), Some((given, 5)), drops);
             named.push(mpv.held());
         }
         let own = [1.96, 1.96, 2.0, 2.04];
@@ -4414,6 +4419,46 @@ pub(crate) mod tests {
             .zip(own)
             .all(|(named, own)| named.is_some_and(|named| near(named, own, 1e-9)));
         assert!(right, "{named:?} for {own:?}");
+    }
+
+    #[test]
+    fn frames_without_positions_still_bound_late_positions_after_them() {
+        // row N5: a tail grab is named by the last frame's time, bounded by the frame before it; a frame whose position did not arrive must keep that bound, and consecutive late positions must not compound their error (round 8 stress T2: frame 48 without a position followed by frame 49 at 2.0238, or frames 47 without one, 48 at 1.9763 and 49 at 2.0318).
+        let mut stage = Stage::new();
+        stage.clip(2.0, 6.0);
+        stage.settle();
+        stage.mpv.pause(false);
+        let start = Instant::now();
+        loop {
+            let events = stage.mpv.events();
+            if events.contains(&Event::Frame) {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut got = Vec::new();
+        for (before, positions) in [
+            (1.88, vec![None, Some(2.0238)]),
+            (1.84, vec![None, Some(1.9763), Some(2.0318)]),
+        ] {
+            let mpv = &mut stage.mpv;
+            (mpv.bound, mpv.seen, mpv.drops) = (None, Some((before, 0)), 0);
+            for given in positions {
+                mpv.counted = 0;
+                assert!(
+                    mpv.count(given),
+                    "a frame is still handed over before its render"
+                );
+            }
+            got.push(mpv.held());
+        }
+        assert!(
+            got.iter()
+                .all(|at| at.is_some_and(|at| near(at, 1.96, 0.000001))),
+            "{got:?}"
+        );
+        stage.draw();
     }
 
     #[test]
