@@ -374,12 +374,12 @@ fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     Ok(samples.map_or(1, |count| count.clamp(1, 2)))
 }
 
-/// The size an AVIF's meta box, from `at` to `end` past its version and flags, declares: its primary item's first ispe property, as libavif takes it, by its primary item (pitm), each item's properties by their places (iprp's ipma) and the properties (iprp's ipco).
+/// The size an AVIF's meta box, from `at` to `end` past its version and flags, declares: its primary item's first ispe property, as libavif takes it, by its primary item (pitm), each item's properties by their places (each of iprp's ipma boxes) and the properties (iprp's ipco).
 fn declared(
     walk: &mut Walk<'_, impl Read + Seek>,
     (mut at, end): (u64, u64),
 ) -> std::io::Result<Option<(u32, u32)>> {
-    let (mut primary, mut ipma, mut ipco) = (None, None, None);
+    let (mut primary, mut iprp) = (None, None);
     while let Some((kind, body, next)) = boxed(walk, at, end)? {
         let next = next.min(end);
         if &kind == b"pitm" {
@@ -394,22 +394,25 @@ fn declared(
             primary = primary.or(Some(item));
         }
         if &kind == b"iprp" {
-            let mut part = body;
-            while let Some((inner, body, stop)) = boxed(walk, part, next)? {
-                match &inner {
-                    b"ipma" => ipma = ipma.or(Some((body, stop.min(next)))),
-                    b"ipco" => ipco = ipco.or(Some((body, stop.min(next)))),
-                    _ => {}
-                }
-                part = stop;
-            }
+            iprp = iprp.or(Some((body, next)));
         }
         at = next;
     }
-    let (Some(primary), Some((body, end)), Some((mut at, last))) = (primary, ipma, ipco) else {
+    let (Some(primary), Some((mut at, end))) = (primary, iprp) else {
         return Ok(None);
     };
-    let places = associations(walk, body, end, primary)?;
+    let (mut places, mut ipco) = (Vec::new(), None);
+    while let Some((kind, body, next)) = boxed(walk, at, end)? {
+        match &kind {
+            b"ipma" => places.extend(associations(walk, body, next.min(end), primary)?),
+            b"ipco" => ipco = ipco.or(Some((body, next.min(end)))),
+            _ => {}
+        }
+        at = next;
+    }
+    let Some((mut at, last)) = ipco else {
+        return Ok(None);
+    };
     // of the primary item's properties, the first, in their order, that is an ispe
     let mut sides = vec![None; places.len()];
     let mut place = 1; // the properties are counted from 1
@@ -2339,6 +2342,88 @@ mod tests {
             other[8..12].copy_from_slice(brand);
             let file = dir.file("other.avif", other);
             assert_eq!(still(&file).pic.size(), (16, 8), "{brand:?}");
+        }
+    }
+
+    #[test]
+    fn an_avif_is_measured_by_associations_in_any_box() {
+        // row S18: a primary item's properties can be named by a later ipma of a distinct version or flags, which mp4parse accepts (read_iprp); its first ispe in association order is measured before decoding, including a property index over 127; the decoder's 16 x 8 px picture is no substitute for the container's declared size, for open, identifies or the original PNG
+        let dir = Dir::new("avif_associations");
+        let ipma = |version: u8, wide: bool, places: &[u16]| {
+            let mut body = vec![version, 0, 0, u8::from(wide)];
+            body.extend(u32::from(!places.is_empty()).to_be_bytes());
+            if !places.is_empty() {
+                body.extend(if version == 0 {
+                    1u16.to_be_bytes().to_vec()
+                } else {
+                    1u32.to_be_bytes().to_vec()
+                });
+                body.push(places.len() as u8);
+                for &place in places {
+                    if wide {
+                        body.extend(place.to_be_bytes());
+                    } else {
+                        body.push((place & 0x7F) as u8 | ((place & 0x8000) >> 8) as u8);
+                    }
+                }
+            }
+            [
+                ((body.len() + 8) as u32).to_be_bytes().as_slice(),
+                b"ipma",
+                &body,
+            ]
+            .concat()
+        };
+        for (version, wide) in [(1, false), (0, false), (0, true)] {
+            for (w, h) in [(16, 8), (15000, 15000)] {
+                let mut avif = quarters_avif(if wide { 16 } else { w }, if wide { 8 } else { h });
+                let first = if wide {
+                    let mut padding = [8u32.to_be_bytes().as_slice(), b"free"]
+                        .concat()
+                        .repeat(125);
+                    padding.extend(
+                        [
+                            20u32.to_be_bytes().as_slice(),
+                            b"ispe",
+                            &[0; 4],
+                            &w.to_be_bytes(),
+                            &h.to_be_bytes(),
+                        ]
+                        .concat(),
+                    );
+                    avif = with_property(&avif, &padding);
+                    130
+                } else {
+                    1
+                };
+                let associations = [
+                    ipma(u8::from(version == 0), false, &[]),
+                    ipma(version, wide, &[first, 2, 0x8003, 4]),
+                ]
+                .concat();
+                let at = avif.windows(4).position(|kind| kind == b"ipma").unwrap() - 4;
+                let length = u32::from_be_bytes(avif[at..at + 4].try_into().unwrap()) as usize;
+                let extra = (associations.len() - length) as u32;
+                avif.splice(at..at + length, associations);
+                for kind in [b"meta", b"iprp"] {
+                    let at = avif.windows(4).position(|seen| seen == kind).unwrap() - 4;
+                    let length = u32::from_be_bytes(avif[at..at + 4].try_into().unwrap()) + extra;
+                    avif[at..at + 4].copy_from_slice(&length.to_be_bytes());
+                }
+                let extent = avif.windows(4).position(|kind| kind == b"iloc").unwrap() + 18;
+                let offset =
+                    u32::from_be_bytes(avif[extent..extent + 4].try_into().unwrap()) + extra;
+                avif[extent..extent + 4].copy_from_slice(&offset.to_be_bytes());
+                let file = dir.file(&format!("{version}-{wide}-{w}.avif"), avif);
+                assert!(identifies(&file), "{file:?}");
+                if w == 15000 {
+                    assert_eq!(kind(&file), "too large", "{file:?}");
+                    assert!(matches!(original_png(&file, 0), Err(NoCopy::TooLarge)));
+                } else {
+                    assert_eq!(still(&file).pic.size(), (16, 8));
+                    assert!(matches!(original_png(&file, 0), Ok((_, (16, 8)))));
+                }
+            }
         }
     }
 
