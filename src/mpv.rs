@@ -637,6 +637,19 @@ impl Mpv {
                         .get(c"volume-max")
                         .and_then(|max| max.parse().ok())
                         .unwrap_or(130.0);
+                    // The first frame can arrive with the position from before it (0 s when its picture starts after its sound); settle the load's restart as a seek before a play or step goes.
+                    self.busy = Some(Busy::Seek {
+                        mark: self.marks,
+                        op: self.ops,
+                        ran: true,
+                        waits: false,
+                        settling: false,
+                        target: None,
+                        anchor: false,
+                        from: None,
+                        kept: None,
+                        steps: false,
+                    });
                     return Ok((video, audio));
                 }
                 Some(Event::Failed(why)) if why == explain(NOTHING_TO_PLAY) => {
@@ -4060,6 +4073,30 @@ pub(crate) mod tests {
         args.push(file.to_str().unwrap());
         ffmpeg(&args);
         stage.open(&file)
+    }
+
+    #[test]
+    fn the_first_frames_time_is_read_after_the_open_restarts() {
+        // rows P15, N5: a playing `.` on frame 1 shows frame 2 when the picture starts after the sound; before mpv's first restart its time-pos can still read 0, although the first frame is at 0.52, 0.12 or 0.08 s (round 8 review F5: frame 1 stepped back onto frame 0 in 10 of 10 unit rounds).
+        let mut wrong = Vec::new();
+        for late in [0.5, 0.1, 0.06] {
+            let mut stage = Stage::new();
+            assert_eq!(late_picture(&mut stage, late), (true, true));
+            stage.settle();
+            let first = stage.mpv.held();
+            stage.play();
+            let there = stage.watch(5.0, |stage| stage.shown.last() == Some(&1));
+            stage.step(true);
+            let done = idle(&mut stage, 5.0);
+            if !(there && done && stage.shown.last() == Some(&2) && stage.mpv.paused) {
+                wrong.push(format!(
+                    "{late} s late: first {first:?}, frame 1 {there}, then {:?} at {}",
+                    stage.shown.last(),
+                    stage.time
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
