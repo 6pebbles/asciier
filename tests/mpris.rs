@@ -115,6 +115,22 @@ impl<'a> Remote<'a> {
         }
     }
 
+    /// Wait for a position in `range`: an application barrier even while the clock plays on.
+    fn await_position(&self, range: std::ops::Range<i64>) {
+        let until = Instant::now() + PATIENCE;
+        loop {
+            let position = self.get(PLAYER, "Position")["data"].as_i64().unwrap();
+            if range.contains(&position) {
+                return;
+            }
+            assert!(
+                Instant::now() < until,
+                "Position {position}, not in {range:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Every property of `interface` as GetAll gives them: by name, each with its type and value.
     fn all(&self, interface: &str) -> serde_json::Map<String, Value> {
         let all = self.busctl(&[
@@ -173,6 +189,69 @@ impl<'a> Remote<'a> {
             took < Duration::from_secs(5),
             "{method}: answered in {took:?}"
         );
+    }
+
+    /// Queue calls on one connection while the viewer is stopped, then resume it and check every empty reply: they reach the same drain, in order.
+    fn batch(&self, tty: &Tty, calls: &[(&str, Option<i64>)]) {
+        let own = format!("unix:path={}", self.sandbox.path("bus").display());
+        assert!(self.bus.address == own || self.bus.address.starts_with(&format!("{own},")));
+        struct Resume<'a>(&'a Tty);
+        impl Drop for Resume<'_> {
+            fn drop(&mut self) {
+                self.0.signal(libc::SIGCONT);
+            }
+        }
+        tty.signal(libc::SIGSTOP);
+        let resume = Resume(tty);
+        let until = Instant::now() + PATIENCE;
+        loop {
+            let status = std::fs::read_to_string(format!("/proc/{}/status", tty.pid)).unwrap();
+            if status.lines().any(|line| line.starts_with("State:\tT")) {
+                break;
+            }
+            assert!(Instant::now() < until, "viewer did not stop");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut channel = dbus::channel::Channel::open_private(&self.bus.address).unwrap();
+        channel.register().unwrap();
+        let connection: dbus::blocking::Connection = channel.into();
+        let mut replies = Vec::new();
+        for &(method, value) in calls {
+            let mut message =
+                dbus::Message::new_method_call(&self.name, PATH, PLAYER, method).unwrap();
+            message = match (method, value) {
+                ("SetPosition", Some(position)) => {
+                    message.append2(dbus::Path::new("/ignored").unwrap(), position)
+                }
+                ("Seek", Some(offset)) => message.append1(offset),
+                (_, None) => message,
+                _ => panic!("unsupported batch call {method}"),
+            };
+            replies.push(connection.channel().send(message).unwrap());
+        }
+        // The daemon has routed all preceding calls before this reply; none can reach the stopped viewer early.
+        let proxy =
+            connection.with_proxy("org.freedesktop.DBus", "/org/freedesktop/DBus", PATIENCE);
+        let _: (Vec<String>,) = proxy
+            .method_call("org.freedesktop.DBus", "ListNames", ())
+            .unwrap();
+        drop(resume);
+        let until = Instant::now() + PATIENCE;
+        while !replies.is_empty() {
+            assert!(Instant::now() < until, "unanswered calls {replies:?}");
+            if let Some(message) = connection
+                .channel()
+                .blocking_pop_message(Duration::from_millis(100))
+                .unwrap()
+                && let Some(at) = replies
+                    .iter()
+                    .position(|serial| Some(*serial) == message.get_reply_serial())
+            {
+                assert_eq!(message.msg_type(), dbus::MessageType::MethodReturn);
+                assert!(message.get_items().is_empty(), "{message:?}");
+                replies.remove(at);
+            }
+        }
     }
 
     /// playerctl ARGS with no player named, as the media keys run it: what it printed.
@@ -424,6 +503,107 @@ fn calls_are_answered_at_once_and_drive_the_player() {
         reply.len() == 1 && reply[0].starts_with("method return ") && took < Duration::from_secs(5),
         "Quit: {reply:?} in {took:?}"
     );
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
+fn calls_in_one_batch_use_the_state_the_previous_call_left() {
+    // row M2: remote of bin/ascii-viewer:1573-1594 at tag python-final recomputes playing for each queued request: Play then Pause from Paused ends Paused, Pause then Play from Playing ends Playing, and Stop then Pause stays Stopped; each reply is empty; Previous after each Play/Pause pair seeks back from 5 s, so its landing proves the main thread applied the pair before its status is read, even where replies come from another thread
+    let mut sandbox = Sandbox::new();
+    let bus = Bus::new(&mut sandbox);
+    let video = clip(&sandbox, "clip.mp4", 60.0, "160x90", 25);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    let remote = Remote::new(&sandbox, &bus, tty.pid);
+    tty.await_playing();
+    for (before, calls, after) in [
+        ("Pause", ["Play", "Pause"], "Paused"),
+        ("Play", ["Pause", "Play"], "Playing"),
+        ("Play", ["Stop", "Pause"], "Stopped"),
+    ] {
+        remote.send("Pause", &[]);
+        remote.await_get("PlaybackStatus", json!("Paused"));
+        remote.send("SetPosition", &["objpath:/ignored", "int64:5000000"]);
+        remote.await_position(4_500_000..5_500_000);
+        remote.send(before, &[]);
+        remote.await_get(
+            "PlaybackStatus",
+            json!(if before == "Play" {
+                "Playing"
+            } else {
+                "Paused"
+            }),
+        );
+        let mut calls: Vec<_> = calls.map(|method| (method, None)).into();
+        if after != "Stopped" {
+            calls.push(("Previous", None));
+        }
+        remote.batch(&tty, &calls);
+        if after == "Stopped" {
+            remote.await_get("PlaybackStatus", json!(after));
+        } else {
+            remote.await_position(0..500_000);
+            assert_eq!(remote.get(PLAYER, "PlaybackStatus")["data"], json!(after));
+        }
+    }
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
+fn positions_in_one_batch_keep_absolute_and_relative_meanings() {
+    // rows M2, P8a, N26: remote of bin/ascii-viewer:1573-1594 at tag python-final evaluates SetPosition and Previous from the position left by the preceding call, so absolute targets replace rather than add; relative Seek still adds, and the track argument is ignored; seeking leaves Stopped and a following Pause pauses at its target; N26: the exact paused position here is mpv's frame position, where the old silent player's seek restarted its decoder and its local elapsed clock before pausing (clock, position and seek_to at bin/ascii-viewer:1394-1440), observed 10000121 us for a 10000000 us target
+    let mut sandbox = Sandbox::new();
+    let bus = Bus::new(&mut sandbox);
+    let video = clip(&sandbox, "clip.mp4", 30.0, "160x90", 25);
+    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    let remote = Remote::new(&sandbox, &bus, tty.pid);
+    tty.await_playing();
+    remote.send("Pause", &[]);
+    remote.await_get("PlaybackStatus", json!("Paused"));
+    for (calls, target) in [
+        (
+            [
+                ("SetPosition", Some(5_000_000)),
+                ("SetPosition", Some(10_000_000)),
+            ],
+            10_000_000,
+        ),
+        ([("SetPosition", Some(5_000_000)), ("Previous", None)], 0),
+        (
+            [("SetPosition", Some(5_000_000)), ("Seek", Some(2_000_000))],
+            7_000_000,
+        ),
+        (
+            [("Seek", Some(5_000_000)), ("SetPosition", Some(10_000_000))],
+            10_000_000,
+        ),
+    ] {
+        remote.send("SetPosition", &["objpath:/ignored", "int64:2000000"]);
+        remote.await_position(1_500_000..2_500_000);
+        remote.batch(&tty, &calls);
+        remote.await_get("Position", json!(target));
+        remote.await_get("PlaybackStatus", json!("Paused"));
+    }
+    for (calls, target) in [
+        (
+            vec![
+                ("SetPosition", Some(5_000_000)),
+                ("SetPosition", Some(10_000_000)),
+                ("Pause", None),
+            ],
+            10_000_000,
+        ),
+        (vec![("Previous", None), ("Pause", None)], 0),
+    ] {
+        remote.send("SetPosition", &["objpath:/ignored", "int64:2000000"]);
+        remote.await_position(1_500_000..2_500_000);
+        remote.send("Stop", &[]);
+        remote.await_get("PlaybackStatus", json!("Stopped"));
+        remote.batch(&tty, &calls);
+        remote.await_get("PlaybackStatus", json!("Paused"));
+        remote.await_get("Position", json!(target));
+    }
+    tty.send(b"q");
     assert_eq!(tty.exit(), 0);
 }
 

@@ -592,15 +592,15 @@ impl Viewer {
             return; // requests are dropped from `r` on: while the page's frame is on its way and while the page is open (row M5; the old page opened at once)
         }
         for request in requests {
-            let playing = state.status == "Playing";
+            let playing = self.state().is_some_and(|state| state.status == "Playing");
             match request {
                 Request::PlayPause => self.toggle(),
                 Request::Play if !playing => self.toggle(),
                 Request::Pause if playing => self.toggle(),
                 Request::Play | Request::Pause => {}
-                Request::Seek(us) => self.seek(us as f64 / 1e6),
-                Request::SetPosition(us) => self.seek(us as f64 / 1e6 - state.position),
-                Request::Previous => self.seek(-state.position),
+                Request::Seek(us) => self.seek(us as f64 / 1e6, false),
+                Request::SetPosition(us) => self.seek(us as f64 / 1e6, true),
+                Request::Previous => self.seek(0.0, true),
                 Request::Stop => {
                     if let Some(p) = self.playback() {
                         (p.stopped, p.playing) = (true, false);
@@ -624,11 +624,16 @@ impl Viewer {
         p.pause(!play);
     }
 
-    /// Seek by `delta` seconds, exactly; from the stopped state playback starts there.
-    fn seek(&mut self, delta: f64) {
+    /// Seek by `seconds`, or to it when `absolute`, exactly; from the stopped state playback starts there.
+    fn seek(&mut self, seconds: f64, absolute: bool) {
         let Some(p) = self.playback() else { return };
-        let delta = format!("{delta}");
-        let seek = ["seek", &delta, "relative+exact"];
+        let seconds = format!("{seconds}");
+        let how = if absolute {
+            "absolute+exact"
+        } else {
+            "relative+exact"
+        };
+        let seek = ["seek", &seconds, how];
         if p.stopped {
             p.play_from(&seek);
         } else {
@@ -655,7 +660,7 @@ impl Viewer {
                 continue;
             }
             if delta != 0.0 {
-                self.seek(delta);
+                self.seek(delta, false);
                 delta = 0.0;
             }
             self.key(key);
@@ -664,7 +669,7 @@ impl Viewer {
             }
         }
         if delta != 0.0 {
-            self.seek(delta);
+            self.seek(delta, false);
             self.ui.redraw();
         }
         if self.page.is_some() {
