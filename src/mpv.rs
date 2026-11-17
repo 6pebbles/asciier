@@ -4888,26 +4888,35 @@ pub(crate) mod tests {
     #[test]
     fn damage_does_not_stop_the_clip() {
         // row P25: frames in the middle of this clip are damaged and skipped, the frame before held (32 to 41 in the stress run), and the clip plays on to its last frame; the frames drawn, each once (a redraw as mpv pauses at the end draws the last again), rise from the start through that gap to 49 (asked as a whole list, a frame mpv let go while the test looked 100 ms late, and that redraw, failed it under load: the stress run, 1 of 10 and 1 of 200 traced)
-        let mut stage = Stage::new();
-        let file = stage.counter("hurt.mp4", 25, 2.0, 0.0, &[]);
-        let mut bytes = std::fs::read(&file).unwrap();
-        let middle = bytes.len() / 2;
-        bytes[middle..middle + 300].fill(0);
-        std::fs::write(&file, bytes).unwrap();
-        assert_eq!(stage.open(&file), (true, false));
-        stage.settle();
-        stage.shown.clear();
-        stage.mpv.set("pause", "no");
-        let events = stage.pump(4.0, |e| matches!(e, Event::Ended(true) | Event::Failed(_)));
-        assert_eq!(events.last(), Some(&Event::Ended(true)), "{events:?}");
-        let mut drawn = stage.shown.clone();
-        drawn.dedup();
-        let rises = drawn.windows(2).all(|pair| pair[0] < pair[1]);
-        let gap = |pair: &[usize]| pair[1] - pair[0] >= 5 && pair[0] >= 15 && pair[1] <= 47;
-        assert!(
-            rises && drawn.windows(2).any(gap) && drawn[0] <= 5 && drawn.last() == Some(&49),
-            "{:?}",
-            stage.shown
-        );
+        for late in [false, true] {
+            let mut stage = Stage::new();
+            let file = stage.counter("hurt.mp4", 25, 2.0, 0.0, &[]);
+            let mut bytes = std::fs::read(&file).unwrap();
+            let middle = bytes.len() / 2;
+            bytes[middle..middle + 300].fill(0);
+            std::fs::write(&file, bytes).unwrap();
+            assert_eq!(stage.open(&file), (true, false));
+            stage.settle();
+            stage.shown.clear();
+            stage.mpv.set("pause", "no");
+            if late {
+                assert!(stage.watch(4.0, |stage| stage.shown.last().is_some_and(|n| *n >= 45)));
+                // A late caller makes the end and final frame share one look; this delay is the case under test.
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            let events = stage.pump(4.0, |e| matches!(e, Event::Ended(true) | Event::Failed(_)));
+            assert_eq!(events.last(), Some(&Event::Ended(true)), "{events:?}");
+            // The viewer takes a whole look: Ended can precede that look's final Frame in the test pump's waiting queue.
+            stage.pump(0.0, |_| false);
+            let mut drawn = stage.shown.clone();
+            drawn.dedup();
+            let rises = drawn.windows(2).all(|pair| pair[0] < pair[1]);
+            let gap = |pair: &[usize]| pair[1] - pair[0] >= 5 && pair[0] >= 15 && pair[1] <= 47;
+            assert!(
+                rises && drawn.windows(2).any(gap) && drawn[0] <= 5 && drawn.last() == Some(&49),
+                "{:?}",
+                stage.shown
+            );
+        }
     }
 }
