@@ -330,7 +330,7 @@ fn boxed(
     Ok((size >= body - at).then_some((kind, body, at.saturating_add(size))))
 }
 
-/// An AVIF's frames, up to 2, as libavif counts them for Pillow 13 (AvifImagePlugin n_frames): where the major brand is not avif and moov holds a track, the samples of its first AV1 track that is no other's auxiliary, else 1, the primary item; measured by the size its container declares, the primary item's first ispe property (pitm, ipma, ipco), as Pillow 13 measures one (libavif's parse), before the decoder, which learns a size only from the picture dav1d decodes whole: over `MAX_PIXELS`, `Not::TooLarge`; the decoded picture's own size is measured after it. `Not::Image` for a file whose first box is no ftyp, whole and of brands in fours, or whose brands hold no AVIF brand (avif, avis), which mp4parse and libavif refuse; one of a major brand Pillow does not take (AvifImagePlugin _accept: avif, avis, mif1, msf1), the decoder's to tell (N7).
+/// An AVIF's frames, up to 2, as libavif counts them for Pillow 13 (AvifImagePlugin n_frames): where the major brand is not avif and moov holds a track, the samples of its first AV1 track that is no other's auxiliary, else 1, the primary item; measured by the size its container declares, the primary item's first ispe property (pitm, ipma, ipco), as Pillow 13 measures one (libavif's parse), before the decoder, which learns a size only from the picture dav1d decodes whole: over `MAX_PIXELS`, `Not::TooLarge`; the decoded picture's own size is measured after it. `Not::Image` for a file whose first box is no ftyp, whole and of brands in fours, or whose brands hold no AVIF brand (avif, avis), which mp4parse and libavif refuse; one of a major brand Pillow does not take (AvifImagePlugin _accept: avif, avis, mif1, msf1), the decoder's to tell after its declared size is measured too (N7).
 fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     let (mut walk, end) = Walk::new(file)?;
     let Some((kind, body, stop)) = boxed(&mut walk, 0, end)? else {
@@ -348,9 +348,6 @@ fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     if !avif && !matches!(&major, b"avif" | b"avis") {
         return Err(Not::Image);
     }
-    if !matches!(&major, b"avif" | b"avis" | b"mif1" | b"msf1") {
-        return Ok(1);
-    }
     let (mut at, mut meta, mut moov) = (stop, None, None);
     while let Some((kind, body, next)) = boxed(&mut walk, at, end)? {
         match &kind {
@@ -366,6 +363,9 @@ fn avif_frames(file: &mut (impl Read + Seek)) -> std::result::Result<u32, Not> {
     };
     if size.is_some_and(too_large) {
         return Err(Not::TooLarge);
+    }
+    if !matches!(&major, b"avif" | b"avis" | b"mif1" | b"msf1") {
+        return Ok(1);
     }
     let samples = match moov {
         Some(moov) if &major != b"avif" => samples(&mut walk, moov)?, // libavif takes the track
@@ -2313,7 +2313,7 @@ mod tests {
 
     #[test]
     fn an_avif_is_measured_by_its_container_before_it_is_decoded() {
-        // rows S18, N7: Pillow 13 measures an AVIF by the size its container declares, the primary item's ispe property, before any picture is decoded (AvifImagePlugin, libavif's parse): tests/golden/picture-quarters.avif declaring 15000 x 15000 px is too large to open and identifies (lib/ascii_image.py:76, :95 at tag python-final; seen 2026-11-15, Pillow 13.0.0); the decoder learns a size only from the picture dav1d decodes whole, here 16 x 8 px; N7: one whose major brand Pillow does not take (AvifImagePlugin _accept: avif, avis, mif1, msf1), heic or isom before the AVIF brands, is the built-in decoder's to tell: a still of its 16 x 8 px, where Pillow gave no picture (seen 2026-11-16, Pillow 13.0.0: `cannot identify image file`); a property of 15000 x 15000 px that no item takes is not measured, a still of 16 x 8 px to Pillow too, nor an ispe of the primary item cut short before its sides, which libavif and mp4parse refuse
+        // rows S18, N7: Pillow 13 measures an AVIF by the size its container declares, the primary item's ispe property, before any picture is decoded (AvifImagePlugin, libavif's parse): tests/golden/picture-quarters.avif declaring 15000 x 15000 px is too large to open and identifies (lib/ascii_image.py:76, :95 at tag python-final; seen 2026-11-15, Pillow 13.0.0); the decoder learns a size only from the picture dav1d decodes whole, here 16 x 8 px; N7: a within-limit one whose major brand Pillow does not take (AvifImagePlugin _accept: avif, avis, mif1, msf1), heic or isom before the AVIF brands, is the built-in decoder's still of 16 x 8 px, where Pillow gave no picture (seen 2026-11-16, Pillow 13.0.0: `cannot identify image file`), while its declared size over the limit is refused before decoding too; a property of 15000 x 15000 px that no item takes is not measured, a still of 16 x 8 px to Pillow too, nor an ispe of the primary item cut short before its sides, which libavif and mp4parse refuse
         let dir = Dir::new("avif_extent");
         let avif = quarters_avif(15000, 15000);
         let file = dir.file("big.avif", &avif);
@@ -2338,10 +2338,21 @@ mod tests {
         let short = dir.file("short.avif", short);
         assert_eq!((kind(&short), identifies(&short)), ("no image", false));
         for brand in [b"heic", b"isom"] {
+            let mut small = quarters.clone();
+            small[8..12].copy_from_slice(brand);
+            let file = dir.file("small-other.avif", small);
+            assert_eq!(still(&file).pic.size(), (16, 8), "{brand:?}");
+            assert!(identifies(&file));
+            assert!(matches!(original_png(&file, 0), Ok((_, (16, 8)))));
             let mut other = avif.clone();
             other[8..12].copy_from_slice(brand);
             let file = dir.file("other.avif", other);
-            assert_eq!(still(&file).pic.size(), (16, 8), "{brand:?}");
+            assert_eq!(
+                (kind(&file), identifies(&file)),
+                ("too large", true),
+                "{brand:?}"
+            );
+            assert!(matches!(original_png(&file, 0), Err(NoCopy::TooLarge)));
         }
     }
 
