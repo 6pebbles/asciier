@@ -830,14 +830,13 @@ impl Mpv {
                 self.start_seek(&args, true);
             }
             Op::BackStep => self.start_seek(&["frame-back-step".into()], false),
-            Op::Back => self.back_step(),
             // a picture's frame is its last, and its end never comes: mpv's step plays on, waiting for a frame after it, and holds every request behind it; as on a clip's last frame, the step only pauses
             Op::Step if self.still => {
                 self.pausing += 1;
                 self.put_pause(true);
             }
             // the position ran on in the last look with no frame handed over and none let go, which the picture's end and frames mpv let go and reports a look later both give: the step waits for the next look, which tells; taken for one mid-clip, it sought past the end and put the sound back there
-            Op::Step
+            op @ (Op::Step | Op::Back)
                 if !self.paused
                     && self.pausing == 0
                     && !self.tail
@@ -845,8 +844,9 @@ impl Mpv {
                     && self.on_screen.is_some() =>
             {
                 self.looks = true;
-                self.held.push_front(Op::Step);
+                self.held.push_front(op);
             }
+            Op::Back => self.back_step(),
             // playing, mpv steps from the frame it holds, which a caller drawing late is frames past: the clip pauses and the frame after the one drawn shows; past the picture's end, the sound playing on, there is none, and mpv's step only pauses
             Op::Step
                 if !self.paused
@@ -3427,6 +3427,32 @@ pub(crate) mod tests {
         assert!(
             paused && on.0 == Some(49) && on.1 >= sound - 0.001 && named && back,
             "the sound at {sound}, `.` paused {paused} on {on:?}, `s` took {taken:?}, `,` on {:?} at {}",
+            stage.shown.last(),
+            stage.time
+        );
+    }
+
+    #[test]
+    fn a_back_step_as_the_position_first_runs_on_shows_the_frame_before() {
+        // rows P15, N2, N21: `,` over the last frame shows the frame before it, even in the one look in which the sound's position first runs on with no frame handed over or let go; taking that look for one mid-clip let mpv count back from the sound's position and show the last frame again (round 8 review F6: frame 49 at 2.07 to 2.10 s instead of frame 48 at 1.92).
+        let mut stage = Stage::new();
+        stage.clip(2.0, 6.0);
+        stage.mpv.seek(&["seek", "1.7", "absolute+exact"]);
+        assert!(stage.reach(43, 1.72, 10.0));
+        stage.mpv.pause(false);
+        assert!(stage.watch(5.0, |stage| stage.shown.last() == Some(&49)));
+        // A late caller is the condition under test; wait past the frame's time before its next look.
+        std::thread::sleep(Duration::from_millis(300));
+        let look = Instant::now();
+        while !stage.mpv.runs && look.elapsed() < Duration::from_secs(1) {
+            stage.watch(0.0, |_| true);
+        }
+        assert!(stage.mpv.runs && !stage.mpv.tail);
+        stage.mpv.step(false);
+        assert!(idle(&mut stage, 5.0), "under way {:?}", stage.mpv.busy);
+        assert!(
+            stage.shown.last() == Some(&48) && near(stage.time, 1.92, 0.001),
+            "on {:?} at {}",
             stage.shown.last(),
             stage.time
         );
