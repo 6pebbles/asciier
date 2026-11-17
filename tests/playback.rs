@@ -636,7 +636,7 @@ fn frame_steps_move_one_frame_and_pause() {
         .filter(|(_, _, row)| row.starts_with("> "))
         .collect();
     let on = playing.last().unwrap().1;
-    // the accepted limit (owner 2026-11-13 15:40, its first): a viewer that takes over 200 ms for a frame, or frames mpv drops late, leave the time of the frame on screen unknown, and `.` can land a few frames past it (the stress run: 4 past at load 49); that shows in the last two frames drawn, over 200 ms apart or frames left out between them, and lets `.` go past by the frames mpv played meanwhile
+    // the accepted limit (owner 2026-11-13 15:40, its first): a viewer that takes over 200 ms for a frame, or frames mpv drops late, leave the time of the frame on screen unknown, and `.` can land a few frames past it (the stress run: 4 past at load 49); that shows in the last two frames drawn, over 200 ms apart or frames left out between them, and lets `.` go past by the frames mpv played meanwhile; with that sign alone it may also only pause on the frame shown (owner 2026-11-16).
     let few = match playing[..] {
         [.., (before, earlier, _), (last, _, _)] => {
             let (apart, skipped) = (*last - *before, on.saturating_sub(*earlier));
@@ -652,7 +652,7 @@ fn frame_steps_move_one_frame_and_pause() {
     // the frame mpv holds then, which `s` takes and the screen comes to (N5: the old viewer's `s` drew a frame anew at its time; run in this harness, `.` sent on frame 25 showed 27 and its `s` took 28, 3 of 3)
     let held = taken(&mut tty, &sandbox);
     assert!(
-        held > on && held <= on + 2 + few,
+        (held > on || held == on && few > 0) && held <= on + 2 + few,
         "frame {on} on screen, {held} after `.` (the last two drawn: {:?})",
         playing[playing.len().saturating_sub(2)..]
             .iter()
