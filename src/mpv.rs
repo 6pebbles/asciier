@@ -3383,7 +3383,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_playing_step_on_a_variable_rate_clip_takes_the_next_frame() {
-        // rows P15, N2: `.` on a playing clip pauses and shows the frame after the one on screen, by a seek 4 ms short of that frame's time as the frame rate gives it; a seek landing at its target can be past the picture's end, where the position is the sound's, or a frame of its own that sits there, which mpv's step then tells apart; frames 44, 32 and 44 ms apart here (25 a second on average): from a frame before a 32 ms gap the target falls on the next frame's time, and mpv's step moved on from it (the review's probe: `.` on frame 34 ended on 36, 3 of 3); `,` then shows the frame `.` left; every frame drawn is marked shown, as the viewer does, and the time of the frame on screen is put right only where the code's is off its own, the accepted limit's sign (a playing `.` a few frames past, owner 2026-11-13): under load mpv's position given with a frame was the next one's (the stress run: 9 of 22 traced rounds at load 42 to 77 ended a frame on); the rounds put right are counted
+        // rows P15, N2: `.` on a playing clip pauses and shows the frame after the one on screen, by a seek 4 ms short of that frame's time as the frame rate gives it; a seek landing at its target can be past the picture's end, where the position is the sound's, or a frame of its own that sits there, which mpv's step then tells apart; frames 44, 32 and 44 ms apart here (25 a second on average): from a frame before a 32 ms gap the target falls on the next frame's time, and mpv's step moved on from it (the review's probe: `.` on frame 34 ended on 36, 3 of 3); `,` then shows the frame `.` left; every frame drawn is marked shown, as the viewer does, and the time of the frame on screen is put right only where the code's is off its own, the accepted limit's sign (a playing `.` a few frames past, owner 2026-11-13): under load mpv's position given with a frame was the next one's (the stress run: 9 of 22 traced rounds at load 42 to 77 ended a frame on); the rounds put right are counted; an incorrect time without frames left out between the last two draws fails the test, instead of being taken for the limit's sign.
         let mut stage = Stage::new();
         let file = stage.file("vfr.mp4");
         let times = "(floor(N/3)*0.12+if(eq(mod(N\\,3)\\,1)\\,0.044\\,if(eq(mod(N\\,3)\\,2)\\,0.076\\,0)))/TB";
@@ -3414,6 +3414,7 @@ pub(crate) mod tests {
                 for event in stage.mpv.events() {
                     match event {
                         Event::Frame => {
+                            let before = stage.shown.last().copied();
                             stage.draw();
                             stage.mpv.shown();
                             let on = *stage.shown.last().unwrap();
@@ -3422,6 +3423,9 @@ pub(crate) mod tests {
                                 let pattern = [0.0, 0.044, 0.076][on % 3];
                                 let own = (on / 3) as f64 * 0.12 + pattern;
                                 if !stage.mpv.on_screen.is_some_and(|at| near(at, own, 0.005)) {
+                                    if !before.is_some_and(|before| on > before + 1) {
+                                        wrong.push(format!("round {round}: consecutive frames {before:?}, {on}, frame time {:?} instead of {own}", stage.mpv.on_screen));
+                                    }
                                     stage.mpv.on_screen = Some(own);
                                     put += 1;
                                 }
