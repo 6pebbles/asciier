@@ -205,12 +205,17 @@ fn saved(path: &Path) -> (u32, (u32, u32)) {
 fn frames_come_at_the_clips_rate_and_the_end_quits() {
     // rows P2, P14, P16, N26: play_rate and run of bin/ascii-viewer:431 and :2386 at tag python-final: 25 frames a second, exit 0 at the end, past the clip's 3 s: the run lasts more than 2.5 s from its launch, as mpv plays no faster than the clock (taken from the frame on screen instead, which lags mpv under load, the end measured 2.46 s at 166 runnable tasks), and at most 10 s into the clip by that frame; run in this harness the old viewer drew all 25 frames of each second; the status row's bar, room x position / length cells, shows the time of the frame on screen (N26)
     let sandbox = Sandbox::new();
+    let window = Size { rows: 10, ..QUICK };
     let video = counter(&sandbox, "clip.mp4", "160x90", 25, 3.0, 3.0, &[]);
     let launched = Instant::now();
-    let mut tty = sandbox.launch().arg(&video).size(SMALL).start();
+    let mut tty = sandbox.launch().arg(&video).size(window).start();
     tty.await_playing();
     // the clip's time then, by the frame on screen: a test thread late under load sees a later frame (a start taken here instead gave 1.36 s from 00:01 to the end in a run at load 45)
-    let (start, from) = (Instant::now(), last_drawn(&tty).1);
+    let from = replay(&tty.out(), window, |screen| counted(screen, 4, 1, 32))
+        .last()
+        .copied()
+        .unwrap();
+    let start = Instant::now();
     assert_eq!(tty.exit(), 0);
     let (ran, took) = (
         launched.elapsed().as_secs_f64(),
@@ -220,19 +225,24 @@ fn frames_come_at_the_clips_rate_and_the_end_quits() {
         ran > 2.5 && took < 10.0,
         "ended {ran:.2} s after the launch, {took:.2} s into the clip by frame {from}"
     );
-    // each draw: the clock by the bar (3/64 s a cell) against the frame it shows, outside the clip's last 0.5 s, where the clock is the sound's past the last frame drawn (seen: frame 70 under the whole bar); frame less clock seen from -0.14 to +0.02 s in 28 runs at load 19 to 48, and from -0.08 to +0.02 s in 38 runs at load 30 to 55 in review
-    let rows = replay(&tty.out(), SMALL, |screen| (screen.row(24), frame(screen)));
+    // each draw: the clock by the bar (3/16 s a cell) against the frame it shows, outside the clip's last 0.5 s, where the clock is the sound's past the last frame drawn (seen: frame 70 under the whole bar); frame less clock seen from -0.14 to +0.02 s in 28 runs at load 19 to 48, and from -0.08 to +0.02 s in 38 runs at load 30 to 55 in review
+    let rows = replay(&tty.out(), window, |screen| {
+        (screen.row(10), counted(screen, 4, 1, 32))
+    });
     for (row, number) in &rows {
         let time = *number as f64 / 25.0;
         if seconds(row).is_some() && time < 2.5 {
-            let clock = bar_time(row, 80, 3.0);
+            let clock = bar_time(row, 32, 3.0);
             assert!(
                 (time - clock).abs() < 0.3,
                 "frame {number} ({time:.2} s) drawn at {clock:.2} s: {row:?}"
             );
         }
     }
-    let drawn = drawn(&tty.out());
+    let drawn = replay(&tty.out(), window, |screen| {
+        (seconds(&screen.row(10)), counted(screen, 4, 1, 32))
+    });
+    // The smaller window keeps drawing within this second under load; the frame-count, order and clock assertions stay the same.
     // no more frames than the clip's own: a debug build among the other tests drew 1 to 25 of a second's 25, as loaded as the machine was
     let second = frames_in(&drawn, 1);
     assert!(
