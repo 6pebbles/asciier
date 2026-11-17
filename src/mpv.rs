@@ -2803,7 +2803,7 @@ pub(crate) mod tests {
         // a seek leaves the end
         let events = stage.until_at(&["seek", "1.88", "absolute+exact"], 47, 1.88);
         assert!(events.contains(&Event::Ended(false)), "{events:?}");
-        // row P15: a step onto the last frame, and one on it, only pause
+        // P15's raw mpv mechanism: a step onto the last frame, and one on it, only pause
         let events = [
             stage.after(&["frame-step"]),
             stage.after(&["frame-step"]),
