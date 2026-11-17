@@ -1123,6 +1123,11 @@ impl Mpv {
         {
             events.push(Event::Shape { w, h, turn });
         }
+        // A step can settle before mpv reports its end and final sound position; anchor that last frame once both the end and pause arrive. A play or seek has cleared `back`, so a natural end keeps its sound clock.
+        if self.at_end && self.paused && self.busy.is_none() && self.back.is_some() && !self.tail {
+            self.tail = true;
+            self.request(Op::Anchor);
+        }
         // mpv flags the end when the last sound is handed to the device, and pauses when it has played
         let ended = self.at_end && self.paused;
         if ended != std::mem::replace(&mut self.ended, ended) {
@@ -2901,6 +2906,62 @@ pub(crate) mod tests {
             }
         }
         assert!(wrong.is_empty(), "a step back: {wrong:#?}");
+    }
+
+    #[test]
+    fn an_end_reported_after_a_step_settles_holds_the_last_frames_time() {
+        // rows P15, N2, N21: a step onto the last frame holds that frame at its own time, and `,` then shows the frame before; mpv can answer the step's position before it reports eof-reached, the sound's final position and its pause (round 8 stress T1, round 7 T17: frame 49 at 2.3 s instead of 1.96); hand those reports in that order, after a step settled at 1.96017 s.
+        let mut stage = Stage::new();
+        stage.clip(2.0, 2.3);
+        stage.mpv.seek(&["seek", "1.96", "absolute+exact"]);
+        assert!(stage.reach(49, 1.96, 10.0) && idle(&mut stage, 10.0));
+        stage.settle();
+        stage.mpv.at_end = false;
+        stage.mpv.fresh = true;
+        stage.mpv.busy = Some(Busy::Step {
+            mark: stage.mpv.marks,
+            op: stage.mpv.ops,
+            asked: true,
+            running: true,
+            settling: true,
+            from: 1.92,
+            rested: true,
+            checks: None,
+        });
+        let settled = stage.mpv.settled(Some(1.96017));
+        stage.waiting.extend(settled);
+        let (mut ended, mut time, mut paused) = (1, 2.3, 1);
+        for property in [
+            Property {
+                name: c"eof-reached".as_ptr(),
+                format: FLAG,
+                data: &mut ended as *mut c_int as *const c_void,
+            },
+            Property {
+                name: c"time-pos".as_ptr(),
+                format: DOUBLE,
+                data: &mut time as *mut f64 as *const c_void,
+            },
+            Property {
+                name: c"pause".as_ptr(),
+                format: FLAG,
+                data: &mut paused as *mut c_int as *const c_void,
+            },
+        ] {
+            let event = stage.mpv.changed(&property);
+            stage.waiting.extend(event);
+        }
+        stage.pump(0.01, |_| false);
+        let done = idle(&mut stage, 5.0);
+        assert!(
+            done && near(stage.time, 1.96, 0.001),
+            "at {} on {:?}, under way {:?}",
+            stage.time,
+            stage.shown.last(),
+            stage.mpv.busy
+        );
+        stage.mpv.step(false);
+        assert!(idle(&mut stage, 5.0) && stage.reach(48, 1.92, 2.0));
     }
 
     #[test]
