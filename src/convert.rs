@@ -680,16 +680,42 @@ fn gcd(a: u64, b: u64) -> u64 {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 
-/// The first video stream's average rate as a reduced fraction (25 if unknown) and the frames it makes at that rate (0: unknown).
+/// The input stream mapped to the sole PPM output, as in the frame grab and decoder.
+fn selected_video(source: &Path) -> Result<u64> {
+    let report = ffmpeg()
+        .args(["-hide_banner", "-nostats", "-v", "info", "-i"])
+        .arg(source)
+        .args(["-frames:v", "0", "-f", "image2pipe", "-c:v", "ppm", "-"])
+        .env("AV_LOG_FORCE_NOCOLOR", "1")
+        .output()
+        .map_err(|e| Error(format!("cannot run ffmpeg: {e}")))?;
+    let log = String::from_utf8_lossy(&report.stderr);
+    let index = log
+        .lines()
+        .skip_while(|&line| line != "Stream mapping:")
+        .nth(1)
+        .and_then(|line| {
+            let line = line.trim_start().strip_prefix("Stream #0:")?;
+            line.split_once(" -> #0:0 ")?.0.parse().ok()
+        });
+    index.ok_or_else(|| {
+        Error(format!(
+            "cannot identify the selected video in {}",
+            source.display()
+        ))
+    })
+}
+
+/// The selected video stream's average rate as a reduced fraction (25 if unknown) and the frames it makes at that rate (0: unknown).
 fn rate_and_total(source: &Path) -> Result<((u64, u64), u64)> {
     let probe = match Command::new("ffprobe")
         .args([
             "-v",
             "error",
             "-select_streams",
-            "v:0",
+            "v",
             "-show_entries",
-            "stream=avg_frame_rate,nb_frames,duration:format=duration",
+            "stream=index,avg_frame_rate,nb_frames,duration:format=duration",
             "-of",
             "json",
         ])
@@ -702,7 +728,17 @@ fn rate_and_total(source: &Path) -> Result<((u64, u64), u64)> {
         Err(e) => err!("cannot run ffprobe: {e}"),
     };
     let info: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap_or_default();
-    let stream = &info["streams"][0];
+    let streams = &info["streams"];
+    let stream = match streams.as_array() {
+        Some(videos) if videos.len() > 1 => {
+            let index = selected_video(source)?;
+            videos
+                .iter()
+                .find(|video| video["index"].as_u64() == Some(index))
+                .ok_or_else(|| Error(format!("no probe data for video stream {index}")))?
+        }
+        _ => &streams[0],
+    };
     let rate = stream["avg_frame_rate"].as_str().and_then(|rate| {
         let (num, den) = rate.split_once('/').unwrap_or((rate, "1"));
         let (num, den) = (num.parse::<u64>().ok()?, den.parse::<u64>().ok()?);

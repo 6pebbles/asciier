@@ -85,7 +85,7 @@ esac
 /// ffprobe first on PATH: the converter's probe of a video answered with $PROBED (JSON) when it is set, as ffprobe answers for what it does not know (keys left out); all else asked of REAL, the real one.
 const FFPROBE: &str = r#"#!/bin/sh
 case " $* " in
-*" stream=avg_frame_rate,nb_frames,duration:format=duration "*)
+*"avg_frame_rate,nb_frames,duration:format=duration "*)
     if [ -n "$PROBED" ]; then printf '%s\n' "$PROBED"; exit 0; fi ;;
 esac
 exec REAL "$@"
@@ -2106,6 +2106,52 @@ fn a_picture_is_written_as_8_bit_rgb_png() {
         );
         assert!(!sandbox.path(out).exists());
     }
+}
+
+#[test]
+fn video_timing_follows_the_stream_ffmpeg_selected_to_draw() {
+    let sandbox = Sandbox::new();
+    let input = sandbox.path("tracks.mp4");
+    ffmpeg(
+        &sandbox,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:s=32x16:r=2:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=lime:s=96x48:r=8:d=4",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=16000:cl=mono:d=0.25",
+            "-map",
+            "2:a",
+            "-map",
+            "0:v",
+            "-map",
+            "1:v",
+            "-disposition:v:0",
+            "0",
+            "-disposition:v:1",
+            "default",
+            "-c:a",
+            "aac",
+            "-c:v",
+            "libx264",
+            input.to_str().unwrap(),
+        ],
+    );
+    let result = convert(&sandbox, &["-W", "192", "-H", "96", "tracks.mp4"]);
+    assert_eq!(result.code, Some(0), "{result:?}");
+    let out = sandbox.path("tracks-ascii.mp4");
+    assert_eq!(hue(&first_frame(&sandbox, &out), 0), "green");
+    assert_eq!(entry(&sandbox, &out, "v:0", "avg_frame_rate"), "8/1");
+    assert_eq!(frames_in(&sandbox, &out), 32);
+    assert_eq!(length(&sandbox, &out, "v:0"), 4.0);
+    assert!(result.stderr.contains("32/32 frames"), "{result:?}");
 }
 
 #[test]
