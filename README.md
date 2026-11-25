@@ -1,26 +1,59 @@
 # asciier
 
-Terminal viewer and converter: video, audio and images as ASCII art in the kitty theme's colours.
+View video and images as ASCII art in your kitty theme’s colours, play audio, and export PNG images or MP4 video.
 
-![Asciier playing a ringed planet in GitHub Dark, cropping a paused frame, choosing a theme and exporting a PNG](docs/demo.webp)
+![Asciier playing a ringed planet in GitHub Dark, shrinking a square crop and exporting the frame in Gruvbox Dark](docs/demo.webp)
 
-Press `Space` to pause, `.` to step one frame and `r` to open Render. In **Crop**, use `-` and `+` to resize the window, the arrow keys to move it and `Enter` to return. In **Theme**, move through the list to preview colours. Press `Enter` to choose a theme and `s` to export the PNG.
+## Installation
 
-[Download the demo (MP4)](https://github.com/6pebbles/asciier/releases/download/v0.1.1/asciier-render.mp4) · [Exported frame (PNG)](https://github.com/6pebbles/asciier/releases/download/v0.1.1/orbit-frame.png)
+| Linux distribution | Package or native development packages | Verification |
+| --- | --- | --- |
+| Arch Linux (x86_64) | Run `makepkg -si` from [packaging/aur](packaging/aur). | Package built and tested |
+| Debian 13 / Ubuntu 26.04 LTS | Build from source with `libmpv-dev libchafa-dev libfreetype-dev libdbus-1-dev libdav1d-dev`. | Build untested |
+| Fedora 44 | Build from source with `mpv-devel chafa-devel freetype-devel dbus-devel libdav1d-devel`. | Build untested |
 
+### Build from source
+
+Install Rust 1.88 or newer with Cargo, a C toolchain and `pkg-config`. The build links to libmpv, Chafa 1.10+, FreeType 2.12.1+, D-Bus 1.6+ and dav1d 1.3+. On Debian 13, use a newer Rust toolchain than the default `rustc` 1.85.
+
+Install from the repository root.
+
+```sh
+cargo install --path . --root ~/.local --locked
 ```
-asciier FILE                      view
-asciier convert [options] INPUT   write PNG or MP4
+
+## Runtime dependencies
+
+- A **kitty colour scheme** at `~/.config/kitty/current-theme.conf` defines `foreground`, `background` and `color0` through `color15`.
+- **Fontconfig** locates the JetBrainsMono Nerd Font Mono typeface with `fc-match`.
+- **FFmpeg** supplies `ffmpeg` and `ffprobe` for video conversion. MP4 export uses H.264 through VAAPI when available, or `libx264`, and AAC for audio.
+
+### Optional integrations
+
+| Component | Feature |
+| --- | --- |
+| kitty graphics protocol | Original still image (`v`), render-page preview and visual crop editor |
+| kitty theme collection (`~/.cache/kitty/kitty-themes.zip`) | Dark themes in the render-page picker |
+| `kitten` | Ligature control in kitty, lookup of uncached themes by name and inline preview after `convert --at` |
+| `wl-copy` (wl-clipboard) | Copy a still image to the Wayland clipboard (`y`) |
+| `hyprctl` (Hyprland) | Toggle fullscreen (`f`) and use the monitor size as an export preset |
+| `scope` | Oscilloscope during audio-only playback |
+
+## Usage
+
+```sh
+asciier FILE
+asciier convert [options] INPUT
 ```
 
-Keys: F1. Options: `asciier convert --help`.
+Press `Space` to pause, `.` to step one frame and `r` to open Render. In **Crop**, use `[` and `]` to choose an aspect ratio, `-` and `+` to resize the window, and the arrow keys to move it. Press `Enter` to return. In **Theme**, move through the list to preview colours, press `Enter` to select one, then `s` to export the PNG.
 
-On Arch Linux, run `makepkg -si` from [packaging/aur](packaging/aur).
+Press `F1` for viewer controls or run `asciier convert --help` for converter options.
 
-Build: `cargo install --path . --root ~/.local --locked`. Test: `cargo test`.
+## Tests
 
-Needs: libmpv, libchafa, FreeType, libdbus, libdav1d; the font JetBrainsMono Nerd Font Mono, found by `fc-match`; a kitty theme at `~/.config/kitty/current-theme.conf`; `ffmpeg` and `ffprobe` to convert video.
+Run `cargo test --locked`. The full suite also uses `playerctl` and `busctl`.
 
-Uses when present: kitty graphics for the image itself (`v`), `kitten` (ligatures off while viewing, the `--at` preview), `wl-copy` (`y`), `hyprctl` (`f`), a `scope` program that draws audio-only files.
+## License
 
-License: GPL-3.0-or-later.
+[GPL-3.0-or-later](LICENSE).
