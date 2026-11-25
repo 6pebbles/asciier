@@ -18,12 +18,14 @@ const GREY: Rgb = [128, 128, 128];
 /// An SVG part rendered in the background: the view it was asked for and its pixels (`None`: resvg failed).
 pub struct Part {
     pub key: String,
-    pub image: Option<image::RgbaImage>,
+    pub image: Option<Pic>,
 }
 
 /// The still on screen, its view, its folder, and what was trashed in this run.
 pub struct Gallery {
     path: PathBuf,
+    /// Identifies this load, even when a different picture opens at the same path.
+    generation: u64,
     /// `None` once the folder's last image is gone.
     pic: Option<Pic>,
     svg: Option<Arc<Svg>>,
@@ -93,6 +95,7 @@ impl Gallery {
     pub fn new(path: PathBuf, still: Still, image: bool) -> Gallery {
         let mut gallery = Gallery {
             path: PathBuf::new(),
+            generation: 0,
             pic: None,
             svg: None,
             logical: (1, 1),
@@ -116,6 +119,7 @@ impl Gallery {
 
     /// Make `still` the picture on screen: unturned, at the fit.
     fn show(&mut self, path: PathBuf, still: Still) {
+        self.generation += 1;
         self.logical = still.pic.size();
         (self.path, self.pic, self.svg) = (path, Some(still.pic), still.svg);
         (self.rotation, self.turned, self.confirming, self.pending) = (0, None, false, None);
@@ -236,13 +240,11 @@ impl Gallery {
     }
 
     /// An SVG drawn larger than its first raster: the box rasterized alone at `size`, once the background render has it; till then `None`, and the raster shows enlarged.
-    fn part(&mut self, bbox: [f64; 4], size: (u32, u32), ui: &Ui) -> Option<&image::RgbaImage> {
+    fn part(&mut self, bbox: [f64; 4], size: (u32, u32), ui: &Ui) -> Option<&Pic> {
         let svg = self.svg.clone()?;
         let key = format!(
             "{}|{}|{:.2?}|{size:?}",
-            self.path.display(),
-            self.rotation,
-            bbox
+            self.generation, self.rotation, bbox
         );
         if self.detail.as_ref().is_some_and(|part| part.key == key) {
             return self.detail.as_ref().and_then(|part| part.image.as_ref());
@@ -254,7 +256,7 @@ impl Gallery {
             std::thread::Builder::new()
                 .name("svg part".into())
                 .spawn(move || {
-                    let image = svg.part(logical, rotation, bbox, size).ok();
+                    let image = svg.part(logical, rotation, bbox, size).ok().map(Pic::Rgba);
                     if jobs.send(Job::Part(Part { key, image })).is_ok() {
                         term::wake(Wake::Job);
                     }
@@ -284,19 +286,11 @@ impl Gallery {
         if scale > 1.0
             && let Some(part) = self.part(bbox, size, ui)
         {
-            let whole = [0.0, 0.0, part.width() as f64, part.height() as f64];
-            return picture::cut(&Pic::Rgba(part.clone()), whole, size, false, ground);
+            let (w, h) = part.size();
+            return picture::cut(part, [0.0, 0.0, w as f64, h as f64], size, false, ground);
         }
         // the picture may be a first raster of another size than the logical one only by rounding: boxes are in its px
-        let picture = self.turned().clone();
-        let (w, h) = picture.size();
-        let clipped = [
-            bbox[0].max(0.0),
-            bbox[1].max(0.0),
-            bbox[2].min(w as f64),
-            bbox[3].min(h as f64),
-        ];
-        picture::cut(&picture, clipped, size, scale > 1.0, ground)
+        picture::cut(self.turned(), bbox, size, scale > 1.0, ground)
     }
 
     /// The screen without its status row.
@@ -309,14 +303,14 @@ impl Gallery {
         }
         let bbox = self.view(ui, self.steps(ui));
         let (bw, bh) = (bbox[2] - bbox[0], bbox[3] - bbox[1]);
-        let what = |size: (u32, u32), this: &Gallery| {
+        let what = |size: (u32, u32)| {
             format!(
                 "{}|{}|{:.2?}|{size:?}|{}|{}",
-                this.path.display(),
-                this.rotation,
+                self.generation,
+                self.rotation,
                 bbox,
                 ui.epoch,
-                this.detail.as_ref().map_or("", |p| &p.key)
+                self.detail.as_ref().map_or("", |p| &p.key)
             )
         };
         if self.image {
@@ -329,12 +323,12 @@ impl Gallery {
                 ((bw * scale).round_ties_even() as u32).max(1),
                 ((bh * scale).round_ties_even() as u32).max(1),
             );
-            let key = what(size, self);
+            let key = what(size);
             if !clear && self.placed.as_ref() == Some(&key) {
                 return erase_row; // the image is there already: the status row alone
             }
             let shown = self.cut(bbox, size, scale, Ground::Checker, ui);
-            self.placed = Some(what(size, self));
+            self.placed = Some(key);
             let place = ui.transfer.place(
                 size.0,
                 size.1,
@@ -358,10 +352,9 @@ impl Gallery {
         );
         let size = (cw * cells::CELL_PX, ch * cells::CELL_PX);
         let scale = (size.0 as f64 / bw).min(size.1 as f64 / bh);
-        let key = format!("{}|{:?}|{:?}", what(size, self), ui.look, geometry);
+        let key = format!("{}|{:?}|{:?}", what(size), ui.look, geometry);
         if self.ascii.as_ref().is_none_or(|(shown, _)| *shown != key) {
             let mut shown = self.cut(bbox, size, scale, Ground::Colour(GREY), ui);
-            let key = format!("{}|{:?}|{:?}", what(size, self), ui.look, geometry);
             let rows = match ui.ascii(&mut shown, size.0, size.1) {
                 Ok(rows) => rows,
                 Err(e) => {

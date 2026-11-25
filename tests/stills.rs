@@ -673,6 +673,30 @@ fn v_switches_between_the_image_and_its_ascii() {
 }
 
 #[test]
+fn reopening_a_replaced_image_draws_its_new_pixels() {
+    let sandbox = Sandbox::new();
+    let path = sandbox.folder("pics").join("a.png");
+    let image = halves(80, 40);
+    save(&image, &path);
+    let mut tty = drawn(&sandbox, &path, SMALL);
+    let original = written_rows(&tty.out());
+    save(&image::imageops::flip_horizontal(&image), &path);
+    let mut fresh = drawn(&sandbox, &path, SMALL);
+    let expected = written_rows(&fresh.out());
+    quit(&mut fresh);
+    assert!(original != expected);
+
+    let from = says(&mut tty, b"l", "a.png  1/1");
+    let end = tty.expect(from, b"\x1b[?2026l");
+    let reloaded = written_rows(&tty.out()[from..end]);
+    quit(&mut tty);
+    assert!(
+        reloaded == expected,
+        "reopening reused the old picture rows"
+    );
+}
+
+#[test]
 fn h_and_l_step_through_the_folders_images_by_name() {
     // rows S7, S18, N7: sibling_images, step and settle_step of bin/ascii-viewer:271, :1888 and :1900 at tag python-final (tests/test_viewer.py:459 and :511): the files whose lower-cased suffix the decoders take, or .svg, by lower-cased name, wrapping, one that does not open passed over (also one whose header identifies, its pixels cut short), toast `<name>  <place>/<count>`; N7: a PCX file, which only mpv decodes, is no entry (the old listing held it: `B.png  2/7`); one over 179 megapixels is passed over with `; <name> too large`
     let sandbox = Sandbox::new();

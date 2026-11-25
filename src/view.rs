@@ -392,19 +392,24 @@ impl Viewer {
         }
     }
 
+    /// The deadline for an owed frame while the video is visible.
+    fn frame_deadline(&self) -> Option<Instant> {
+        match &self.mode {
+            Mode::Video(p) if p.owed && self.help.is_none() && self.page.is_none() => {
+                Some(p.drawn + FRAME_GAP)
+            }
+            _ => None,
+        }
+    }
+
     /// How long the loop may sleep: until the toast ends, or the owed frame is due.
     fn timeout(&self) -> Option<Duration> {
-        let now = Instant::now();
-        let toast = self
-            .ui
-            .toast
-            .as_ref()
-            .map(|(_, until)| until.saturating_duration_since(now));
-        let owed = match &self.mode {
-            Mode::Video(p) if p.owed => Some((p.drawn + FRAME_GAP).saturating_duration_since(now)),
-            _ => None,
-        };
-        [toast, owed].into_iter().flatten().min()
+        let toast = self.ui.toast.as_ref().map(|(_, until)| *until);
+        [toast, self.frame_deadline()]
+            .into_iter()
+            .flatten()
+            .min()
+            .map(|until| until.saturating_duration_since(Instant::now()))
     }
 
     /// Things that happen by time: the toast's end, the frame the cap owes.
@@ -418,11 +423,9 @@ impl Viewer {
             self.ui.toast = None;
             self.ui.redraw();
         }
-        let live = self.help.is_none() && self.page.is_none();
-        if let Mode::Video(p) = &mut self.mode
-            && p.owed
-            && p.drawn.elapsed() >= FRAME_GAP
-            && live
+        if self
+            .frame_deadline()
+            .is_some_and(|due| Instant::now() >= due)
         {
             self.frame();
         }
@@ -1500,7 +1503,7 @@ mod tests {
             playing: true,
             shape: None,
             drawn: Instant::now() - FRAME_GAP,
-            owed: false,
+            owed: true,
             rows: Vec::new(),
             grabs: VecDeque::new(),
         };
@@ -1516,6 +1519,7 @@ mod tests {
             results: channel().1,
             quit: false,
         };
+        assert_eq!(viewer.timeout(), None, "a covered frame cannot draw");
         let clock = |viewer: &Viewer| match &viewer.mode {
             Mode::Video(p) => (p.time, p.paused),
             _ => unreachable!("a video"),
