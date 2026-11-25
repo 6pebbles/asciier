@@ -1,6 +1,6 @@
 //! The freedesktop.org trash (spec 1.0): move a file there, put the last one back.
 
-use std::ffi::OsString;
+use std::ffi::{CString, OsString};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write as _};
@@ -122,14 +122,10 @@ fn trash_at(path: &Path, home: &Path, top: Option<&Path>, uid: u32) -> io::Resul
     );
     let name = path.file_name().ok_or(io::ErrorKind::InvalidInput)?;
     let mut n = 0;
-    let (stored, info, mut record) = loop {
+    loop {
         n += 1;
         let mut name = OsString::from_vec(numbered(name.as_bytes(), n));
         let stored = files.join(&name);
-        // a file the trash holds without a .trashinfo
-        if stored.symlink_metadata().is_ok() {
-            continue;
-        }
         name.push(".trashinfo");
         let info = infos.join(name);
         let made = fs::OpenOptions::new()
@@ -137,28 +133,55 @@ fn trash_at(path: &Path, home: &Path, top: Option<&Path>, uid: u32) -> io::Resul
             .create_new(true)
             .mode(0o600)
             .open(&info);
-        match made {
-            Ok(record) => break (stored, info, record),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        let mut record = match made {
+            Ok(record) => record,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
+        };
+        // a rename keeps the inode: the file's own is the stored one's
+        let moved = record
+            .write_all(text.as_bytes())
+            .and_then(|()| path.symlink_metadata())
+            .and_then(|meta| rename_new(path, &stored).map(|()| meta));
+        match moved {
+            Ok(meta) => {
+                return Ok(Trashed {
+                    path: path.to_path_buf(),
+                    stored,
+                    info,
+                    ident: (meta.dev(), meta.ino()),
+                });
+            }
+            Err(error) => {
+                fs::remove_file(info)?;
+                // a file the trash holds without a .trashinfo
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            }
         }
+    }
+}
+
+/// Move a file only if the destination name is still free when the kernel moves it.
+fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+    let from = CString::new(from.as_os_str().as_bytes())?;
+    let to = CString::new(to.as_os_str().as_bytes())?;
+    // Both C strings live through the syscall. Unsupported filesystems leave the source in place.
+    let status = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
     };
-    // a rename keeps the inode: the file's own is the stored one's
-    let moved = record
-        .write_all(text.as_bytes())
-        .and_then(|()| path.symlink_metadata())
-        .and_then(|meta| fs::rename(path, &stored).map(|()| meta));
-    match moved {
-        Ok(meta) => Ok(Trashed {
-            path: path.to_path_buf(),
-            stored,
-            info,
-            ident: (meta.dev(), meta.ino()),
-        }),
-        Err(error) => {
-            let _ = fs::remove_file(info);
-            Err(error)
-        }
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -238,28 +261,29 @@ pub fn untrash(entry: &Trashed) -> Result<(), Refused> {
     untrash_by(entry, |stored, path| fs::hard_link(stored, path))
 }
 
-/// `untrash` with the step that links the stored file to its old path: where `link` cannot (no hard links there), the old path is looked at, then the file moved.
+/// `untrash` with the step that links the stored file to its old path: where `link` cannot (no hard links there), an exclusive rename moves the file.
 fn untrash_by(
     entry: &Trashed,
     link: impl FnOnce(&Path, &Path) -> io::Result<()>,
 ) -> Result<(), Refused> {
-    let found = match entry.stored.symlink_metadata() {
-        Ok(meta) => (meta.dev(), meta.ino()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(Refused::Gone),
-        Err(_) => return Err(Refused::Io),
+    let entry_error = |error: io::Error| match error.kind() {
+        io::ErrorKind::NotFound => Refused::Gone,
+        _ => Refused::Io,
     };
+    let stored = entry.stored.symlink_metadata().map_err(entry_error)?;
     // another file under the name, or one without its record: someone else's
-    if found != entry.ident || entry.info.symlink_metadata().is_err() {
+    if (stored.dev(), stored.ino()) != entry.ident {
         return Err(Refused::Gone);
     }
+    entry.info.symlink_metadata().map_err(entry_error)?;
     match link(&entry.stored, &entry.path) {
         Ok(()) => fs::remove_file(&entry.stored).map_err(|_| Refused::Io)?,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Err(Refused::Exists),
         Err(_) => {
-            if entry.path.symlink_metadata().is_ok() {
-                return Err(Refused::Exists);
-            }
-            fs::rename(&entry.stored, &entry.path).map_err(|_| Refused::Io)?;
+            rename_new(&entry.stored, &entry.path).map_err(|error| match error.kind() {
+                io::ErrorKind::AlreadyExists => Refused::Exists,
+                _ => Refused::Io,
+            })?;
         }
     }
     match fs::remove_file(&entry.info) {
@@ -450,6 +474,18 @@ mod tests {
             fs::read(temp.home().join("files/x.png")).unwrap(),
             b"orphan"
         );
+        assert_eq!(temp.listing("info"), ["x.2.png.trashinfo"]);
+    }
+
+    #[test]
+    fn the_move_refuses_a_name_taken_after_its_selection() {
+        let temp = Temp::new();
+        let src = temp.file("pics", "a.png", b"original");
+        let dest = temp.file("files", "a.png", b"arrived later");
+        let error = rename_new(&src, &dest).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(src).unwrap(), b"original");
+        assert_eq!(fs::read(dest).unwrap(), b"arrived later");
     }
 
     #[test]
@@ -535,6 +571,9 @@ mod tests {
         let no_links = |_: &Path, _: &Path| Err(io::ErrorKind::PermissionDenied.into());
         fs::write(&src, b"newer").unwrap();
         assert!(matches!(untrash_by(&entry, no_links), Err(Refused::Exists)));
+        assert_eq!(fs::read(&src).unwrap(), b"newer");
+        assert_eq!(fs::read(&entry.stored).unwrap(), b"a");
+        assert!(entry.info.is_file());
         fs::remove_file(&src).unwrap();
         untrash_by(&entry, no_links).unwrap();
         assert_eq!(fs::read(&src).unwrap(), b"a");

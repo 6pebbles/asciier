@@ -677,6 +677,27 @@ fn u_says_why_a_file_cannot_go_back() {
 }
 
 #[test]
+fn undo_retries_when_the_trash_record_is_inaccessible() {
+    let sandbox = Sandbox::new();
+    let folder = pics(&sandbox, &[("a.png", 80, 40)]);
+    let file = folder.join("a.png");
+    let mut tty = open(&sandbox, &file, SMALL);
+    says(&mut tty, b"d", "trashed a.png");
+    let info = sandbox.path("data/Trash/info");
+    let moved = sandbox.path("records");
+    fs::rename(&info, &moved).unwrap();
+    fs::write(&info, "temporarily unavailable").unwrap();
+    says(&mut tty, b"u", "restore failed");
+    assert!(!file.exists());
+    fs::remove_file(&info).unwrap();
+    fs::rename(&moved, &info).unwrap();
+    says(&mut tty, b"u", "restored a.png");
+    assert!(file.is_file());
+    tty.send(b"q");
+    assert_eq!(tty.exit(), 0);
+}
+
+#[test]
 fn u_drops_what_the_trash_no_longer_holds() {
     // rows T8, T6: undo_trash and untrash of bin/ascii-viewer:1954 and :389 at tag python-final (tests/test_viewer.py:1671, :1686, :1433): `<name> is no longer in the trash` when its stored file is gone, its record is gone, or the name holds another file (put back elsewhere, the slot taken again); the entry dropped, the ones under it still undoable, the other file left alone; the empty folder's hint follows the stack
     let sandbox = kitty_sandbox();
