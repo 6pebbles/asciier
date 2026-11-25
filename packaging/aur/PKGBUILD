@@ -1,0 +1,36 @@
+pkgname=asciier
+pkgver=0.1.1
+pkgrel=1
+pkgdesc="View media as ASCII art in kitty theme colours and convert it to PNG or MP4"
+arch=('x86_64')
+url='https://github.com/6pebbles/asciier'
+license=('GPL-3.0-or-later')
+depends=('chafa' 'dav1d' 'dbus' 'ffmpeg' 'fontconfig' 'freetype2' 'glibc'
+         'libgcc' 'mpv' 'ttf-jetbrains-mono-nerd')
+makedepends=('cargo')
+checkdepends=('playerctl' 'systemd')
+optdepends=('hyprland: fullscreen control'
+            'kitty: image display, ligature control and theme collection'
+            'wl-clipboard: copy images to the Wayland clipboard')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('0a1d4545504a3dd92a69e010b08f5216300aad7a6ee4d8c69bb1edff3d864420')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --frozen --target-dir target
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    cargo test --frozen --target-dir target
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 target/release/asciier "$pkgdir/usr/bin/asciier"
+}

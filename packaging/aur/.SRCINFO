@@ -1,0 +1,27 @@
+pkgbase = asciier
+	pkgdesc = View media as ASCII art in kitty theme colours and convert it to PNG or MP4
+	pkgver = 0.1.1
+	pkgrel = 1
+	url = https://github.com/6pebbles/asciier
+	arch = x86_64
+	license = GPL-3.0-or-later
+	checkdepends = playerctl
+	checkdepends = systemd
+	makedepends = cargo
+	depends = chafa
+	depends = dav1d
+	depends = dbus
+	depends = ffmpeg
+	depends = fontconfig
+	depends = freetype2
+	depends = glibc
+	depends = libgcc
+	depends = mpv
+	depends = ttf-jetbrains-mono-nerd
+	optdepends = hyprland: fullscreen control
+	optdepends = kitty: image display, ligature control and theme collection
+	optdepends = wl-clipboard: copy images to the Wayland clipboard
+	source = asciier-0.1.1.tar.gz::https://github.com/6pebbles/asciier/archive/refs/tags/v0.1.1.tar.gz
+	sha256sums = 0a1d4545504a3dd92a69e010b08f5216300aad7a6ee4d8c69bb1edff3d864420
+
+pkgname = asciier

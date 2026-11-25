@@ -13,6 +13,8 @@ asciier convert [options] INPUT   write PNG or MP4
 
 Keys: F1. Options: `asciier convert --help`.
 
+On Arch Linux, run `makepkg -si` from [packaging/aur](packaging/aur).
+
 Build: `cargo install --path . --root ~/.local --locked`. Test: `cargo test`.
 
 Needs: libmpv, libchafa, FreeType, libdbus, libdav1d; the font JetBrainsMono Nerd Font Mono, found by `fc-match`; a kitty theme at `~/.config/kitty/current-theme.conf`; `ffmpeg` and `ffprobe` to convert video.
