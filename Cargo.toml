@@ -1,6 +1,6 @@
 [package]
 name = "asciier"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Terminal viewer and converter: video, audio and images as ASCII art in the terminal theme's colours"
