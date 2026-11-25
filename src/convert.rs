@@ -7,9 +7,11 @@ use crate::picture::{self, Opened, Still};
 use crate::theme::{self, Theme};
 use crate::{Error, Result, desktop, err, term};
 use image::RgbImage;
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::os::fd::FromRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -27,7 +29,7 @@ pub enum Fit {
 pub struct Options {
     pub look: Look,
     /// `--theme`: a kitty theme by name, or a file.
-    pub theme: Option<String>,
+    pub theme: Option<OsString>,
     /// `--crop`: X, Y, W, H in percent of the picture.
     pub crop: [f64; 4],
     pub output: Option<PathBuf>,
@@ -53,6 +55,15 @@ impl Default for Options {
             fit: Fit::Contain,
             at: None,
             input: PathBuf::new(),
+        }
+    }
+}
+
+impl Options {
+    fn set_frame_size(&mut self, size: (u32, u32)) {
+        if self.width.is_none() && self.height.is_none() {
+            let (w, h) = web_size(size);
+            (self.width, self.height) = (Some(w), Some(h));
         }
     }
 }
@@ -139,7 +150,7 @@ pub fn main(args: impl Iterator<Item = OsString>) -> u8 {
         if INTERRUPTED.load(Ordering::SeqCst) {
             return Err(Stop::Interrupted(None));
         }
-        println!("{}", out.display());
+        print_path(&out).map_err(Error::from)?;
         if options.at.is_some() && std::io::stdout().is_terminal() && term::kitty::named() {
             desktop::icat(&out);
         }
@@ -164,11 +175,17 @@ pub fn main(args: impl Iterator<Item = OsString>) -> u8 {
         }
         Err(Stop::Interrupted(out)) => {
             if let Some(out) = out {
-                println!("{}", out.display());
+                let _ = print_path(&out);
             }
             die_by_sigint()
         }
     }
+}
+
+fn print_path(out: &Path) -> std::io::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(out.as_os_str().as_bytes())?;
+    stdout.write_all(b"\n")
 }
 
 /// Text to stderr in one write, so that a line a child writes there meanwhile lands between two of the converter's, never inside one, as it can between the pieces one `eprint!` writes apart (stderr is unbuffered).
@@ -367,7 +384,7 @@ pub fn parse(args: impl Iterator<Item = OsString>) -> std::result::Result<Option
         let Ok(value) = parser.value() else {
             return Err((2, format!("argument {name}: expected one argument")));
         };
-        let text = value.to_string_lossy().into_owned();
+        let text = value.to_string_lossy();
         match name {
             "-l/--level" => options.look.level = number(name, &text, look::LEVEL)?,
             "--contrast" => options.look.contrast = number(name, &text, look::CONTRAST)?,
@@ -379,7 +396,7 @@ pub fn parse(args: impl Iterator<Item = OsString>) -> std::result::Result<Option
             "-g/--glyphs" => {
                 options.look.glyphs = choice(name, &text, &Glyphs::ALL.map(|g| (g.name(), g)))?
             }
-            "-t/--theme" => options.theme = Some(text),
+            "-t/--theme" => options.theme = Some(value),
             "--crop" => options.crop = crop_spec(&text)?,
             "-o/--output" => options.output = Some(PathBuf::from(value)),
             "-c/--columns" => options.columns = Some(number(name, &text, COLUMNS)?),
@@ -444,7 +461,7 @@ pub fn out_name(source: &Path, at: Option<f64>, video: bool) -> PathBuf {
 /// 1920 px on the long side in the frame's shape, even numbers (row L5).
 pub fn web_size((w, h): (u32, u32)) -> (u32, u32) {
     let short = |long: u32, short: u32| {
-        ((1920.0 * short as f64 / long as f64 / 2.0).round_ties_even() * 2.0) as u32
+        ((960.0 * short as f64 / long as f64).round_ties_even() as u32).max(1) * 2
     };
     if w >= h {
         (1920, short(w, h))
@@ -456,14 +473,22 @@ pub fn web_size((w, h): (u32, u32)) -> (u32, u32) {
 /// `--crop` in px: left, top, right, bottom (row L9); the window may reach past the picture.
 pub fn crop_rect((w, h): (u32, u32), [x, y, cw, ch]: [f64; 4]) -> [i64; 4] {
     let px = |size: u32, percent: f64| (size as f64 * percent / 100.0).round_ties_even() as i64;
-    let (left, top) = (px(w, x), px(h, y));
-    [left, top, left + px(w, cw).max(1), top + px(h, ch).max(1)]
+    // Dimensions beyond u32 already exceed the pixel limit. Once a window lies
+    // wholly outside an edge, shifting it farther only increases ffmpeg's pad.
+    let axis = |size, origin, extent| {
+        let span = px(size, extent).clamp(1, i64::from(u32::MAX));
+        let start = px(size, origin).clamp(-span, i64::from(size));
+        (start, start + span)
+    };
+    let (left, right) = axis(w, x, cw);
+    let (top, bottom) = axis(h, y, ch);
+    [left, top, right, bottom]
 }
 
 /// The picture through `--crop`; outside it is black. A window over `picture::MAX_PIXELS` is an error: it is allocated whole.
-pub fn crop(picture: &RgbImage, spec: [f64; 4]) -> Result<RgbImage> {
+pub fn crop(picture: &RgbImage, spec: [f64; 4]) -> Result<Cow<'_, RgbImage>> {
     if spec == FULL {
-        return Ok(picture.clone());
+        return Ok(Cow::Borrowed(picture));
     }
     let [left, top, right, bottom] = crop_rect(picture.dimensions(), spec);
     let most = picture::MAX_PIXELS;
@@ -477,7 +502,7 @@ pub fn crop(picture: &RgbImage, spec: [f64; 4]) -> Result<RgbImage> {
             *pixel = *picture.get_pixel(sx as u32, sy as u32);
         }
     }
-    Ok(out)
+    Ok(Cow::Owned(out))
 }
 
 /// `--crop` as ffmpeg filters (with a trailing comma) for frames of `size`, or nothing: pad with black to take in the window, then crop it.
@@ -486,13 +511,16 @@ fn crop_filter(size: (u32, u32), spec: [f64; 4]) -> String {
         return String::new();
     }
     let [left, top, right, bottom] = crop_rect(size, spec);
-    let (pad_l, pad_t) = ((-left).max(0), (-top).max(0));
+    // A subsampled input rounds padding down to its chroma grid. Multiples
+    // of four cover the 4:1:1 and 4:1:0 grids as well as 4:2:0.
+    let aligned = |px: i64| (px + 3) / 4 * 4;
+    let (pad_l, pad_t) = (aligned((-left).max(0)), aligned((-top).max(0)));
     let (pad_w, pad_h) = (
-        (size.0 as i64).max(right) + pad_l,
-        (size.1 as i64).max(bottom) + pad_t,
+        aligned((size.0 as i64).max(right) + pad_l),
+        aligned((size.1 as i64).max(bottom) + pad_t),
     );
     format!(
-        "pad={pad_w}:{pad_h}:{pad_l}:{pad_t}:black,crop={}:{}:{}:{},",
+        "pad={pad_w}:{pad_h}:{pad_l}:{pad_t}:black,crop={}:{}:{}:{}:exact=1,",
         right - left,
         bottom - top,
         left + pad_l,
@@ -507,7 +535,7 @@ pub fn colours(options: &Options) -> Result<Theme> {
         let text = if Path::new(name).is_file() {
             std::fs::read_to_string(name)?
         } else {
-            theme::by_name(name)?
+            theme::by_name(&name.to_string_lossy())?
         };
         colours.overlay(&text);
     }
@@ -521,9 +549,8 @@ pub fn colours(options: &Options) -> Result<Theme> {
 pub fn draw(picture: &RgbImage, options: &Options, frame: bool) -> Result<RgbImage> {
     let picture = crop(picture, options.crop)?;
     let mut options = options.clone();
-    if frame && options.width.is_none() && options.height.is_none() {
-        let (w, h) = web_size(picture.dimensions());
-        (options.width, options.height) = (Some(w), Some(h));
+    if frame {
+        options.set_frame_size(picture.dimensions());
     }
     let mut style = Style::new(&options, colours(&options)?, picture.dimensions())?;
     let art = style.art.cells(&picture)?;
@@ -553,32 +580,38 @@ fn ppm_frame(stream: &mut impl BufRead) -> Option<RgbImage> {
     RgbImage::from_raw(w, h, data)
 }
 
-fn ffmpeg(args: &[&str]) -> Result<std::process::Output> {
-    match Command::new("ffmpeg")
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-    {
-        Ok(output) => Ok(output),
-        Err(e) => err!("cannot run ffmpeg: {e}"),
+fn ffmpeg() -> Command {
+    let mut command = Command::new("ffmpeg");
+    command
+        .args(["-v", "error", "-nostdin"])
+        .stdin(Stdio::null());
+    command
+}
+
+/// Disambiguate local names that ffmpeg or ffprobe would parse as a switch or protocol.
+fn media_path(path: &Path) -> Cow<'_, Path> {
+    let bytes = path.as_os_str().as_bytes();
+    let first = bytes.split(|&byte| byte == b'/').next().unwrap_or_default();
+    if first.starts_with(b"-") || first.contains(&b':') {
+        Cow::Owned(Path::new(".").join(path))
+    } else {
+        Cow::Borrowed(path)
     }
 }
 
 /// The source's frame at `seconds`, at full size, upright: ffmpeg seeks there before it reads the source, a seek after which ffmpeg n9.0.2 finds no frame of an animated WebP or a raw H.264 stream, not even at 0 s; at 0 s the first frame, taken without a seek; where the seek finds none though the source may run on past `seconds` (ffprobe tells no length, or a longer one) the source is decoded from its start to there.
 fn frame_at(source: &Path, seconds: f64) -> Result<RgbImage> {
-    let (at, path) = (format!("{seconds:?}"), source.to_string_lossy());
+    let at = format!("{seconds:?}");
     let seek = ["-ss", at.as_str()];
     let grab = |before: &[&str], after: &[&str]| -> Result<(Option<RgbImage>, String)> {
-        let output = ffmpeg(
-            &[
-                &["-v", "error", "-nostdin"][..],
-                before,
-                &["-i", &*path],
-                after,
-                &["-frames:v", "1", "-f", "image2pipe", "-c:v", "ppm", "-"],
-            ]
-            .concat(),
-        )?;
+        let output = ffmpeg()
+            .args(before)
+            .arg("-i")
+            .arg(source)
+            .args(after)
+            .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "ppm", "-"])
+            .output()
+            .map_err(|e| Error(format!("cannot run ffmpeg: {e}")))?;
         let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
         Ok((ppm_frame(&mut BufReader::new(&output.stdout[..])), said))
     };
@@ -593,7 +626,7 @@ fn frame_at(source: &Path, seconds: f64) -> Result<RgbImage> {
     }
     frame.ok_or_else(|| {
         Error(if said.is_empty() {
-            format!("no frame at {at} s in {path}")
+            format!("no frame at {at} s in {}", source.display())
         } else {
             said
         })
@@ -623,25 +656,24 @@ fn length(source: &Path) -> Option<f64> {
 fn vaapi(width: u32, height: u32) -> bool {
     let source = format!("color=s={width}x{height}:d=0.04");
     Path::new(VAAPI).exists()
-        && ffmpeg(&[
-            "-v",
-            "error",
-            "-nostdin",
-            "-vaapi_device",
-            VAAPI,
-            "-f",
-            "lavfi",
-            "-i",
-            &source,
-            "-vf",
-            "format=nv12,hwupload",
-            "-c:v",
-            "h264_vaapi",
-            "-f",
-            "null",
-            "-",
-        ])
-        .is_ok_and(|output| output.status.success())
+        && ffmpeg()
+            .args([
+                "-vaapi_device",
+                VAAPI,
+                "-f",
+                "lavfi",
+                "-i",
+                &source,
+                "-vf",
+                "format=nv12,hwupload",
+                "-c:v",
+                "h264_vaapi",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .is_ok_and(|output| output.status.success())
 }
 
 fn gcd(a: u64, b: u64) -> u64 {
@@ -750,7 +782,9 @@ fn video(
 ) -> std::result::Result<(), Stop> {
     let ((num, den), total) = rate_and_total(source)?;
     let cropped = crop(first, options.crop)?;
-    let mut style = Style::new(options, colours(options)?, cropped.dimensions())?;
+    let mut options = options.clone();
+    options.set_frame_size(cropped.dimensions());
+    let mut style = Style::new(&options, colours(&options)?, cropped.dimensions())?;
     let rows = style.art.cells(&cropped)?.rows;
     style.layout(rows as u32);
     let (w, h) = style.size(true);
@@ -798,8 +832,8 @@ fn video(
         return Err(Stop::Interrupted(None));
     }
     let (mut decode, mut encode) = start(
-        Command::new("ffmpeg")
-            .args(["-v", "error", "-nostdin", "-i"])
+        ffmpeg()
+            .arg("-i")
             .arg(source)
             .args([
                 "-an",
@@ -812,7 +846,6 @@ fn video(
                 "ppm",
                 "-",
             ])
-            .stdin(Stdio::null())
             .stdout(Stdio::piped()),
         Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
@@ -824,7 +857,7 @@ fn video(
             .args(["-map", "0:v", "-map", "1:a?"])
             .args(codec)
             .args(["-c:a", "aac", "-af", &pad, "-shortest"])
-            .arg(out)
+            .arg(media_path(out).as_os_str())
             .stdin(Stdio::piped()),
     )?;
     let shown = if total > 0 {
@@ -941,6 +974,11 @@ fn run(options: &Options) -> std::result::Result<PathBuf, Stop> {
         Opened::TooLarge(message) => return Err(Stop::Failed(message)),
         Opened::Animation | Opened::NotImage => None, // a video, an animation, or no picture: ffmpeg tries
     };
+    let media = if source.is_file() {
+        media_path(source)
+    } else {
+        Cow::Borrowed(source.as_path())
+    };
     if let Some(at) = options.at {
         if still.is_some() {
             return Err(Stop::Usage(
@@ -952,7 +990,7 @@ fn run(options: &Options) -> std::result::Result<PathBuf, Stop> {
             .clone()
             .unwrap_or_else(|| out_name(source, Some(at), false));
         png_only(&out)?;
-        save(&draw(&frame_at(source, at)?, options, true)?, &out)?;
+        save(&draw(&frame_at(&media, at)?, options, true)?, &out)?;
         return Ok(out);
     }
     let Some(still) = still else {
@@ -960,13 +998,8 @@ fn run(options: &Options) -> std::result::Result<PathBuf, Stop> {
             .output
             .clone()
             .unwrap_or_else(|| out_name(source, None, true));
-        let first = frame_at(source, 0.0)?;
-        let mut options = options.clone();
-        if options.width.is_none() && options.height.is_none() {
-            let (w, h) = web_size(crop(&first, options.crop)?.dimensions());
-            (options.width, options.height) = (Some(w), Some(h));
-        }
-        video(&options, source, &out, &first)?;
+        let first = frame_at(&media, 0.0)?;
+        video(options, &media, &out, &first)?;
         return Ok(out);
     };
     let out = options
@@ -992,7 +1025,8 @@ fn run(options: &Options) -> std::result::Result<PathBuf, Stop> {
             .unwrap_or(still.pic),
         _ => still.pic,
     };
-    let picture = crop(&picture::flatten(&pic, colours.background), options.crop)?;
+    let flattened = picture::flatten(&pic, colours.background);
+    let picture = crop(&flattened, options.crop)?;
     let art = style.art.cells(&picture)?;
     style.layout(art.rows as u32);
     save(&style.paint(&art, false), &out)?;
@@ -1121,6 +1155,22 @@ mod tests {
     }
 
     #[test]
+    fn crops_outside_the_picture_stay_black_and_oversize_crops_are_refused() {
+        let white = RgbImage::from_pixel(8, 8, image::Rgb([255; 3]));
+        for offset in [1e30, -1e30, 53_687_091_200.0] {
+            let cut = crop(&white, [offset, 0.0, 100.0, 100.0]).unwrap();
+            assert_eq!(cut.as_ref(), &RgbImage::new(8, 8));
+        }
+        assert!(crop(&white, [0.0, 0.0, 1e30, 1e30]).is_err());
+    }
+
+    #[test]
+    fn even_frame_dimensions_are_at_least_two_pixels() {
+        assert_eq!(web_size((4000, 1)), (1920, 2));
+        assert_eq!(web_size((1, 4000)), (2, 1920));
+    }
+
+    #[test]
     fn names_sizes_crops() {
         assert_eq!(
             out_name(Path::new("/d/a.b.png"), None, false),
@@ -1157,7 +1207,7 @@ mod tests {
         assert_eq!(crop_filter((200, 100), FULL), "");
         assert_eq!(
             crop_filter((200, 100), [-10.0, 0.0, 120.0, 100.0]),
-            "pad=240:100:20:0:black,crop=240:100:0:0,"
+            "pad=240:100:20:0:black,crop=240:100:0:0:exact=1,"
         );
         let white = RgbImage::from_pixel(100, 100, image::Rgb([255, 255, 255]));
         let cut = crop(&white, [50.0, 0.0, 100.0, 100.0]).unwrap();

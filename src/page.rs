@@ -288,7 +288,7 @@ impl Page {
     fn settings(&self, theme: usize) -> Options {
         let (w, h) = self.target();
         Options {
-            theme: (theme > 0).then(|| self.themes[theme].0.clone()),
+            theme: (theme > 0).then(|| self.themes[theme].0.as_str().into()),
             columns: Some(self.columns()),
             width: Some(w),
             height: Some(h),
@@ -1983,7 +1983,7 @@ echo '[{"width": 2560, "height": 1440, "focused": true}]'
         assert!(*stage.preview() == twin);
         stage.keys(&[b"s"]);
         let mut named = stage.page.settings(0);
-        named.theme = Some("Twin".to_string());
+        named.theme = Some("Twin".into());
         let file = stage.saved();
         assert!(file == convert::draw(&stage.page.picture, &named, false).unwrap());
         // its green in the file, not the current theme's

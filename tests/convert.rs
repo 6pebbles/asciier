@@ -978,6 +978,50 @@ fn the_output_goes_beside_the_input_and_its_path_is_printed() {
 }
 
 #[test]
+fn relative_media_names_can_start_with_a_dash_or_contain_a_colon() {
+    let sandbox = Sandbox::new();
+    let original = silent_clip(&sandbox, "original.mp4", 0.5, "80x40", 4);
+    for name in ["-draft", "scene:1"] {
+        let file = format!("{name}.mp4");
+        std::fs::hard_link(&original, sandbox.path(&file)).unwrap();
+        let out = converted(&sandbox, &["-W", "160", "--", &file]);
+        assert_eq!(out, sandbox.path(format!("{name}-ascii.mp4")));
+        assert_eq!(entry(&sandbox, &out, "v:0", "avg_frame_rate"), "4/1");
+        assert_eq!(frames_in(&sandbox, &out), 2);
+    }
+}
+
+#[test]
+fn video_and_theme_paths_preserve_unix_filename_bytes() {
+    let sandbox = Sandbox::new();
+    let video = OsStr::from_bytes(b"clip-\xff.mp4");
+    let theme = OsStr::from_bytes(b"theme-\xfe.conf");
+    let out = OsStr::from_bytes(b"clip-\xff-ascii-0s.png");
+    let original = silent_clip(&sandbox, "original.mp4", 0.2, "80x40", 10);
+    std::fs::rename(original, sandbox.path(video)).unwrap();
+    std::fs::write(sandbox.path(theme), "background #123456\n").unwrap();
+    let result = sandbox
+        .command(BIN)
+        .current_dir(&sandbox.dir)
+        .args(["convert", "--at", "0", "-W", "160", "--theme"])
+        .arg(theme)
+        .arg(video)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, [out.as_bytes(), b"\n"].concat());
+    assert!(
+        pixels(&sandbox.path(out))
+            .pixels()
+            .any(|px| px.0 == [0x12, 0x34, 0x56])
+    );
+}
+
+#[test]
 fn at_on_an_image_is_a_usage_error() {
     // row C5: bin/ascii-convert:530 at tag python-final: exit 2, `--at takes a video's frame; this is an image` after the usage, for an SVG too, and nothing written
     let sandbox = Sandbox::new();
@@ -2128,6 +2172,39 @@ fn decode_filter(sandbox: &Sandbox) -> String {
 }
 
 #[test]
+fn video_crops_keep_single_pixels_at_the_picture_edge() {
+    let mut sandbox = Sandbox::new();
+    let file = sandbox.path("white.mp4");
+    ffmpeg(
+        &sandbox,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=white:s=80x40:r=10:d=0.2",
+            "-c:v",
+            "libx264",
+            file.to_str().unwrap(),
+        ],
+    );
+    wrap_ffmpeg(&mut sandbox);
+    for (crop, outside) in [("0,0,100,2.5", false), ("-1.25,0,1.25,100", true)] {
+        converted(
+            &sandbox,
+            &["--crop", crop, "-W", "160", "-H", "48", "white.mp4"],
+        );
+        let frames = ppm_frames(&std::fs::read(sandbox.path("decode.ppm")).unwrap());
+        assert_eq!(frames.len(), 2);
+        assert!(
+            frames
+                .iter()
+                .all(|(_, _, rgb)| rgb.iter().all(|&v| if outside { v < 16 } else { v > 235 })),
+            "{crop}"
+        );
+    }
+}
+
+#[test]
 fn frames_are_decoded_cropped_at_the_detail_the_columns_take() {
     // row X2: convert_video of bin/ascii-convert:401 at tag python-final builds the decoder's filters: the crop window, padded with black first; the source's average rate; a scale down to 8 px a column, never up, to an even height; hqdn3d 2 and 1.5 over the downscale, then 3 and 2.25; seen through the ffmpeg wrapper, its arguments and its frames
     let mut sandbox = Sandbox::new();
@@ -2155,7 +2232,7 @@ fn frames_are_decoded_cropped_at_the_detail_the_columns_take() {
     );
     assert_eq!(
         filter,
-        "pad=192:90:16:0:black,crop=192:90:0:0,fps=25/1,scale='min(iw,216)':-2,hqdn3d=2:1.5:3:2.25"
+        "pad=192:92:16:0:black,crop=192:90:0:0:exact=1,fps=25/1,scale='min(iw,216)':-2,hqdn3d=2:1.5:3:2.25"
     );
     for (w, h, rgb) in &frames {
         assert_eq!((*w, *h), (192, 90));
