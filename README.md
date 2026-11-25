@@ -2,6 +2,10 @@
 
 Terminal viewer and converter: video, audio and images as ASCII art in the kitty theme's colours.
 
+![Asciier playing a ringed planet and switching between colour, monochrome and glyph modes](docs/demo.webp)
+
+[Download the 10-second terminal recording (MP4).](https://github.com/6pebbles/asciier/releases/download/v0.1.1/asciier-demo.mp4)
+
 ```
 asciier FILE                      view
 asciier convert [options] INPUT   write PNG or MP4
