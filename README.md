@@ -2,9 +2,11 @@
 
 Terminal viewer and converter: video, audio and images as ASCII art in the kitty theme's colours.
 
-![Asciier playing a ringed planet and switching between colour, monochrome and glyph modes](docs/demo.webp)
+![Asciier playing a ringed planet in GitHub Dark, cropping a paused frame, choosing a theme and exporting a PNG](docs/demo.webp)
 
-[Download the 10-second terminal recording (MP4).](https://github.com/6pebbles/asciier/releases/download/v0.1.1/asciier-demo.mp4)
+Press `Space` to pause, `.` to step one frame and `r` to open Render. In **Crop**, use `-` and `+` to resize the window, the arrow keys to move it and `Enter` to return. In **Theme**, move through the list to preview colours. Press `Enter` to choose a theme and `s` to export the PNG.
+
+[Download the demo (MP4)](https://github.com/6pebbles/asciier/releases/download/v0.1.1/asciier-render.mp4) · [Exported frame (PNG)](https://github.com/6pebbles/asciier/releases/download/v0.1.1/orbit-frame.png)
 
 ```
 asciier FILE                      view
